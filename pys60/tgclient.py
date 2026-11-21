@@ -389,9 +389,9 @@ class Client:
         """Downloads a file (info from photo_preview / audio_info) to path.
         Pieces go to path + ".part" as they arrive, so an interrupted download
         continues where it stopped; the file is renamed when complete.
-        progress(done_bytes) is called after every 128 KB piece."""
+        progress(done_bytes) is called after every 32 KB piece."""
         import os
-        CH = 131072
+        CH = 32768          # small pieces: less memory per decrypted packet
         part = path + ".part"
         start = 0
         try:
@@ -420,7 +420,7 @@ class Client:
             state["offset"] = state["offset"] + len(data)
             if progress is not None:
                 progress(state["offset"])
-            if len(data) == CH and state["offset"] < 400 * CH:
+            if len(data) == CH and state["offset"] < 1600 * CH:
                 fetch(state["offset"])
                 return
             try:

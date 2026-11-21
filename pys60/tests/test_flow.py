@@ -178,10 +178,10 @@ def handle(f):
         state["deleted"] = (f["id"], f.get("revoke"))
         return {"_": "messages.affectedMessages", "pts": 1, "pts_count": 1}
     if n == "upload.getFile":
-        assert f["location"]["_"] == "inputDocumentFileLocation" and f["limit"] == 131072
+        assert f["location"]["_"] == "inputDocumentFileLocation" and f["limit"] == 32768
         size = 300000 - f["offset"]
         return {"_": "upload.file", "type": {"_": "storage.fileMp3"}, "mtime": 0,
-                "bytes": "x" * min(size, 131072)}
+                "bytes": "x" * min(size, 32768)}
     if n == "users.getFullUser":
         assert f["id"]["user_id"] == 42
         return {"_": "users.userFull", "full_user": {"_": "userFull", "id": 42, "about": "Retro phone fan",

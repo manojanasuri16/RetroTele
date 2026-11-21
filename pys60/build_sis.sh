@@ -38,7 +38,7 @@ cp assets/* build/app/          # emoji sheets (Twemoji, CC-BY 4.0)
 $PY $ENS py2sis --uid=0xE7A3D5C2 --appname=RetroTele --version=$VERSION \
   --caption=RetroTele --shortcaption=RetroTele --vendor=RetroTele --icon=icon.svg \
   --caps=NetworkServices+LocalServices+ReadUserData+WriteUserData+UserEnvironment \
-  --drive=C --heapsize=4k,8M --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
+  --drive=C --heapsize=4k,24M --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
   build/app dist/RetroTele.sis </dev/null >build/py2sis.log
 echo "built dist/RetroTele.sis"
 ls -la dist

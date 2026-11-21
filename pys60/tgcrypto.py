@@ -600,13 +600,14 @@ class IgeJob:
         else:
             self.x = list(v[0:8])
             self.y = list(v[8:16])
-        self.w = struct.unpack(">%dH" % (len(data) / 2), data)
-        self.i = 0
-        self.out = []
+        self.data = data
+        self.n = len(data) / 2       # number of 16-bit words
+        self.i = 0                   # words done
+        self.out = []                # packed output pieces
         self.decrypt = decrypt
 
     def result(self):
-        return struct.pack(">%dH" % len(self.out), *self.out)
+        return "".join(self.out)
 
     def step(self, nblocks):
         """Processes up to nblocks 16-byte blocks; returns 1 when finished."""
@@ -626,11 +627,14 @@ class IgeJob:
             S = _SBOX
         x = self.x
         y = self.y
-        w = self.w
-        out = self.out
-        i = self.i
-        n = len(w)
-        stop = min(n, i + nblocks * 8)
+        start = self.i
+        stop = min(self.n, start + nblocks * 8)
+        # only this slice is unpacked: a 128 KB packet would otherwise need
+        # ~130,000 int objects at once (several MB on the phone)
+        w = struct.unpack(">%dH" % (stop - start), self.data[start * 2:stop * 2])
+        out = []
+        i = 0
+        stop = stop - start
         while i < stop:
             blk = w[i:i + 8]
             s0h = blk[0] ^ x[0] ^ kh[0]
@@ -724,13 +728,19 @@ class IgeJob:
             i = i + 8
         self.x = x
         self.y = y
-        self.i = i
-        return i >= n
+        self.i = start + i
+        if out:
+            self.out.append(struct.pack(">%dH" % len(out), *out))
+        if self.i >= self.n:
+            self.data = None
+            return 1
+        return 0
 
 
 def _ige_fast(data, key, iv, decrypt):
     job = IgeJob(data, key, iv, decrypt)
-    job.step(len(data))
+    while not job.step(256):
+        pass
     return job.result()
 
 

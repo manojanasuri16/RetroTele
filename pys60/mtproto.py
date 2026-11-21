@@ -332,7 +332,8 @@ class Session:
             try:
                 job = self.start_decrypt(pkt)
                 if len(pkt) <= 1600:
-                    job[0].step(len(pkt))
+                    while not job[0].step(256):
+                        pass
                     self.finish_decrypt(job)
                 else:
                     self.rx_job = job
@@ -517,7 +518,8 @@ class Session:
 
     def decrypt_packet(self, pkt):
         job = self.start_decrypt(pkt)
-        job[0].step(len(pkt))
+        while not job[0].step(256):
+            pass
         self.finish_decrypt(job)
 
     def handle(self, msg_id, seqno, body):
