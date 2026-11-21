@@ -27,7 +27,7 @@ class Canvas:
 
 appuifw.Canvas = Canvas
 appuifw.note = lambda *a: None
-import retrotele, tgclient
+import retrotele, tgclient, tgui
 from mtproto import RpcError
 
 NOW = int(time.time())
@@ -92,6 +92,16 @@ DIALOGS = [
     ("u12", M("u12", 88, 12, "ok see you tomorrow at the office", 90000), 1, 0, 0),
 ]
 
+PHOTO = {"_": "photo", "id": 99, "access_hash": 1, "file_reference": "r", "date": 0, "dc_id": 2,
+         "sizes": [{"_": "photoSize", "type": "m", "w": 320, "h": 240, "size": 9000}]}
+VIDEO = {"_": "document", "id": 98, "access_hash": 1, "file_reference": "r", "date": 0, "dc_id": 2,
+         "mime_type": "video/mp4", "size": 1, "dc_id": 2,
+         "thumbs": [{"_": "photoSize", "type": "m", "w": 320, "h": 180, "size": 5000}],
+         "attributes": [{"_": "documentAttributeAnimated"}, {"_": "documentAttributeVideo", "duration": 3, "w": 320, "h": 180}]}
+STICKER = {"_": "document", "id": 97, "access_hash": 1, "file_reference": "r", "date": 0, "dc_id": 2,
+           "mime_type": "image/webp", "size": 1, "thumbs": [],
+           "attributes": [{"_": "documentAttributeSticker", "alt": "\xf0\x9f\x98\x82", "stickerset": {"_": "inputStickerSetEmpty"}}]}
+
 HISTORY = [
     {"_": "messageService", "id": 4380, "peer_id": P("h700"), "from_id": {"_": "peerUser", "user_id": 14},
      "date": NOW - 90000, "action": {"_": "messageActionChatJoinedByLink"}},
@@ -99,10 +109,10 @@ HISTORY = [
       "after the splash screen.", 86000),
     M("h700", 4391, 14, "Try the S60v3 signed build, the unsigned one crashes", 85000,
       reply_to={"_": "messageReplyHeader", "reply_to_msg_id": 4390}),
-    M("h700", 4395, 13, "", 4000, media={"_": "messageMediaPhoto"}),
-    M("h700", 4396, 7, "Running RetroTele on my N79 right now \\o/", 3000, 1),
-    M("h700", 4397, 14, "", 2500, media={"_": "messageMediaDocument", "document": {
-        "_": "document", "attributes": [{"_": "documentAttributeSticker", "alt": ""}]}}),
+    M("h700", 4395, 13, "My N79 setup", 4000, media={"_": "messageMediaPhoto", "photo": PHOTO}),
+    M("h700", 4396, 7, "Running RetroTele on my N79 right now \xf0\x9f\x98\x8e\xf0\x9f\x94\xa5", 3000, 1),
+    M("h700", 4397, 14, "", 2500, media={"_": "messageMediaDocument", "document": STICKER}),
+    M("h700", 4399, 14, "", 2000, media={"_": "messageMediaDocument", "document": VIDEO}),
     M("h700", 4398, 13, "Also, cool cats", 1200,
       fwd_from={"_": "messageFwdHeader", "from_name": "Cat Facts", "date": 0}),
 ]
@@ -111,7 +121,7 @@ PRIVATE = [
     M("u11", 70, 11, "Bro did you install that app?", 9000),
     M("u11", 71, 7, "Yes! Telegram on the N79 :)", 8800, 1),
     M("u11", 72, 7, "It even shows read ticks and replies", 8700, 1),
-    M("u11", 77, 11, "Hie", 600),
+    M("u11", 77, 11, "Hie \xf0\x9f\x91\x8b\xf0\x9f\x98\x8a", 600),
 ]
 
 
@@ -159,6 +169,9 @@ class FakeSession:
                 ms = list(PRIVATE)
             ms.reverse()
             res = {"_": "messages.messages", "messages": ms, "users": USERS, "chats": CHATS}
+        elif n == "upload.getFile":
+            res = {"_": "upload.file", "type": {"_": "storage.fileJpeg"}, "mtime": 0,
+                   "bytes": open(os.environ["RT_PHOTO"], "rb").read()}
         elif n == "contacts.getContacts":
             res = {"_": "contacts.contacts", "contacts": [
                 {"_": "contact", "user_id": i, "mutual": 1} for i in (11, 12, 15)],
@@ -190,6 +203,8 @@ app.cfg = tgclient.Store(TMP + "/s.txt")
 app.store = tgclient.Store(TMP + "/x.txt")
 app.cfg.set("api_id", 1); app.cfg.set("api_hash", "a" * 32); app.cfg.set("apid", 1)
 app.setup_ap = lambda force=0: 1
+app.media = tgui.Media(app, TMP + os.sep)
+tgui.set_asset_dir(os.path.join(HERE, "..", "..", "assets") + os.sep)
 
 
 def snap(name):
@@ -213,8 +228,9 @@ app.list_view.tab = len(tabs) - 1; app.tab_changed(len(tabs) - 1); app.net.run()
 snap("5-contacts")
 app.list_view.tab = 0
 app.open_chat("h700"); app.net.run()
+app.view.draw(); app.net.run()
 snap("6-group-chat")
-app.view.sel = 2
+app.view.sel = 4
 snap("7-selected")
 app.back_to_chats()
 app.open_chat("u11"); app.net.run()

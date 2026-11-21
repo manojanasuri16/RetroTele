@@ -439,6 +439,7 @@ class Session:
     def decrypt_packet(self, pkt):
         if pkt[:8] != self.auth_key_id:
             raise TLError("wrong auth_key_id")
+        t0 = time.clock()
         msg_key = pkt[8:24]
         k = self.auth_key
         a = sha256(msg_key + k[8:44])
@@ -450,11 +451,16 @@ class Session:
             raise TLError("msg_key mismatch")
         if plain[8:16] != self.session_id:
             raise TLError("other session")
+        t1 = time.clock()
         r = Reader(self.schema, plain, 16)
         msg_id = r.long()
         seqno = r.int()
         n = r.int()
         self.handle(msg_id, seqno, plain[32:32 + n])
+        t2 = time.clock()
+        if t2 - t0 > 0.5:
+            self.log("slow packet %d bytes: decrypt %.2fs, handle %.2fs" %
+                     (len(pkt), t1 - t0, t2 - t1))
 
     def handle(self, msg_id, seqno, body):
         if seqno % 2 == 1:

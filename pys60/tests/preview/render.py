@@ -45,8 +45,14 @@ def paint(screen):
             (x, y), text, fill, (bold, size) = op[1], op[2], op[3], op[4]
             d.text((x * S, y * S), text, fill=col(fill), font=font(bold, size), anchor="ls")
         elif k == "photo":
-            path, size, target, masked = op[1:]
-            ph = Image.open(path).convert("RGB").resize((size[0] * S, size[1] * S))
+            path, size, target, masked = op[1:5]
+            src = op[5] if len(op) > 5 else None
+            ph = Image.open(path).convert("RGB")
+            if src:
+                (sx, sy), (ex, ey) = src
+                ph = ph.crop((sx, sy, ex, ey)).resize(((ex - sx) * S, (ey - sy) * S))
+            else:
+                ph = ph.resize((size[0] * S, size[1] * S))
             m = Image.new("L", ph.size, 0)
             ImageDraw.Draw(m).ellipse([0, 0, ph.size[0], ph.size[1]], fill=255)
             im.paste(ph, (target[0] * S, target[1] * S), m if masked else None)

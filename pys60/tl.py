@@ -37,7 +37,8 @@ class Schema:
     def __init__(self, path):
         self.by_id = {}     # id -> line (constructors)
         self.by_name = {}   # name -> (id, line) (constructors and functions)
-        self.parsed = {}    # name -> (id, name, params, result, is_func)
+        self.parsed = {}    # name -> (id, name, params, result, is_func, compiled)
+        self.by_cid_cache = {}
         self.layer = 0
         f = open(path, "rb")
         text = f.read()
@@ -83,11 +84,22 @@ class Schema:
                 flag = cond[:d]
                 bit = int(cond[d + 1:])
             params.append((pname, ptype, flag, bit))
-        entry = (cid, name, params, result, kind == "F")
+        compiled = []
+        for pname, ptype, flag, bit in params:
+            mask = 0
+            if flag is not None:
+                mask = pow(2, bit)
+            code, sub = compile_type(ptype)
+            compiled.append((pname, code, flag, mask, sub))
+        entry = (cid, name, params, result, kind == "F", compiled)
         self.parsed[name] = entry
+        self.by_cid_cache[cid] = entry
         return entry
 
     def by_cid(self, cid):
+        e = self.by_cid_cache.get(cid)
+        if e is not None:
+            return e
         line = self.by_id.get(cid)
         if line is None:
             return None
@@ -159,7 +171,7 @@ class Writer:
         if isinstance(value, Raw):
             return value.data
         e = self.schema.get(value["_"])
-        cid, name, params, result, is_func = e
+        cid, name, params, result, is_func = e[:5]
         out = []
         if boxed or is_func:
             out.append(pack_uint(cid))
@@ -240,6 +252,45 @@ def gunzip(data):
     return zlib.decompressobj(-15).decompress(data[i:])
 
 
+# field type codes for the reader
+C_INT = 0
+C_FLAGS = 1
+C_LONG = 2
+C_BYTES = 3
+C_TRUE = 4
+C_BOOL = 5
+C_OBJ = 6
+C_VEC = 7
+C_BVEC = 8
+C_I128 = 9
+C_I256 = 10
+C_DOUBLE = 11
+C_BARE = 12
+
+_SIMPLE = {"int": C_INT, "#": C_FLAGS, "long": C_LONG, "string": C_BYTES, "bytes": C_BYTES,
+           "true": C_TRUE, "Bool": C_BOOL, "int128": C_I128, "int256": C_I256,
+           "double": C_DOUBLE}
+
+
+def compile_type(t):
+    """TL type text -> (code, sub). sub is the element (code, sub) for vectors
+    and the constructor name for bare types."""
+    c = _SIMPLE.get(t)
+    if c is not None:
+        return c, None
+    if t[:7] == "Vector<":
+        return C_VEC, compile_type(t[7:-1])
+    if t[:7] == "vector<":
+        return C_BVEC, compile_type(t[7:-1])
+    if _is_bare(t):
+        name = t.split(" ")[0]
+        if name[:1] == "%":
+            name = name[1:]
+            name = name[0].lower() + name[1:]
+        return C_BARE, name
+    return C_OBJ, None
+
+
 class Reader:
     def __init__(self, schema, data, pos=0):
         self.schema = schema
@@ -298,55 +349,91 @@ class Reader:
         return self.fields(e)
 
     def fields(self, e):
-        cid, name, params, result, is_func = e
-        o = {"_": name}
-        for pname, ptype, flag, bit in params:
+        o = {"_": e[1]}
+        data = self.data
+        unpack = struct.unpack
+        for pname, code, flag, mask, sub in e[5]:
             if flag is not None:
-                if not (o[flag] & pow(2, bit)):
+                if not (o[flag] & mask):
                     continue
-                if ptype == "true":
+                if code == C_TRUE:
                     o[pname] = 1
                     continue
-            o[pname] = self.value(ptype)
+            p = self.pos
+            if code == C_INT:
+                o[pname] = unpack("<i", data[p:p + 4])[0]
+                self.pos = p + 4
+            elif code == C_FLAGS:
+                o[pname] = unpack("<I", data[p:p + 4])[0]
+                self.pos = p + 4
+            elif code == C_BYTES:
+                n = ord(data[p])
+                if n < 254:
+                    o[pname] = data[p + 1:p + 1 + n]
+                    self.pos = p + ((n + 4) / 4) * 4
+                else:
+                    n = unpack("<I", data[p + 1:p + 4] + "\x00")[0]
+                    o[pname] = data[p + 4:p + 4 + n]
+                    self.pos = p + ((n + 7) / 4) * 4
+                if self.pos > len(data):
+                    raise TLError("TL data ended early")
+            elif code == C_LONG:
+                lo, hi = unpack("<Ii", data[p:p + 8])
+                if hi == 0:
+                    o[pname] = lo
+                else:
+                    o[pname] = hi * P32 + lo
+                self.pos = p + 8
+            else:
+                o[pname] = self.typed(code, sub)
         return o
 
-    def value(self, t):
-        if t == "int":
-            return self.int()
-        if t == "#":
-            return self.uint()
-        if t == "long":
-            return self.long()
-        if t == "string" or t == "bytes":
-            return self.bytes()
-        if t == "Bool":
+    def typed(self, code, sub):
+        if code == C_OBJ or code == C_BOOL:
             return self.obj()
-        if t == "int128":
-            return self.raw(16)
-        if t == "int256":
-            return self.raw(32)
-        if t == "double":
-            return self.double()
-        if t[:7] == "Vector<" or t[:7] == "vector<":
-            inner = t[7:-1]
-            if t[0] == "V":
+        if code == C_INT:
+            return self.int()
+        if code == C_FLAGS:
+            return self.uint()
+        if code == C_LONG:
+            return self.long()
+        if code == C_BYTES:
+            return self.bytes()
+        if code == C_VEC or code == C_BVEC:
+            if code == C_VEC:
                 cid = self.uint()
                 if cid == ID_GZIP:
                     r = Reader(self.schema, gunzip(self.bytes()))
-                    return r.value(t)
+                    return r.typed(code, sub)
                 if cid != ID_VECTOR:
                     raise TLError("expected vector, got %08x" % cid)
             n = self.int()
+            ec, es = sub
             out = []
             i = 0
-            while i < n:
-                out.append(self.value(inner))
-                i = i + 1
+            if ec == C_LONG:
+                while i < n:
+                    out.append(self.long())
+                    i = i + 1
+            elif ec == C_INT:
+                while i < n:
+                    out.append(self.int())
+                    i = i + 1
+            else:
+                while i < n:
+                    out.append(self.typed(ec, es))
+                    i = i + 1
             return out
-        if _is_bare(t):
-            name = t.split(" ")[0]
-            if name[:1] == "%":
-                name = name[1:]
-                name = name[0].lower() + name[1:]
-            return self.fields(self.schema.get(name))
-        return self.obj()
+        if code == C_I128:
+            return self.raw(16)
+        if code == C_I256:
+            return self.raw(32)
+        if code == C_DOUBLE:
+            return self.double()
+        if code == C_BARE:
+            return self.fields(self.schema.get(sub))
+        raise TLError("bad type code %d" % code)
+
+    def value(self, t):
+        code, sub = compile_type(t)
+        return self.typed(code, sub)

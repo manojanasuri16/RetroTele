@@ -33,6 +33,7 @@ rm -rf build/app && mkdir -p build/app
 cp launcher.py build/app/default.py
 cp retrotele.py build/app/rt_app.py
 cp $MODULES schema.txt build/app/
+cp assets/* build/app/          # emoji sheets (Twemoji, CC-BY 4.0)
 
 $PY $ENS py2sis --uid=0xE7A3D5C2 --appname=RetroTele --version=$VERSION \
   --caption=RetroTele --shortcaption=RetroTele --vendor=RetroTele --icon=icon.svg \

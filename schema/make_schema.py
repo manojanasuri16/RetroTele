@@ -27,6 +27,8 @@ users.getUsers users.getFullUser
 contacts.getContacts contacts.resolveUsername contacts.search
 messages.getDialogs messages.getHistory messages.sendMessage messages.readHistory
 messages.getPeerDialogs messages.getMessages messages.setTyping messages.getDialogFilters
+messages.editMessage messages.deleteMessages channels.deleteMessages
+phone.discardCall phone.receivedCall
 channels.readHistory channels.getMessages
 updates.getState updates.getDifference updates.getChannelDifference
 upload.getFile

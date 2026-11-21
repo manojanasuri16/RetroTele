@@ -13,12 +13,16 @@ Modern Symbian Telegram apps such as Symbigram need Qt Quick Components (Symbian
 - Log in with your phone number and the code Telegram sends you, including the two-step verification password
 - Read chats and load older messages automatically by scrolling up. Replies, forwards and media show as labels such as `Photo`, `Voice message 0:04` and `Sticker`.
 - Write messages and reply to a selected one. Any number key in a chat starts a message.
+- **Edit** and **delete** your messages (for you, or for everyone)
+- **Pictures:** photos, GIFs and videos show a preview in the chat (a blurry one at once, then the real picture). Select a message, then *View picture* to see it full screen. Downloads can be turned off in Settings.
+- **Emoji** are drawn as pictures (the phone's fonts have none), and **stickers** show as their big emoji
+- An **incoming Telegram call** pops up so you can decline it, call back by phone, or reply with a message
 - Live incoming messages with a pop-up banner (muted chats stay quiet), plus read receipts and online status
 - Search your chats and contacts, or open any @username
 - **Call** a contact's phone number as a normal phone call
 - The chat list is cached, so it appears instantly when the app starts
 
-There's no media download, secret chats, or **Telegram** voice/video calls. Those need real-time audio streaming with the Opus codec, which Python for S60 1.4.5 can't do, so "Call" uses the normal phone line.
+There's no secret chats, file/video download, playback of GIFs or animated stickers, or answering **Telegram** voice/video calls. Calls need real-time audio streaming with the Opus codec and GIFs/stickers are MP4/WebP/Lottie, none of which Python for S60 1.4.5 can decode, so "Call" uses the normal phone line.
 
 ### Keys
 
@@ -62,3 +66,7 @@ sh pys60/build_sis.sh          # -> pys60/dist/RetroTele.sis
 `schema/make_schema.py` regenerates `pys60/schema.txt` from Telegram Desktop's `api.tl` and `mtproto.tl` (currently layer 233).
 
 The PyS60 networking pitfalls (main-thread sockets, never `close()`) are the same as in [RetroSend](https://github.com/manojanasuri16/RetroSend/blob/main/docs/PYS60-NOTES.md). Crypto code follows the Python 2.2 integer rules described at the top of `pys60/tgcrypto.py`, which `tools/check_ints.py` enforces.
+
+## Credits
+
+Emoji images: [Twemoji](https://github.com/twitter/twemoji) by Twitter, Inc and other contributors, licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). The sprite sheets in `pys60/assets/` are built by `tools/emoji/make_emoji.py`.

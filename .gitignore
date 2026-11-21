@@ -5,3 +5,5 @@ tools/ensymble
 phone-installs/
 *.pyc
 pys60/dist/
+tools/emoji/cache/
+tools/py22/

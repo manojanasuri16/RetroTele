@@ -150,6 +150,58 @@ def text_of(t):
     return t or ""
 
 
+SIZE_ORDER = ["m", "x", "s", "y", "c", "b", "a"]
+
+
+def pick_size(sizes):
+    """(type, w, h, stripped bytes) of the best preview size (about 320 px)."""
+    best = None
+    stripped = None
+    for sz in sizes or []:
+        n = sz.get("_")
+        if n == "photoStrippedSize":
+            stripped = sz.get("bytes")
+        elif n in ("photoSize", "photoSizeProgressive", "photoCachedSize"):
+            t = sz.get("type", "")
+            if t in SIZE_ORDER and (best is None or
+                                    SIZE_ORDER.index(t) < SIZE_ORDER.index(best[0])):
+                best = (t, sz.get("w", 0), sz.get("h", 0))
+    return best, stripped
+
+
+def photo_preview(ph):
+    if type(ph) is not type({}) or ph.get("_") != "photo":
+        return None
+    best, stripped = pick_size(ph.get("sizes"))
+    if best is None:
+        return None
+    return {"id": "p%d%s" % (ph["id"], best[0]), "dc": ph.get("dc_id", 0), "w": best[1],
+            "h": best[2], "stripped": stripped, "badge": "",
+            "loc": {"_": "inputPhotoFileLocation", "id": ph["id"],
+                    "access_hash": ph["access_hash"], "file_reference": ph["file_reference"],
+                    "thumb_size": best[0]}}
+
+
+def doc_preview(doc, label):
+    """Preview picture of a video, GIF or file (its JPEG thumbnail), if any."""
+    if type(doc) is not type({}) or doc.get("_") != "document":
+        return None
+    mime = doc.get("mime_type", "")
+    if mime.find("webp") >= 0 or mime.find("tgsticker") >= 0:
+        return None
+    best, stripped = pick_size(doc.get("thumbs"))
+    if best is None:
+        return None
+    badge = label
+    if mime[:6] == "image/" and label[:3] != "GIF":
+        badge = ""
+    return {"id": "d%d%s" % (doc["id"], best[0]), "dc": doc.get("dc_id", 0), "w": best[1],
+            "h": best[2], "stripped": stripped, "badge": badge,
+            "loc": {"_": "inputDocumentFileLocation", "id": doc["id"],
+                    "access_hash": doc["access_hash"], "file_reference": doc["file_reference"],
+                    "thumb_size": best[0]}}
+
+
 class Client:
     def __init__(self, net, schema, ui, store, api_id, api_hash, version="1.0.0"):
         self.net = net
@@ -242,6 +294,16 @@ class Client:
     def call(self, func, on_ok, on_err, dc=None, tries=0):
         def err(e, self=self, func=func, on_ok=on_ok, on_err=on_err, dc=dc, tries=tries):
             m = e.message
+            if e.code == 303 and tries < 3 and (m[:13] == "FILE_MIGRATE_" or dc is not None):
+                self.file_call(int(m.split("_")[-1]), func, on_ok, on_err, tries + 1)
+                return
+            if dc is not None and dc != self.main_dc:
+                if e.code == 401 and tries < 2:
+                    self.store.set("dc%d_auth" % dc, None)
+                    self.file_call(dc, func, on_ok, on_err, tries + 1)
+                    return
+                on_err(e)
+                return
             if e.code == 303 and tries < 3:
                 new_dc = int(m.split("_")[-1])
                 self.log("%s: moving to DC %d" % (func["_"], new_dc))
@@ -259,6 +321,54 @@ class Client:
             self.collect(res)
             on_ok(res)
         self.session(dc).invoke(func, ok, err)
+
+    def file_call(self, dc, func, on_ok, on_err, tries=0):
+        """Calls func on data centre dc (where a file lives), copying the login
+        there first (auth.exportAuthorization / importAuthorization)."""
+        if not dc or dc == self.main_dc:
+            self.call(func, on_ok, on_err, None, tries)
+            return
+        if self.store.get("dc%d_auth" % dc) == str(self.me):
+            self.call(func, on_ok, on_err, dc, tries)
+            return
+
+        def exported(res, self=self, dc=dc, func=func, on_ok=on_ok, on_err=on_err,
+                     tries=tries):
+            def imported(r, self=self, dc=dc, func=func, on_ok=on_ok, on_err=on_err,
+                         tries=tries):
+                self.store.set("dc%d_auth" % dc, str(self.me))
+                self.store.save()
+                self.call(func, on_ok, on_err, dc, tries)
+            self.session(dc).invoke({"_": "auth.importAuthorization", "id": res["id"],
+                                     "bytes": res["bytes"]}, imported, on_err)
+        self.log("copying login to DC %d" % dc)
+        self.call({"_": "auth.exportAuthorization", "dc_id": dc}, exported, on_err)
+
+    def download(self, info, path, on_ok, on_err):
+        """Downloads a preview picture (info from photo_preview) to path."""
+        CH = 131072
+        chunks = []
+
+        def got(res, self=self, info=info, path=path, on_ok=on_ok, on_err=on_err,
+                chunks=chunks):
+            data = res.get("bytes") or ""
+            chunks.append(data)
+            if len(data) == CH and len(chunks) < 16:
+                fetch(len(chunks) * CH)
+                return
+            try:
+                f = open(path, "wb")
+                f.write("".join(chunks))
+                f.close()
+            except:
+                on_err(RpcError(-4, "cannot save " + path))
+                return
+            on_ok(path)
+
+        def fetch(offset, self=self, info=info, got=got, on_err=on_err):
+            self.file_call(info["dc"], {"_": "upload.getFile", "location": info["loc"],
+                                        "offset": offset, "limit": CH}, got, on_err)
+        fetch(0)
 
     def set_main_dc(self, dc):
         if dc == self.main_dc:
@@ -517,7 +627,8 @@ class Client:
         key = peer_key(m.get("peer_id"))
         d = {"id": m.get("id", 0), "key": key, "out": m.get("out", 0),
              "date": m.get("date", 0), "text": "", "media": "", "reply_to": 0,
-             "edited": 0, "fwd": "", "service": 0, "from": "", "from_key": None}
+             "edited": 0, "fwd": "", "service": 0, "from": "", "from_key": None,
+             "photo": None, "sticker": None}
         if n == "messageEmpty":
             d["text"] = "Deleted message"
             d["service"] = 1
@@ -555,7 +666,14 @@ class Client:
             mn = media["_"]
             label = MEDIA_LABELS.get(mn, mn[12:])
             if mn == "messageMediaDocument":
-                label = doc_label(media.get("document"))
+                doc = media.get("document")
+                label = doc_label(doc)
+                if label[:7] == "Sticker":
+                    d["sticker"] = label[8:]
+                else:
+                    d["photo"] = doc_preview(doc, label)
+            elif mn == "messageMediaPhoto":
+                d["photo"] = photo_preview(media.get("photo"))
             elif mn == "messageMediaPoll":
                 try:
                     label = "Poll: " + text_of(media["poll"]["question"])
@@ -736,6 +854,35 @@ class Client:
             f["reply_to"] = {"_": "inputReplyToMessage", "reply_to_msg_id": reply_to}
         self.call(f, ok, on_err)
 
+    def edit_text(self, key, mid, text, on_ok, on_err):
+        if type(text) is type(u""):
+            text = text.encode("utf-8")
+
+        def ok(res, self=self, on_ok=on_ok):
+            self.handle_updates(res)
+            on_ok(res)
+        self.call({"_": "messages.editMessage", "peer": self.input_peer(key), "id": mid,
+                   "message": text}, ok, on_err)
+
+    def delete_messages(self, key, ids, revoke, on_ok, on_err):
+        """revoke: also delete for the other person / everyone."""
+        if key[0] == "h":
+            f = {"_": "channels.deleteMessages", "id": ids,
+                 "channel": {"_": "inputChannel", "channel_id": long(key[1:]),
+                             "access_hash": self.peer(key).get("hash", 0)}}
+        else:
+            f = {"_": "messages.deleteMessages", "id": ids}
+            if revoke:
+                f["revoke"] = 1
+        self.call(f, on_ok, on_err)
+
+    def decline_call(self, call):
+        self.call({"_": "phone.discardCall", "duration": 0, "connection_id": 0,
+                   "peer": {"_": "inputPhoneCall", "id": call["id"],
+                            "access_hash": call["access_hash"]},
+                   "reason": {"_": "phoneCallDiscardReasonBusy"}},
+                  lambda r: None, lambda e: None)
+
     def mark_read(self, key, max_id):
         if key[0] == "h":
             f = {"_": "channels.readHistory", "max_id": max_id,
@@ -829,6 +976,16 @@ class Client:
             if p is not None:
                 p["status"] = x["status"]
                 self.ui.peer_changed(key)
+        elif n == "updateDeleteMessages":
+            self.ui.messages_deleted(None, x.get("messages", []))
+        elif n == "updateDeleteChannelMessages":
+            self.ui.messages_deleted("h%d" % x["channel_id"], x.get("messages", []))
+        elif n == "updatePhoneCall":
+            c = x.get("phone_call") or {}
+            if c.get("_") == "phoneCallRequested" and c.get("participant_id") == self.me:
+                self.ui.incoming_call("u%d" % c["admin_id"], c)
+            elif c.get("_") == "phoneCallDiscarded":
+                self.ui.call_ended(c.get("id"))
         elif n == "updateUserTyping" or n == "updateChatUserTyping":
             pass
         elif n == "updateChannelTooLong":

@@ -82,47 +82,213 @@ def to_u(s):
         return unicode(s, "latin-1")
 
 
-def width(g, text, f):
+# ---------------------------------------------------------------- emoji
+# The phone's fonts have no emoji. Known emoji are swapped for a private-use
+# character (U+E000 + sheet index) by prep(); width/fit/wrap count each one as
+# EMW pixels and txt() draws it from a sprite sheet pre-blended on the
+# background ("w" white, "o" outgoing green, "b" blue, "t" toast).
+
+ASSET_DIR = [""]
+EMW = 17          # emoji advance in text
+_emoji = {"index": None, "sheets": {}}
+SENT = 57344      # 0xE000
+SENT_END = 57855
+
+
+def set_asset_dir(d):
+    ASSET_DIR[0] = d
+    _emoji["index"] = None
+    _emoji["sheets"] = {}
+
+
+def emoji_index():
+    idx = _emoji["index"]
+    if idx is None:
+        idx = {}
+        try:
+            f = open(ASSET_DIR[0] + "emoji.txt", "rb")
+            n = 0
+            for line in f.read().split("\n"):
+                if line.strip():
+                    idx[int(line.strip(), 16)] = n
+                    n = n + 1
+            f.close()
+        except:
+            pass
+        _emoji["index"] = idx
+    return idx
+
+
+def emoji_sheet(name):
+    sh = _emoji["sheets"].get(name, 0)
+    if sh == 0:
+        try:
+            sh = graphics.Image.open(ASSET_DIR[0] + "emoji%s.png" % name)
+        except:
+            sh = None
+        _emoji["sheets"][name] = sh
+    return sh
+
+
+def prep(text):
+    """Unicode text with known emoji replaced by sheet characters."""
+    t = to_u(text)
+    if not t or max(t) < u"\u00a9":
+        return t
+    idx = emoji_index()
+    out = []
+    i = 0
+    n = len(t)
+    joined = 0
+    while i < n:
+        o = ord(t[i])
+        step = 1
+        cp = o
+        if 55296 <= o <= 56319 and i + 1 < n:
+            lo = ord(t[i + 1])
+            if 56320 <= lo <= 57343:
+                cp = 65536 + (o - 55296) * 1024 + (lo - 56320)
+                step = 2
+        i = i + step
+        if cp == 65039 or (127995 <= cp <= 127999) or (917504 <= cp <= 917631):
+            continue          # variation selector, skin tones, tags
+        if cp == 8205:
+            joined = 1        # zero width joiner: skip the next part
+            continue
+        if joined and (cp > 65535 or idx.has_key(cp)):
+            joined = 0
+            continue
+        joined = 0
+        k = idx.get(cp)
+        if k is not None:
+            out.append(unichr(SENT + k))
+        elif cp > 65535:
+            continue          # emoji we have no picture for
+        elif SENT <= cp <= SENT_END:
+            out.append(u" ")
+        else:
+            out.append(t[i - step:i])
+    return u"".join(out)
+
+
+def has_emoji(t):
+    return t and max(t) >= u"\ue000"
+
+
+def _split(t):
+    """[(is_emoji, text or index)]"""
+    runs = []
+    cur = []
+    for c in t:
+        o = ord(c)
+        if SENT <= o <= SENT_END:
+            if cur:
+                runs.append((0, u"".join(cur)))
+                cur = []
+            runs.append((1, o - SENT))
+        else:
+            cur.append(c)
+    if cur:
+        runs.append((0, u"".join(cur)))
+    return runs
+
+
+def txt(g, x, y, t, fill, f, bg="w"):
+    """Draws prepped text with emoji at baseline y."""
+    if not has_emoji(t):
+        g.text((x, y), t, fill=fill, font=font(f))
+        return
+    sheet = emoji_sheet("16_" + bg)
+    for is_e, v in _split(t):
+        if is_e:
+            if sheet is not None:
+                sx = (v % 20) * 16
+                sy = (v / 20) * 16
+                try:
+                    g.blit(sheet, target=(x, y - 13), source=((sx, sy), (sx + 16, sy + 16)))
+                except:
+                    pass
+            x = x + EMW
+        else:
+            g.text((x, y), v, fill=fill, font=font(f))
+            x = x + _plain_width(g, v, f)
+
+
+def big_emoji(g, x, y, k):
+    sheet = emoji_sheet("40_c")
+    if sheet is None:
+        return 0
+    sx = (k % 20) * 40
+    sy = (k / 20) * 40
+    try:
+        g.blit(sheet, target=(x, y), source=((sx, sy), (sx + 40, sy + 40)))
+        return 1
+    except:
+        return 0
+
+
+def _plain_width(g, text, f):
     try:
         return g.measure_text(text, font=font(f))[1]
     except:
         return len(text) * 7
 
 
+def width(g, text, f):
+    if has_emoji(text):
+        w = 0
+        for is_e, v in _split(text):
+            if is_e:
+                w = w + EMW
+            else:
+                w = w + _plain_width(g, v, f)
+        return w
+    return _plain_width(g, text, f)
+
+
+def _fit_count(g, text, f, maxw):
+    """How many characters of text fit in maxw pixels."""
+    if not has_emoji(text):
+        try:
+            return g.measure_text(text, font=font(f), maxwidth=maxw)[2]
+        except:
+            return maxw / 7
+    lo = 0
+    hi = len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) / 2
+        if width(g, text[:mid], f) <= maxw:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
 def fit(g, text, f, maxw):
-    """text shortened with an ellipsis to fit maxw pixels."""
-    text = to_u(text).replace(u"\n", u" ")
+    """text (emoji prepared) shortened with an ellipsis to fit maxw pixels."""
+    text = prep(text).replace(u"\n", u" ")
     if maxw <= 0:
         return u""
-    try:
-        n = g.measure_text(text, font=font(f), maxwidth=maxw)[2]
-    except:
-        n = maxw / 7
+    n = _fit_count(g, text, f, maxw)
     if n >= len(text):
         return text
     if n < 2:
         return u""
-    try:
-        n = g.measure_text(text, font=font(f), maxwidth=maxw - width(g, u"\u2026", f))[2]
-    except:
-        n = n - 1
+    n = _fit_count(g, text, f, maxw - _plain_width(g, u"\u2026", f))
     return text[:n].rstrip() + u"\u2026"
 
 
 def wrap(g, text, f, maxw, max_lines=200):
-    """Word-wraps text into lines of at most maxw pixels."""
+    """Word-wraps text (emoji prepared) into lines of at most maxw pixels."""
     out = []
-    for para in to_u(text).split(u"\n"):
+    for para in prep(text).split(u"\n"):
         while 1:
             if len(out) >= max_lines:
                 return out
             if not para:
                 out.append(u"")
                 break
-            try:
-                n = g.measure_text(para, font=font(f), maxwidth=maxw)[2]
-            except:
-                n = maxw / 7
+            n = _fit_count(g, para, f, maxw)
             if n >= len(para):
                 out.append(para)
                 break
@@ -350,6 +516,8 @@ class CanvasView:
     def draw(self):
         if self.canvas is None:
             return
+        import time
+        t0 = time.clock()
         w, h = self.size()
         if self.buf is None or self.buf.size != (w, h):
             self.buf = graphics.Image.new((w, h))
@@ -370,6 +538,9 @@ class CanvasView:
             self.canvas.blit(g)
         except:
             pass
+        dt = time.clock() - t0
+        if dt > 0.4:
+            self.app.log("slow paint %s %.2fs" % (self.__class__.__name__, dt))
 
     def key(self, k):
         pass
@@ -392,12 +563,10 @@ class CanvasView:
         if busy:
             sub = busy
         if sub:
-            g.text((x, 21), fit(g, title, "name", w - x - 8), fill=WHITE, font=font("name"))
-            g.text((x, 38), fit(g, sub, "small", w - x - 8), fill=HEADER_SUB,
-                   font=font("small"))
+            txt(g, x, 21, fit(g, title, "name", w - x - 8), WHITE, "name", "b")
+            txt(g, x, 38, fit(g, sub, "small", w - x - 8), HEADER_SUB, "small", "b")
         else:
-            g.text((x, 30), fit(g, title, "title", w - x - 8), fill=WHITE,
-                   font=font("title"))
+            txt(g, x, 30, fit(g, title, "title", w - x - 8), WHITE, "title", "b")
 
     def toast(self, g, w, h):
         t = self.app.toast_text
@@ -405,9 +574,8 @@ class CanvasView:
             return
         y = self.HEADER_H + 4
         rrect(g, 6, y, w - 6, y + 40, 8, 0x25303A)
-        g.text((14, y + 17), fit(g, t[0], "smallb", w - 28), fill=0x8CC8FF,
-               font=font("smallb"))
-        g.text((14, y + 33), fit(g, t[1], "small", w - 28), fill=WHITE, font=font("small"))
+        txt(g, 14, y + 17, fit(g, t[0], "smallb", w - 28), 0x8CC8FF, "smallb", "t")
+        txt(g, 14, y + 34, fit(g, t[1], "small", w - 28), WHITE, "small", "t")
 
     def scrollbar(self, g, w, y1, y2, first, shown, total):
         if total <= shown or total <= 0:
@@ -595,8 +763,10 @@ class ChatListView(CanvasView):
                 g.ellipse((nx, y + 15, nx + 7, y + 22), fill=ic)
                 g.ellipse((nx + 6, y + 10, nx + 10, y + 14), fill=ic)
             nx = nx + 13
-        g.text((nx, y + 21), fit(g, name, "name", w - nx - right), fill=c_name,
-               font=font("name"))
+        bg = "w"
+        if sel:
+            bg = "b"
+        txt(g, nx, y + 21, fit(g, name, "name", w - nx - right), c_name, "name", bg)
         # second line: sender, preview, unread badge
         badge = u""
         if r.get("unread"):
@@ -619,16 +789,15 @@ class ChatListView(CanvasView):
             bw = bw + 6
         px = x
         maxw = w - 8 - bw - px
-        sender = to_u(r.get("sender", u""))
+        sender = prep(r.get("sender", u""))
         if sender:
             s = sender + u": "
             sw = width(g, s, "text")
             if sw < maxw / 2:
-                g.text((px, y + 44), s, fill=c_sender, font=font("text"))
+                txt(g, px, y + 44, s, c_sender, "text", bg)
                 px = px + sw
                 maxw = maxw - sw
-        g.text((px, y + 44), fit(g, r.get("preview", u""), "text", maxw), fill=c_sub,
-               font=font("text"))
+        txt(g, px, y + 44, fit(g, r.get("preview", u""), "text", maxw), c_sub, "text", bg)
         if not sel:
             g.line((x, y + RH - 1, w, y + RH - 1), outline=LINE)
 
@@ -705,6 +874,14 @@ class ChatView(CanvasView):
             self.layout_cache[ck] = lay
             return lay
         inner = maxw - 2 * self.PAD
+        if m.get("sticker") is not None and not m.get("reply_to"):
+            e = prep(m["sticker"])
+            if e and has_emoji(e[:1]):
+                meta = self.app.hhmm(m["date"])
+                lay = {"service": 0, "sticker": ord(e[0]) - SENT, "w": 48, "h": 66,
+                       "meta": meta, "mw": width(g, meta, "small") + 12}
+                self.layout_cache[ck] = lay
+                return lay
         head = []
         if group and not m["out"]:
             head.append(("name", fit(g, m["from"], "smallb", inner)))
@@ -715,7 +892,19 @@ class ChatView(CanvasView):
             head.append(("reply", (fit(g, q[0], "smallb", inner - 8),
                                    fit(g, q[1], "small", inner - 8))))
         body = []
-        if m["media"]:
+        photo = None
+        if m.get("photo"):
+            pi = m["photo"]
+            pw = min(maxw - 6, 180)
+            ph = 120
+            if pi.get("w") and pi.get("h"):
+                ph = pw * pi["h"] / pi["w"]
+            if ph > 200:
+                pw = max(pw * 200 / ph, 60)
+                ph = 200
+            ph = max(ph, 50)
+            photo = (pw, ph)
+        elif m["media"]:
             for l in wrap(g, m["media"], "text", inner, 3):
                 body.append(("media", l))
         if m["text"]:
@@ -743,6 +932,11 @@ class ChatView(CanvasView):
                 h = h + 34
             else:
                 h = h + 15
+        if photo is not None:
+            bw = max(bw, photo[0] + 6 - 2 * self.PAD)
+            h = h + photo[1] + 4
+            if not head:
+                h = h - self.PAD + 3
         h = h + len(body) * 18
         # time on the last line if it fits, else on its own line
         meta_own_line = 1
@@ -753,7 +947,7 @@ class ChatView(CanvasView):
             h = h + 15
         h = h + 6
         lay = {"service": 0, "head": head, "body": body, "meta": meta, "mw": mw,
-               "own": meta_own_line, "w": bw + 2 * self.PAD, "h": h}
+               "own": meta_own_line, "w": bw + 2 * self.PAD, "h": h, "photo": photo}
         self.layout_cache[ck] = lay
         return lay
 
@@ -846,8 +1040,7 @@ class ChatView(CanvasView):
             if not hint:
                 hint = u"Message"
                 colour = GREY_LIGHT
-            g.text((18, bottom + 25), fit(g, hint, "text", w - 64), fill=colour,
-                   font=font("text"))
+            txt(g, 18, bottom + 25, fit(g, hint, "text", w - 64), colour, "text", "w")
             plane(g, w - 24, bottom + self.INPUT_H / 2, 16, (focus and BLUE) or GREY_LIGHT)
         else:
             t = u"Only admins can post here"
@@ -877,9 +1070,14 @@ class ChatView(CanvasView):
             return
         bw = lay["w"]
         bh = lay["h"]
+        if lay.get("sticker") is not None:
+            self.paint_sticker(g, w, y, m, lay, sel)
+            return
+        bg = "w"
         if m["out"]:
             x1 = w - 8 - bw
             fill = BUBBLE_OUT
+            bg = "o"
         else:
             x1 = 8
             fill = BUBBLE_IN
@@ -898,28 +1096,35 @@ class ChatView(CanvasView):
         ty = y1 + P
         for kind, l in lay["head"]:
             if kind == "name":
-                g.text((x1 + P, ty + 11), l, fill=colour_for(m.get("from_key") or "u0",
-                                                             NAME_COLOURS),
-                       font=font("smallb"))
+                txt(g, x1 + P, ty + 11, l, colour_for(m.get("from_key") or "u0", NAME_COLOURS),
+                    "smallb", bg)
                 ty = ty + 15
             elif kind == "fwd":
-                g.text((x1 + P, ty + 11), l, fill=BLUE, font=font("small"))
+                txt(g, x1 + P, ty + 11, l, BLUE, "small", bg)
                 ty = ty + 15
             else:
                 qc = BLUE
                 if m["out"]:
                     qc = TIME_OUT
                 g.rectangle((x1 + P, ty + 2, x1 + P + 2, ty + 31), fill=qc)
-                g.text((x1 + P + 7, ty + 13), l[0], fill=qc, font=font("smallb"))
-                g.text((x1 + P + 7, ty + 28), l[1], fill=GREY, font=font("small"))
+                txt(g, x1 + P + 7, ty + 13, l[0], qc, "smallb", bg)
+                txt(g, x1 + P + 7, ty + 28, l[1], GREY, "small", bg)
                 ty = ty + 34
+        if lay.get("photo"):
+            pw, ph = lay["photo"]
+            if lay["head"]:
+                self.paint_photo(g, x1 + 3, ty, pw, ph, m["photo"])
+                ty = ty + ph + 4
+            else:
+                self.paint_photo(g, x1 + 3, ty - P + 3, pw, ph, m["photo"])
+                ty = ty - P + 3 + ph + 4
         for kind, l in lay["body"]:
             colour = TEXT
             if kind == "media":
                 colour = BLUE_DARK
                 if m["out"]:
                     colour = 0x3A8E3B
-            g.text((x1 + P, ty + 14), l, fill=colour, font=font("text"))
+            txt(g, x1 + P, ty + 14, l, colour, "text", bg)
             ty = ty + 18
         mc = TIME_IN
         if m["out"]:
@@ -930,6 +1135,186 @@ class ChatView(CanvasView):
         if m["out"]:
             read = m["id"] <= self.app.read_out(self.key_)
             tick(g, x2 - P - 13, my - 9, mc, read)
+
+
+# ---------------------------------------------------------------- photos
+
+
+def _photo_methods():
+    def paint_photo(self, g, x, y, pw, ph, info):
+        img = self.app.media.image(info, pw, ph)
+        if img is not None:
+            g.blit(img, target=(x, y))
+        else:
+            g.rectangle((x, y, x + pw, y + ph), fill=0xB8C7D3)
+            t = u"Photo"
+            if info.get("badge"):
+                t = u""
+            g.text((x + (pw - width(g, t, "small")) / 2, y + ph / 2 + 4), t, fill=WHITE,
+                   font=font("small"))
+        b = info.get("badge")
+        if b:
+            b = fit(g, b, "small", pw - 16)
+            bw = width(g, b, "small") + 10
+            rrect(g, x + 4, y + 4, x + 4 + bw, y + 21, 8, 0x404850)
+            g.text((x + 9, y + 17), b, fill=WHITE, font=font("small"))
+
+    def paint_sticker(self, g, w, y, m, lay, sel):
+        if m["out"]:
+            x = w - 12 - 44
+        else:
+            x = 12
+        if sel:
+            rrect(g, x - 4, y, x + 48, y + 48, 10, BLUE_SOFT)
+        if not big_emoji(g, x + 2, y + 4, lay["sticker"]):
+            g.text((x, y + 30), u"Sticker", fill=GREY, font=font("small"))
+        meta = lay["meta"]
+        mw = lay["mw"]
+        rrect(g, x + 46 - mw, y + 48, x + 46, y + 63, 7, 0x8FA9BE)
+        g.text((x + 52 - mw, y + 60), meta, fill=WHITE, font=font("small"))
+
+    ChatView.paint_photo = paint_photo
+    ChatView.paint_sticker = paint_sticker
+
+
+_photo_methods()
+
+
+class Media:
+    """Pictures in chats: the tiny preview Telegram sends inside the message
+    is decoded at once (blurry), the real ~320 px picture is downloaded in the
+    background (one at a time) and kept on the memory card."""
+    LIMIT = 10
+
+    def __init__(self, app, folder):
+        self.app = app
+        self.folder = folder
+        self.mem = {}           # (id, w, h) -> (Image, quality)
+        self.order = []
+        self.jobs = []
+        self.queued = {}
+        self.running = 0
+        self.downloading = 0
+        self.failed = {}
+
+    def path(self, info):
+        return self.folder + info["id"] + ".jpg"
+
+    def image(self, info, w, h):
+        k = (info["id"], w, h)
+        e = self.mem.get(k)
+        if e is None or e[1] < 2:
+            if not self.queued.has_key(k):
+                self.queued[k] = 1
+                if e is None and info.get("stripped"):
+                    self.jobs.insert(0, ("strip", info, w, h))
+                if not self.failed.has_key(info["id"]):
+                    self.jobs.append(("full", info, w, h))
+                self.kick()
+        if e is None:
+            return None
+        return e[0]
+
+    def kick(self):
+        if not self.running:
+            self.running = 1
+            self.app.net.later(0.05, self.work)
+
+    def store(self, k, img, q):
+        self.mem[k] = (img, q)
+        if k in self.order:
+            self.order.remove(k)
+        self.order.append(k)
+        while len(self.order) > self.LIMIT:
+            old = self.order.pop(0)
+            if self.mem.has_key(old):
+                del self.mem[old]
+            if self.queued.has_key(old):
+                del self.queued[old]
+        self.app.redraw_soon()
+
+    def work(self):
+        self.running = 0
+        if not self.jobs or self.downloading:
+            return
+        kind, info, w, h = self.jobs.pop(0)
+        k = (info["id"], w, h)
+        try:
+            if kind == "strip":
+                import tgclient
+                jpg = tgclient.stripped_to_jpeg(info["stripped"])
+                if jpg:
+                    tmp = self.folder + "strip.jpg"
+                    f = open(tmp, "wb")
+                    f.write(jpg)
+                    f.close()
+                    self.store(k, graphics.Image.open(tmp).resize((w, h)), 1)
+            else:
+                p = self.path(info)
+                import os
+                if os.path.exists(p):
+                    self.store(k, graphics.Image.open(p).resize((w, h)), 2)
+                elif self.app.auto_photos():
+                    self.downloading = 1
+                    self.app.client.download(
+                        info, p, lambda path, self=self, info=info, w=w, h=h: self.done(info, w, h),
+                        lambda e, self=self, info=info: self.fail(info, e))
+                    return
+                else:
+                    if self.queued.has_key(k):
+                        del self.queued[k]
+        except:
+            import sys
+            self.app.log("media: " + str(sys.exc_info()[1]))
+        self.kick()
+
+    def done(self, info, w, h):
+        self.downloading = 0
+        try:
+            self.store((info["id"], w, h), graphics.Image.open(self.path(info)).resize((w, h)), 2)
+        except:
+            import sys
+            self.app.log("media open: " + str(sys.exc_info()[1]))
+        self.kick()
+
+    def fail(self, info, e):
+        self.downloading = 0
+        self.failed[info["id"]] = 1
+        self.app.log("download failed: " + str(e))
+        self.kick()
+
+    def drop_jobs(self):
+        """Leaving a chat: forget pending work for pictures no longer shown."""
+        self.jobs = []
+        self.queued = {}
+
+
+class PhotoView(CanvasView):
+    def __init__(self, app, info):
+        CanvasView.__init__(self, app)
+        self.info = info
+        self.img = None
+
+    def key(self, k):
+        if k in ("select", "5", "left", "right"):
+            self.app.back_to_chat()
+
+    def paint(self, g, w, h):
+        g.clear(0x101418)
+        if self.img is None:
+            import os
+            p = self.app.media.path(self.info)
+            try:
+                if os.path.exists(p):
+                    self.img = graphics.Image.open(p).resize((w, h), keepaspect=1)
+            except:
+                self.img = None
+        if self.img is not None:
+            iw, ih = self.img.size
+            g.blit(self.img, target=((w - iw) / 2, (h - ih) / 2))
+        else:
+            t = u"Downloading picture..."
+            g.text(((w - width(g, t, "text")) / 2, h / 2), t, fill=WHITE, font=font("text"))
 
 
 # ---------------------------------------------------------------- welcome

@@ -160,6 +160,17 @@ def handle(f):
         else:
             assert f["reply_to"]["reply_to_msg_id"] > 0, f
         return {"_": "updateShortSentMessage", "id": state["sent"], "pts": 3, "pts_count": 1, "date": 1700000100, "out": 1}
+    if n == "messages.editMessage":
+        return {"_": "updates", "users": [], "chats": [], "date": 0, "seq": 0, "updates": [
+            {"_": "updateEditMessage", "pts": 1, "pts_count": 1, "message": {
+                "_": "message", "id": f["id"], "out": 1, "peer_id": {"_": "peerUser", "user_id": 42},
+                "date": 1700000100, "message": f["message"], "edit_date": 1700000500}}]}
+    if n == "messages.deleteMessages":
+        state["deleted"] = (f["id"], f.get("revoke"))
+        return {"_": "messages.affectedMessages", "pts": 1, "pts_count": 1}
+    if n == "phone.discardCall":
+        state["declined"] = f["peer"]["id"]
+        return {"_": "updates", "users": [], "chats": [], "date": 0, "seq": 0, "updates": []}
     raise AssertionError("unexpected call " + n)
 
 tgclient.mtproto.Session = FakeSession
@@ -267,6 +278,26 @@ app.client.update({"_": "updateShortChatMessage", "id": 3, "from_id": 42, "chat_
 app.net.run()
 assert toasts and toasts[-1][0] == "Book club" and toasts[-1][1].find(u"Alice: group hello") >= 0, toasts
 assert app.dialogs[0]["key"] == "c900" and app.dialogs[0]["unread"] == 1, app.dialogs[0]
+screen_text()
+# edit and delete my message 11, then an incoming Telegram call
+app.chat_key = "u42"; app.back_to_chat()
+mine = [m for m in app.msgs["u42"] if m["id"] == 11][0]
+app.compose(0, mine)
+assert app.editor.get() == u"Hello\nworld"
+app.editor.set(u"Hello again")
+app.send_now(); app.net.run()
+mine = [m for m in app.msgs["u42"] if m["id"] == 11][0]
+assert mine["text"] == "Hello again" and mine["edited"], mine
+popups[:] = [1]          # "Delete for me and Alice"
+app.delete_message(mine); app.net.run()
+assert state["deleted"] == ([11], 1), state
+assert not [m for m in app.msgs["u42"] if m["id"] == 11]
+popups[:] = [0]          # Decline
+app.client.update({"_": "updatePhoneCall", "phone_call": {"_": "phoneCallRequested", "id": 555,
+                   "access_hash": 1, "date": 0, "admin_id": 42, "participant_id": 7,
+                   "g_a_hash": "", "protocol": {"_": "phoneCallProtocol"}}})
+app.net.run()
+assert state["declined"] == 555
 screen_text()
 app.save_cache()
 assert os.path.getsize(TMP + "/cache.bin") > 100

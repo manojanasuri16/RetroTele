@@ -30,6 +30,8 @@ def check(path):
             bad(node, "'except X as e' (use sys.exc_info())")
         elif isinstance(node, (ast.Yield, ast.YieldFrom)) and in_try_finally:
             bad(node, "yield inside try/finally")
+        elif isinstance(node, ast.Slice) and node.step is not None:
+            bad(node, "slice with a step (a[::2]) needs Python 2.3")
         elif isinstance(node, ast.MatMult if hasattr(ast, "MatMult") else ()):
             bad(node, "@ operator")
         elif isinstance(node, ast.Call):

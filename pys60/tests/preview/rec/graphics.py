@@ -39,8 +39,16 @@ class Image(object):
     @staticmethod
     def open(path):
         _n[0] += 1
-        p = os.path.join(os.environ["RT_OUT"], "img%d.jpg" % _n[0])
+        p = os.path.join(os.environ["RT_OUT"], "img%d%s" % (_n[0], os.path.splitext(path)[1]))
         open(p, "wb").write(open(path, "rb").read())
+        try:
+            import struct as _st
+            d = open(p, "rb").read(32)
+            if d[:4] == "\x89PNG":
+                w, h = _st.unpack(">II", d[16:24])
+                return Image((w, h), path=p)
+        except Exception:
+            pass
         return Image((40, 40), path=p)
 
     def resize(self, size, callback=None, keepaspect=0):
@@ -80,6 +88,10 @@ class Image(object):
 
     def blit(self, img, target=(0, 0), source=None, mask=None, scale=0):
         if img.path:
-            self.ops.append(("photo", img.path, list(img.size), list(target), mask is not None))
+            src = None
+            if source is not None:
+                src = [list(source[0]), list(source[1])]
+            self.ops.append(("photo", img.path, list(img.size), list(target), mask is not None,
+                             src))
         else:
             self.ops.extend(img.ops)

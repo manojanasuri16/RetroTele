@@ -160,7 +160,7 @@ def _sha256_blocks(h, data):
     return h
 
 
-def sha256(data):
+def sha256_ref(data):
     h = _sha256_blocks(list(_H256), data + _md_pad(len(data)))
     return struct.pack(">8I", h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7])
 
@@ -344,7 +344,7 @@ def _pack_words(w):
     return struct.pack(">%dI" % len(w), *w)
 
 
-def ige_encrypt(data, key, iv):
+def ige_encrypt_ref(data, key, iv):
     if len(data) % 16:
         raise ValueError("IGE data must be a multiple of 16 bytes")
     aes = AES256(key)
@@ -378,7 +378,7 @@ def ige_encrypt(data, key, iv):
     return _pack_words(out)
 
 
-def ige_decrypt(data, key, iv):
+def ige_decrypt_ref(data, key, iv):
     if len(data) % 16:
         raise ValueError("IGE data must be a multiple of 16 bytes")
     aes = AES256(key)
@@ -410,6 +410,314 @@ def ige_decrypt(data, key, iv):
         c3 = x3
         i = i + 4
     return _pack_words(out)
+
+
+# ---------------------------------------------------------------- fast paths
+# On the phone (32-bit Python 2.2) every value >= 2**31 is a slow "long"
+# object. The functions below keep each 32-bit word as two 16-bit halves so
+# all arithmetic stays on small ints, and inline the rotations (function
+# calls are expensive too). They replace sha256 / ige_encrypt / ige_decrypt.
+
+M16 = 65535
+_K256H = []
+_K256L = []
+for _v in _K256:
+    _K256H.append(_v / 65536)
+    _K256L.append(_v & M16)
+_H256H = []
+_H256L = []
+for _v in _H256:
+    _H256H.append(_v / 65536)
+    _H256L.append(_v & M16)
+del _v
+
+
+def _sha256_fast(data):
+    data = data + _md_pad(len(data))
+    Kh = _K256H
+    Kl = _K256L
+    M = M16
+    h0h, h1h, h2h, h3h, h4h, h5h, h6h, h7h = _H256H
+    h0l, h1l, h2l, h3l, h4l, h5l, h6l, h7l = _H256L
+    i = 0
+    n = len(data)
+    while i < n:
+        ws = struct.unpack(">32H", data[i:i + 64])
+        wh = []
+        wl = []
+        k = 0
+        while k < 32:
+            wh.append(ws[k])
+            wl.append(ws[k + 1])
+            k = k + 2
+        j = 16
+        while j < 64:
+            xh = wh[j - 15]
+            xl = wl[j - 15]
+            yh = wh[j - 2]
+            yl = wl[j - 2]
+            # s0 = rotr7 ^ rotr18 ^ shr3 ; s1 = rotr17 ^ rotr19 ^ shr10
+            s0l = (((xl >> 7) | (xh * 512)) ^ ((xh >> 2) | (xl * 16384)) ^
+                   ((xl >> 3) | (xh * 8192))) & M
+            s0h = ((((xh >> 7) | (xl * 512)) ^ ((xl >> 2) | (xh * 16384))) & M) ^ (xh >> 3)
+            s1l = (((yh >> 1) | (yl * 32768)) ^ ((yh >> 3) | (yl * 8192)) ^
+                   ((yl >> 10) | (yh * 64))) & M
+            s1h = ((((yl >> 1) | (yh * 32768)) ^ ((yl >> 3) | (yh * 8192))) & M) ^ (yh >> 10)
+            lo = wl[j - 16] + s0l + wl[j - 7] + s1l
+            wl.append(lo & M)
+            wh.append((wh[j - 16] + s0h + wh[j - 7] + s1h + (lo >> 16)) & M)
+            j = j + 1
+        ah = h0h
+        al = h0l
+        bh = h1h
+        bl = h1l
+        ch = h2h
+        cl = h2l
+        dh = h3h
+        dl = h3l
+        eh = h4h
+        el = h4l
+        fh = h5h
+        fl = h5l
+        gh = h6h
+        gl = h6l
+        hh = h7h
+        hl = h7l
+        j = 0
+        while j < 64:
+            # S1 = rotr6 ^ rotr11 ^ rotr25 of e
+            S1l = (((el >> 6) | (eh * 1024)) ^ ((el >> 11) | (eh * 32)) ^
+                   ((eh >> 9) | (el * 128))) & M
+            S1h = (((eh >> 6) | (el * 1024)) ^ ((eh >> 11) | (el * 32)) ^
+                   ((el >> 9) | (eh * 128))) & M
+            chl = (el & fl) ^ ((el ^ M) & gl)
+            chh = (eh & fh) ^ ((eh ^ M) & gh)
+            lo = hl + S1l + chl + Kl[j] + wl[j]
+            t1l = lo & M
+            t1h = (hh + S1h + chh + Kh[j] + wh[j] + (lo >> 16)) & M
+            # S0 = rotr2 ^ rotr13 ^ rotr22 of a
+            S0l = (((al >> 2) | (ah * 16384)) ^ ((al >> 13) | (ah * 8)) ^
+                   ((ah >> 6) | (al * 1024))) & M
+            S0h = (((ah >> 2) | (al * 16384)) ^ ((ah >> 13) | (al * 8)) ^
+                   ((al >> 6) | (ah * 1024))) & M
+            majl = (al & bl) ^ (al & cl) ^ (bl & cl)
+            majh = (ah & bh) ^ (ah & ch) ^ (bh & ch)
+            hh = gh
+            hl = gl
+            gh = fh
+            gl = fl
+            fh = eh
+            fl = el
+            lo = dl + t1l
+            el = lo & M
+            eh = (dh + t1h + (lo >> 16)) & M
+            dh = ch
+            dl = cl
+            ch = bh
+            cl = bl
+            bh = ah
+            bl = al
+            lo = t1l + S0l + majl
+            al = lo & M
+            ah = (t1h + S0h + majh + (lo >> 16)) & M
+            j = j + 1
+        lo = h0l + al
+        h0l = lo & M
+        h0h = (h0h + ah + (lo >> 16)) & M
+        lo = h1l + bl
+        h1l = lo & M
+        h1h = (h1h + bh + (lo >> 16)) & M
+        lo = h2l + cl
+        h2l = lo & M
+        h2h = (h2h + ch + (lo >> 16)) & M
+        lo = h3l + dl
+        h3l = lo & M
+        h3h = (h3h + dh + (lo >> 16)) & M
+        lo = h4l + el
+        h4l = lo & M
+        h4h = (h4h + eh + (lo >> 16)) & M
+        lo = h5l + fl
+        h5l = lo & M
+        h5h = (h5h + fh + (lo >> 16)) & M
+        lo = h6l + gl
+        h6l = lo & M
+        h6h = (h6h + gh + (lo >> 16)) & M
+        lo = h7l + hl
+        h7l = lo & M
+        h7h = (h7h + hh + (lo >> 16)) & M
+        i = i + 64
+    return struct.pack(">16H", h0h, h0l, h1h, h1l, h2h, h2l, h3h, h3l,
+                       h4h, h4l, h5h, h5l, h6h, h6l, h7h, h7l)
+
+
+def _split_tables(tables):
+    hi = []
+    lo = []
+    for t in tables:
+        th = []
+        tl_ = []
+        for v in t:
+            th.append(int(v / 65536))
+            tl_.append(int(v & M16))
+        hi.append(th)
+        lo.append(tl_)
+    return hi, lo
+
+
+_TEH, _TEL = _split_tables(_TE)
+_TDH, _TDL = _split_tables(_TD)
+
+
+def _halves(words):
+    h = []
+    l = []
+    for v in words:
+        h.append(int(v / 65536))
+        l.append(int(v & M16))
+    return h, l
+
+
+class _FastAES:
+    """AES-256 on 16-bit halves; blocks are 8 ints (h0 l0 h1 l1 h2 l2 h3 l3)."""
+    def __init__(self, key):
+        a = AES256(key)
+        self.ekh, self.ekl = _halves(a.ek)
+        self.dkh, self.dkl = _halves(a.dk)
+
+
+def _ige_fast(data, key, iv, decrypt):
+    if len(data) % 16:
+        raise ValueError("IGE data must be a multiple of 16 bytes")
+    a = _FastAES(key)
+    if decrypt:
+        kh = a.dkh
+        kl = a.dkl
+        T0h, T1h, T2h, T3h = _TDH
+        T0l, T1l, T2l, T3l = _TDL
+        S = _INV
+    else:
+        kh = a.ekh
+        kl = a.ekl
+        T0h, T1h, T2h, T3h = _TEH
+        T0l, T1l, T2l, T3l = _TEL
+        S = _SBOX
+    v = struct.unpack(">16H", iv)
+    # x: previous ciphertext (encrypt) / plaintext (decrypt) mixed in before
+    # the cipher; y: the other one, mixed in after
+    if decrypt:
+        y = list(v[0:8])
+        x = list(v[8:16])
+    else:
+        x = list(v[0:8])
+        y = list(v[8:16])
+    w = struct.unpack(">%dH" % (len(data) / 2), data)
+    out = []
+    i = 0
+    n = len(w)
+    while i < n:
+        blk = w[i:i + 8]
+        s0h = blk[0] ^ x[0] ^ kh[0]
+        s0l = blk[1] ^ x[1] ^ kl[0]
+        s1h = blk[2] ^ x[2] ^ kh[1]
+        s1l = blk[3] ^ x[3] ^ kl[1]
+        s2h = blk[4] ^ x[4] ^ kh[2]
+        s2l = blk[5] ^ x[5] ^ kl[2]
+        s3h = blk[6] ^ x[6] ^ kh[3]
+        s3l = blk[7] ^ x[7] ^ kl[3]
+        r = 4
+        if decrypt:
+            while r < 56:
+                a0 = s0h >> 8
+                b0 = s3h & 255
+                c0 = s2l >> 8
+                d0 = s1l & 255
+                a1 = s1h >> 8
+                b1 = s0h & 255
+                c1 = s3l >> 8
+                d1 = s2l & 255
+                a2 = s2h >> 8
+                b2 = s1h & 255
+                c2 = s0l >> 8
+                d2 = s3l & 255
+                a3 = s3h >> 8
+                b3 = s2h & 255
+                c3 = s1l >> 8
+                d3 = s0l & 255
+                s0h = T0h[a0] ^ T1h[b0] ^ T2h[c0] ^ T3h[d0] ^ kh[r]
+                s0l = T0l[a0] ^ T1l[b0] ^ T2l[c0] ^ T3l[d0] ^ kl[r]
+                s1h = T0h[a1] ^ T1h[b1] ^ T2h[c1] ^ T3h[d1] ^ kh[r + 1]
+                s1l = T0l[a1] ^ T1l[b1] ^ T2l[c1] ^ T3l[d1] ^ kl[r + 1]
+                s2h = T0h[a2] ^ T1h[b2] ^ T2h[c2] ^ T3h[d2] ^ kh[r + 2]
+                s2l = T0l[a2] ^ T1l[b2] ^ T2l[c2] ^ T3l[d2] ^ kl[r + 2]
+                s3h = T0h[a3] ^ T1h[b3] ^ T2h[c3] ^ T3h[d3] ^ kh[r + 3]
+                s3l = T0l[a3] ^ T1l[b3] ^ T2l[c3] ^ T3l[d3] ^ kl[r + 3]
+                r = r + 4
+            o0h = (S[s0h >> 8] * 256 + S[s3h & 255]) ^ kh[56]
+            o0l = (S[s2l >> 8] * 256 + S[s1l & 255]) ^ kl[56]
+            o1h = (S[s1h >> 8] * 256 + S[s0h & 255]) ^ kh[57]
+            o1l = (S[s3l >> 8] * 256 + S[s2l & 255]) ^ kl[57]
+            o2h = (S[s2h >> 8] * 256 + S[s1h & 255]) ^ kh[58]
+            o2l = (S[s0l >> 8] * 256 + S[s3l & 255]) ^ kl[58]
+            o3h = (S[s3h >> 8] * 256 + S[s2h & 255]) ^ kh[59]
+            o3l = (S[s1l >> 8] * 256 + S[s0l & 255]) ^ kl[59]
+        else:
+            while r < 56:
+                a0 = s0h >> 8
+                b0 = s1h & 255
+                c0 = s2l >> 8
+                d0 = s3l & 255
+                a1 = s1h >> 8
+                b1 = s2h & 255
+                c1 = s3l >> 8
+                d1 = s0l & 255
+                a2 = s2h >> 8
+                b2 = s3h & 255
+                c2 = s0l >> 8
+                d2 = s1l & 255
+                a3 = s3h >> 8
+                b3 = s0h & 255
+                c3 = s1l >> 8
+                d3 = s2l & 255
+                s0h = T0h[a0] ^ T1h[b0] ^ T2h[c0] ^ T3h[d0] ^ kh[r]
+                s0l = T0l[a0] ^ T1l[b0] ^ T2l[c0] ^ T3l[d0] ^ kl[r]
+                s1h = T0h[a1] ^ T1h[b1] ^ T2h[c1] ^ T3h[d1] ^ kh[r + 1]
+                s1l = T0l[a1] ^ T1l[b1] ^ T2l[c1] ^ T3l[d1] ^ kl[r + 1]
+                s2h = T0h[a2] ^ T1h[b2] ^ T2h[c2] ^ T3h[d2] ^ kh[r + 2]
+                s2l = T0l[a2] ^ T1l[b2] ^ T2l[c2] ^ T3l[d2] ^ kl[r + 2]
+                s3h = T0h[a3] ^ T1h[b3] ^ T2h[c3] ^ T3h[d3] ^ kh[r + 3]
+                s3l = T0l[a3] ^ T1l[b3] ^ T2l[c3] ^ T3l[d3] ^ kl[r + 3]
+                r = r + 4
+            o0h = (S[s0h >> 8] * 256 + S[s1h & 255]) ^ kh[56]
+            o0l = (S[s2l >> 8] * 256 + S[s3l & 255]) ^ kl[56]
+            o1h = (S[s1h >> 8] * 256 + S[s2h & 255]) ^ kh[57]
+            o1l = (S[s3l >> 8] * 256 + S[s0l & 255]) ^ kl[57]
+            o2h = (S[s2h >> 8] * 256 + S[s3h & 255]) ^ kh[58]
+            o2l = (S[s0l >> 8] * 256 + S[s1l & 255]) ^ kl[58]
+            o3h = (S[s3h >> 8] * 256 + S[s0h & 255]) ^ kh[59]
+            o3l = (S[s1l >> 8] * 256 + S[s2l & 255]) ^ kl[59]
+        res = [o0h ^ y[0], o0l ^ y[1], o1h ^ y[2], o1l ^ y[3],
+               o2h ^ y[4], o2l ^ y[5], o3h ^ y[6], o3l ^ y[7]]
+        out.extend(res)
+        if decrypt:
+            x = res          # plaintext feeds the next block before the cipher
+            y = blk          # ciphertext after
+        else:
+            x = res          # ciphertext before
+            y = blk          # plaintext after
+        i = i + 8
+    return struct.pack(">%dH" % len(out), *out)
+
+
+def sha256(data):
+    return _sha256_fast(data)
+
+
+def ige_encrypt(data, key, iv):
+    return _ige_fast(data, key, iv, 0)
+
+
+def ige_decrypt(data, key, iv):
+    return _ige_fast(data, key, iv, 1)
 
 
 # ---------------------------------------------------------------- big integers
