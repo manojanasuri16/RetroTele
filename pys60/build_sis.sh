@@ -1,8 +1,7 @@
 #!/bin/sh
 # Builds the native S60 3rd Edition app: dist/RetroTele.sis
 # (needs Python for S60 1.4.5 on the phone). Run ../tools/setup.sh once first.
-# Installs to phone memory (C:): installed on the memory card, the PyS60 1.4.5
-# app stub never started default.py (no log at all) on the N79.
+# Installs to phone memory or the memory card (the phone asks).
 set -e
 cd "$(dirname "$0")"
 PY=../tools/mamba/py27/bin/python2
@@ -46,7 +45,7 @@ fi
 $PY $ENS py2sis --uid=0xE7A3D5C2 --appname=RetroTele --version=$VERSION \
   --caption=RetroTele --shortcaption=RetroTele --vendor=RetroTele --icon=icon.svg \
   --caps=NetworkServices+LocalServices+ReadUserData+WriteUserData+UserEnvironment \
-  --drive=C --heapsize=4k,24M --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
+  --heapsize=4k,24M --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
   $EXTRAS build/app dist/RetroTele.sis </dev/null >build/py2sis.log
 echo "built dist/RetroTele.sis"
 ls -la dist

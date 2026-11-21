@@ -42,6 +42,9 @@ class Conn(object):
             cb, self.on_done, self.on_err = self.on_done, None, None
             self.net.later(0, cb)
 
+    def hard_close(self):
+        self.close()
+
     def close(self):
         if self.closed:
             return

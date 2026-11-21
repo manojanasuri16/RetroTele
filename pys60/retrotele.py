@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.7.1"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.7.2"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -236,6 +236,16 @@ class PhoneConn:
             except:
                 pass
 
+    def hard_close(self):
+        """Only when the app exits: really close (also ends pending reads)."""
+        s = self.sock
+        self.sock = None
+        if s is not None:
+            try:
+                s.close()
+            except:
+                pass
+
 
 class PhoneNet:
     """Callback-based sockets and timers on the main thread."""
@@ -278,6 +288,15 @@ class PhoneNet:
         except:
             msg = err_text()
             self.later(0, lambda on_err=on_err, msg=msg: on_err(msg))
+
+    def close_all(self):
+        """App exit: close every socket so no read is left pending."""
+        for s in self.socks:
+            try:
+                s.close()
+            except:
+                pass
+        self.socks = []
 
     def cancel_all(self):
         for t in self.timers:
@@ -1752,15 +1771,30 @@ class App:
                      u"write a message.", "info")
 
     def exit(self):
+        boot_log("exit requested")
         self.hash_job = None
         if isinstance(self.view, tgui.PlayerView):
             self.view.close()
         if self.client is not None and self.client.me is not None:
             self.save_cache()
-            try:
-                self.client.set_online(0)
-            except:
-                pass
+        self.net.cancel_all()
+        # close the Telegram connections now: a socket with a pending read
+        # keeps the app from closing (it stayed on a white screen)
+        if self.client is not None:
+            for sess in self.client.sessions.values():
+                sess.state = "closed"
+                sess.gen = sess.gen + 1
+                c = getattr(sess, "conn", None)
+                sess.conn = None
+                if c is not None:
+                    try:
+                        c.hard_close()
+                    except:
+                        pass
+        try:
+            self.net.close_all()
+        except:
+            pass
         self.lock.signal()
 
     def run(self):
@@ -1773,12 +1807,13 @@ class App:
         self.net.later(0.3, self.start)
         self.lock.wait()
         self.net.cancel_all()
-        if self.client is not None:
-            for s in self.client.sessions.values():
-                s.state = "closed"
-                s.gen = s.gen + 1
         appuifw.app.menu = []
         appuifw.app.body = None
+        boot_log("closing")
+        try:
+            appuifw.app.set_exit()   # end the app process when the script returns
+        except:
+            pass
 
 
 def main():

@@ -238,7 +238,7 @@ assert app.client.me == 7
 assert app.screen == "chats", app.screen
 txt = screen_text()
 print "chats:", txt
-assert txt.find(u"Alice B") >= 0 and txt.find(u"hey there") >= 0 and txt.find(u"Work") >= 0, txt
+assert txt.find(u"Alice B") >= 0 and txt.find(u"hey there") >= 0 and txt.find(u"Book club") >= 0, txt
 assert not errors, errors
 
 # tabs: Unread (1), Personal, Groups (shows the group), the Work folder, Contacts
@@ -357,5 +357,7 @@ assert [d["key"] for d in app2.dialogs] == [d["key"] for d in app.dialogs][:150]
 assert app2.client.peer_name("u42") == "Alice B"
 assert not errors, errors
 assert open(TMP + "/session.txt").read().find("user_id=7") >= 0
+app.exit()
+assert open(TMP + "/cache.bin").read()
 print "flow OK"
 shutil.rmtree(TMP)
