@@ -43,7 +43,7 @@ There's no secret chats, file/video download, playback of GIFs or animated stick
 ## Install
 
 1. Install **Python for S60 1.4.5** (`PythonForS60_1_4_5_3rdEd.sis`) if it's not on the phone yet.
-2. Install `RetroTele.sis`.
+2. Install `RetroTele.sis` (phone memory) or `RetroTele-card.sis` (memory card). A plain memory-card install of a Python for S60 1.4.5 app never starts, because the runtime looks for the app's `default.py` in phone memory. The card package therefore also puts that 2 KB launcher in phone memory.
 3. On a computer, open <https://my.telegram.org>, go to **API development tools** and create an app. Note the **api_id** and **api_hash**.
 4. Open RetroTele and enter api_id and api_hash once. Choose an access point (Wi-Fi or packet data), then log in.
 

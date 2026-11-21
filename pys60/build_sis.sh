@@ -1,7 +1,11 @@
 #!/bin/sh
-# Builds the native S60 3rd Edition app: dist/RetroTele.sis
-# (needs Python for S60 1.4.5 on the phone). Run ../tools/setup.sh once first.
-# Installs to phone memory or the memory card (the phone asks).
+# Builds the native S60 3rd Edition app (needs Python for S60 1.4.5 on the
+# phone). Run ../tools/setup.sh once first. Two packages:
+#   dist/RetroTele.sis       installs to phone memory (C:)
+#   dist/RetroTele-card.sis  installs to the memory card (E:), plus a 2 KB copy
+#                            of the launcher on C:. PyS60 1.4.5 looks for
+#                            default.py on C: even for card installs, so a
+#                            plain card install never starts (tools/py2sis_card.py).
 set -e
 cd "$(dirname "$0")"
 PY=../tools/mamba/py27/bin/python2
@@ -42,10 +46,13 @@ if [ -f native/tgnative.pyd ] && [ "$NATIVE" != 0 ]; then
   echo "including native/tgnative.pyd"
 fi
 
-$PY $ENS py2sis --uid=0xE7A3D5C2 --appname=RetroTele --version=$VERSION \
+OPTS="--uid=0xE7A3D5C2 --appname=RetroTele --version=$VERSION \
   --caption=RetroTele --shortcaption=RetroTele --vendor=RetroTele --icon=icon.svg \
   --caps=NetworkServices+LocalServices+ReadUserData+WriteUserData+UserEnvironment \
-  --heapsize=4k,24M --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
-  $EXTRAS build/app dist/RetroTele.sis </dev/null >build/py2sis.log
-echo "built dist/RetroTele.sis"
+  --heapsize=4k,24M --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem $EXTRAS"
+$PY $ENS py2sis $OPTS --drive=C build/app dist/RetroTele.sis </dev/null >build/py2sis.log
+$PY tools/py2sis_card.py "$(dirname $ENS)" $OPTS --drive=E build/app dist/RetroTele-card.sis \
+  </dev/null >build/py2sis_card.log
+grep "launcher copy" build/py2sis_card.log
+echo "built dist/RetroTele.sis and dist/RetroTele-card.sis"
 ls -la dist
