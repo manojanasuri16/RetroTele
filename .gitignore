@@ -1,0 +1,7 @@
+pys60/cert/
+pys60/build/
+tools/mamba
+tools/ensymble
+phone-installs/
+*.pyc
+pys60/dist/
