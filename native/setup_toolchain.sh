@@ -40,6 +40,7 @@ ls -la dl
 
 PREFIX="$TOP/gcc"
 if [ ! -x "$PREFIX/bin/$TARGET-gcc" ]; then
+ if [ ! -x "$PREFIX/bin/$TARGET-as" ]; then
   echo "== binutils"
   cd "$TOP/build"
   [ -d binutils-2.29.1 ] || tar xJf ../dl/binutils-2.29.1.tar.xz
@@ -48,18 +49,22 @@ if [ ! -x "$PREFIX/bin/$TARGET-gcc" ]; then
     --disable-nls --disable-shared --disable-werror --disable-gdb >configure.log 2>&1
   make -j"$JOBS" MAKEINFO=true >make.log 2>&1
   make install-strip MAKEINFO=true >install.log 2>&1
+ fi
   echo "== gcc"
   cd "$TOP/build"
   [ -d gcc-14.2.0 ] || tar xJf ../dl/gcc-14.2.0.tar.xz
   (cd gcc-14.2.0 && [ -d gmp ] || ./contrib/download_prerequisites >/dev/null)
   # the symbianelf target lacks the stdint type macros
-  grep -q 'arm\*-\*-symbianelf' gcc-14.2.0/gcc/config.gcc
-  sed -i '/^arm\*-\*-symbianelf\*)/,/;;/ s|tm_file="dbxelf.h elfos.h arm/unknown-elf.h arm/elf.h arm/bpabi.h arm/symbian.h arm/aout.h arm/arm.h"|& \n\ttm_file="${tm_file} newlib-stdint.h"|' gcc-14.2.0/gcc/config.gcc || true
-  grep -A6 'arm\*-\*-symbianelf\*)' gcc-14.2.0/gcc/config.gcc | head -8
+  grep -q 'arm/symbian.h newlib-stdint.h' gcc-14.2.0/gcc/config.gcc ||
+    sed -i 's|tm_file="${tm_file} arm/symbian.h"|tm_file="${tm_file} arm/symbian.h newlib-stdint.h"|' \
+      gcc-14.2.0/gcc/config.gcc
+  grep -n 'arm/symbian.h' gcc-14.2.0/gcc/config.gcc
   mkdir -p "$PREFIX/$TARGET/sys-include"
   printf '#ifndef _STDIO_H\n#define _STDIO_H\n#endif\n' > "$PREFIX/$TARGET/sys-include/stdio.h"
   cp gcc-14.2.0/gcc/ginclude/stdint-gcc.h "$PREFIX/$TARGET/sys-include/stdint.h"
-  mkdir -p b-gcc && cd b-gcc
+  rm -rf b-gcc && mkdir -p b-gcc && cd b-gcc
+  # today's host compilers default to newer C/C++ dialects than GCC 14 expects
+  CC="gcc -std=gnu17" CXX="g++ -std=gnu++17" \
   PATH="$PREFIX/bin:$PATH" ../gcc-14.2.0/configure --target=$TARGET --prefix="$PREFIX" \
     --enable-languages=c,c++ --without-headers --with-newlib \
     --disable-hosted-libstdcxx --disable-libstdcxx-pch --disable-nls --disable-shared \

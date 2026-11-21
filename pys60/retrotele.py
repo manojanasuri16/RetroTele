@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.6.2"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.7.0"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None

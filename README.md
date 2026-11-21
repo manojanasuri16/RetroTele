@@ -58,6 +58,12 @@ If your account has a cloud password, Telegram wants a hash made with 100,000 ro
 
 This is needed only once, at login.
 
+## Native crypto module
+
+`native/tgnative/tgnative.c` is a small compiled extension (AES-256-IGE, SHA-1, SHA-256, PBKDF2-SHA512) that replaces the pure-Python crypto when it's installed. It's hundreds of times faster: chats, pictures and music download quickly, the integrity check stays on, and two-step login takes seconds. The `.sis` installs it as `C:\sys\bin\tgnative.pyd`. If it's missing or fails its self-test, RetroTele falls back to Python automatically. **About** shows which one is in use.
+
+A prebuilt `pys60/native/tgnative.pyd` is in the repo. To rebuild it, set up a GnuPoc toolchain for S60 3rd Edition FP2 (CodeSourcery GCCE 3.4.3, the S60 3.2 SDK and the PyS60 1.4.5 SDK plugin), then run `SYMBIAN_SDK=/path/to/it sh native/build_native.sh`.
+
 ## Build and test (Linux)
 
 ```sh

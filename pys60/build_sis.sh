@@ -34,11 +34,19 @@ cp launcher.py build/app/default.py
 cp retrotele.py build/app/rt_app.py
 cp $MODULES schema.txt build/app/
 cp assets/* build/app/          # emoji sheets (Twemoji, CC-BY 4.0)
+# compiled crypto (native/build_native.sh) goes to C:\sys\bin\tgnative.pyd
+EXTRAS=""
+if [ -f native/tgnative.pyd ] && [ "$NATIVE" != 0 ]; then
+  mkdir -p build/app/extras/sys/bin
+  cp native/tgnative.pyd build/app/extras/sys/bin/
+  EXTRAS="--extrasdir=extras"
+  echo "including native/tgnative.pyd"
+fi
 
 $PY $ENS py2sis --uid=0xE7A3D5C2 --appname=RetroTele --version=$VERSION \
   --caption=RetroTele --shortcaption=RetroTele --vendor=RetroTele --icon=icon.svg \
   --caps=NetworkServices+LocalServices+ReadUserData+WriteUserData+UserEnvironment \
   --drive=C --heapsize=4k,24M --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
-  build/app dist/RetroTele.sis </dev/null >build/py2sis.log
+  $EXTRAS build/app dist/RetroTele.sis </dev/null >build/py2sis.log
 echo "built dist/RetroTele.sis"
 ls -la dist

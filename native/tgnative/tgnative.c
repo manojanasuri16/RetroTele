@@ -458,12 +458,12 @@ static const PyMethodDef tg_methods[] = {
 };
 
 #ifdef __SYMBIAN32__
-#define TG_EXPORT EXPORT_C
+#define TG_EXPORT DL_EXPORT(void)   /* EXPORT_C: Python looks it up as ordinal 1 */
 #else
-#define TG_EXPORT
+#define TG_EXPORT void
 #endif
 
-TG_EXPORT void inittgnative(void)
+TG_EXPORT inittgnative(void)
 {
     Py_InitModule("tgnative", (PyMethodDef *)tg_methods);
 }
