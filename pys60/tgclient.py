@@ -215,6 +215,7 @@ class Client:
         self.sessions = {}
         self.main_dc = int(store.get("main_dc", "2"))
         self.peers = {}        # key -> info dict (see peer_info)
+        self.verify = 0        # full msg_key check on received data (slow)
         self.me = None
         uid = store.get("user_id")
         if uid:
@@ -248,6 +249,7 @@ class Client:
             off = float(self.store.get("time_offset", "0"))
             s = mtproto.Session(self.net, self.schema, self, dc, key, salt, off,
                                 self.init_query)
+            s.verify = self.verify
             self.sessions[dc] = s
         return s
 
@@ -875,6 +877,18 @@ class Client:
             if revoke:
                 f["revoke"] = 1
         self.call(f, on_ok, on_err)
+
+    def forward(self, from_key, ids, to_key, on_ok, on_err):
+        rids = []
+        for i in ids:
+            rids.append(tgcrypto.random_long())
+
+        def ok(res, self=self, on_ok=on_ok):
+            self.handle_updates(res)
+            on_ok(res)
+        self.call({"_": "messages.forwardMessages", "from_peer": self.input_peer(from_key),
+                   "id": ids, "random_id": rids, "to_peer": self.input_peer(to_key)},
+                  ok, on_err)
 
     def decline_call(self, call):
         self.call({"_": "phone.discardCall", "duration": 0, "connection_id": 0,

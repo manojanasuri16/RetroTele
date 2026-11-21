@@ -168,6 +168,9 @@ def handle(f):
     if n == "messages.deleteMessages":
         state["deleted"] = (f["id"], f.get("revoke"))
         return {"_": "messages.affectedMessages", "pts": 1, "pts_count": 1}
+    if n == "messages.forwardMessages":
+        state["forwarded"] = (f["id"], f["to_peer"]["_"], len(f["random_id"]))
+        return {"_": "updates", "users": [], "chats": [], "date": 0, "seq": 0, "updates": []}
     if n == "phone.discardCall":
         state["declined"] = f["peer"]["id"]
         return {"_": "updates", "users": [], "chats": [], "date": 0, "seq": 0, "updates": []}
@@ -288,6 +291,8 @@ app.editor.set(u"Hello again")
 app.send_now(); app.net.run()
 mine = [m for m in app.msgs["u42"] if m["id"] == 11][0]
 assert mine["text"] == "Hello again" and mine["edited"], mine
+app.forward_message(mine); app.net.run()
+assert state["forwarded"] == ([11], "inputPeerSelf", 1), state
 popups[:] = [1]          # "Delete for me and Alice"
 app.delete_message(mine); app.net.run()
 assert state["deleted"] == ([11], 1), state

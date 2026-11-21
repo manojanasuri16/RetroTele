@@ -227,11 +227,23 @@ def big_emoji(g, x, y, k):
         return 0
 
 
+_WCACHE = {}
+_FCACHE = {}
+
+
 def _plain_width(g, text, f):
+    k = (text, f)
+    v = _WCACHE.get(k)
+    if v is not None:
+        return v
     try:
-        return g.measure_text(text, font=font(f))[1]
+        v = g.measure_text(text, font=font(f))[1]
     except:
-        return len(text) * 7
+        v = len(text) * 7
+    if len(_WCACHE) > 600:
+        _WCACHE.clear()
+    _WCACHE[k] = v
+    return v
 
 
 def width(g, text, f):
@@ -265,7 +277,23 @@ def _fit_count(g, text, f, maxw):
 
 
 def fit(g, text, f, maxw):
-    """text (emoji prepared) shortened with an ellipsis to fit maxw pixels."""
+    """text (emoji prepared) shortened with an ellipsis to fit maxw pixels.
+    Results are cached: the chat list redraws the same strings on every key."""
+    k = (text, f, maxw)
+    v = _FCACHE.get(k)
+    if v is not None:
+        return v
+    v = _fit(g, text, f, maxw)
+    if len(_FCACHE) > 400:
+        _FCACHE.clear()
+    _FCACHE[k] = v
+    return v
+
+
+def _fit(g, text, f, maxw):
+    text = to_u(text)
+    if len(text) > 160:
+        text = text[:160]       # only the start can be shown on one line
     text = prep(text).replace(u"\n", u" ")
     if maxw <= 0:
         return u""

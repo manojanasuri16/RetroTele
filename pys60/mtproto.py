@@ -116,6 +116,9 @@ class Session:
         self.last_rx = time.time()
         self.ping_armed = 0
         self.gen = 0            # connection generation (stale callbacks are ignored)
+        self.verify = 0         # check msg_key (SHA-256 of every packet; slow on the phone)
+        self.rxq = []           # received packets waiting to be decrypted
+        self.rx_job = None
         self.new_session()
 
     # ---------------------------------------------------------- basics
@@ -167,6 +170,8 @@ class Session:
         self.inlen = 0
         self.outq = []
         self.sending = 0
+        self.rxq = []
+        self.rx_job = None
         self.log("connecting to %s:%d" % (self.ip, self.port))
         self.net.connect(self.ip, self.port,
                          lambda c, self=self, gen=gen: self.on_connect(c, gen),
@@ -315,16 +320,58 @@ class Session:
             if self.dh is not None:
                 self.dh.got(pkt)
             return
-        try:
-            self.decrypt_packet(pkt)
-        except:
-            self.log("bad packet: " + err_text())
+        self.rxq.append(pkt)
+        if self.rx_job is None:
+            self.next_rx()
+
+    def next_rx(self):
+        """Decrypts queued packets in order; big ones a slice at a time so the
+        phone keeps reacting to keys meanwhile."""
+        while self.rx_job is None and self.rxq:
+            pkt = self.rxq.pop(0)
             try:
-                import traceback
-                self.log("".join(traceback.format_exception(
-                    sys.exc_info()[0], sys.exc_info()[1], sys.exc_info()[2])))
+                job = self.start_decrypt(pkt)
+                if len(pkt) <= 1600:
+                    job[0].step(len(pkt))
+                    self.finish_decrypt(job)
+                else:
+                    self.rx_job = job
+                    gen = self.gen
+                    self.net.later(0, lambda self=self, gen=gen: self.rx_slice(gen))
             except:
-                pass
+                self.rx_job = None
+                self.bad_packet()
+
+    def rx_slice(self, gen):
+        job = self.rx_job
+        if gen != self.gen or job is None:
+            return
+        try:
+            done = job[0].step(40)
+        except:
+            self.rx_job = None
+            self.bad_packet()
+            self.next_rx()
+            return
+        if not done:
+            self.net.later(0, lambda self=self, gen=gen: self.rx_slice(gen))
+            return
+        self.rx_job = None
+        try:
+            self.finish_decrypt(job)
+        except:
+            self.bad_packet()
+        if gen == self.gen:
+            self.next_rx()
+
+    def bad_packet(self):
+        self.log("bad packet: " + err_text())
+        try:
+            import traceback
+            self.log("".join(traceback.format_exception(
+                sys.exc_info()[0], sys.exc_info()[1], sys.exc_info()[2])))
+        except:
+            pass
 
     dh = None
 
@@ -436,7 +483,7 @@ class Session:
 
     # ---------------------------------------------------------- receiving
 
-    def decrypt_packet(self, pkt):
+    def start_decrypt(self, pkt):
         if pkt[:8] != self.auth_key_id:
             raise TLError("wrong auth_key_id")
         t0 = time.clock()
@@ -446,8 +493,12 @@ class Session:
         b = sha256(k[48:84] + msg_key)
         key = a[0:8] + b[8:24] + a[24:32]
         iv = b[0:8] + a[8:24] + b[24:32]
-        plain = ige_decrypt(pkt[24:], key, iv)
-        if sha256(k[96:128] + plain)[8:24] != msg_key:
+        return (tgcrypto.IgeJob(pkt[24:], key, iv, 1), msg_key, t0, len(pkt))
+
+    def finish_decrypt(self, job):
+        ige, msg_key, t0, size = job
+        plain = ige.result()
+        if self.verify and sha256(self.auth_key[96:128] + plain)[8:24] != msg_key:
             raise TLError("msg_key mismatch")
         if plain[8:16] != self.session_id:
             raise TLError("other session")
@@ -456,11 +507,18 @@ class Session:
         msg_id = r.long()
         seqno = r.int()
         n = r.int()
+        if n > len(plain) - 32 or n < 0:
+            raise TLError("bad length")
         self.handle(msg_id, seqno, plain[32:32 + n])
         t2 = time.clock()
         if t2 - t0 > 0.5:
             self.log("slow packet %d bytes: decrypt %.2fs, handle %.2fs" %
-                     (len(pkt), t1 - t0, t2 - t1))
+                     (size, t1 - t0, t2 - t1))
+
+    def decrypt_packet(self, pkt):
+        job = self.start_decrypt(pkt)
+        job[0].step(len(pkt))
+        self.finish_decrypt(job)
 
     def handle(self, msg_id, seqno, body):
         if seqno % 2 == 1:

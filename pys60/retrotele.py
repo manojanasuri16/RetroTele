@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.3.0"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.4.0"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -551,6 +551,7 @@ class App:
         self.client = tgclient.Client(self.net, self.schema, self, self.store,
                                       self.cfg.get("api_id"), self.cfg.get("api_hash"),
                                       to_b(VERSION))
+        self.client.verify = self.cfg.get("verify", "0") == "1"
         self.status(u"Connecting...")
         self.client.start()
         if self.client.logged_in():
@@ -874,6 +875,7 @@ class App:
 
     def got_dialogs(self, rows, more):
         self.loading_dialogs = 0
+        self.dialogs_time = time.time()
         self.done_wait()
         have = {}
         for r in rows:
@@ -1183,6 +1185,9 @@ class App:
         if self.client.can_write(self.chat_key) and not m["service"]:
             items.append(u"Reply")
             acts.append(lambda self=self, m=m: self.compose(m["id"]))
+        if not m["service"]:
+            items.append(u"Forward")
+            acts.append(lambda self=self, m=m: self.forward_message(m))
         if m.get("photo"):
             items.append(u"View picture")
             acts.append(lambda self=self, m=m: self.view_photo(m))
@@ -1384,6 +1389,27 @@ class App:
             i = i + 1
         self.dialogs.insert(i, d)
 
+    def forward_message(self, m):
+        keys = []
+        names = []
+        me = "u%d" % (self.client.me or 0)
+        keys.append(me)
+        names.append(u"Saved Messages")
+        for r in self.dialogs:
+            if r["key"] != me and self.client.can_write(r["key"]):
+                keys.append(r["key"])
+                names.append(one_line(self.client.peer_name(r["key"]), 40))
+        i = appuifw.selection_list(names, 1)
+        if i is None:
+            return
+        to = keys[i]
+        self.status(u"Forwarding...")
+
+        def ok(res, self=self, to=to):
+            self.done_wait()
+            self.show_toast(u"Forwarded", u"to " + to_u(self.client.peer_name(to)))
+        self.client.forward(self.chat_key, [m["id"]], to, ok, self.send_failed)
+
     def delete_message(self, m):
         key = self.chat_key
         choices = [u"Delete for me"]
@@ -1531,6 +1557,8 @@ class App:
             self.redraw_soon()
 
     def refresh_needed(self):
+        if self.loading_dialogs or time.time() - getattr(self, "dialogs_time", 0) < 60:
+            return      # just loaded (a new session is announced right after start)
         if self.screen in ("chat", "text", "compose") and self.chat_key:
             self.reload_chat()
         self.client.get_dialogs(self.got_dialogs, self.load_failed, 20)
@@ -1541,7 +1569,10 @@ class App:
         ap = u"Auto-download pictures: on"
         if not self.auto_photos():
             ap = u"Auto-download pictures: off"
-        items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder", ap]
+        fm = u"Fast mode: on"
+        if self.cfg.get("verify", "0") == "1":
+            fm = u"Fast mode: off (full check)"
+        items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder", ap, fm]
         i = appuifw.popup_menu(items, u"Settings")
         if i == 0:
             if self.setup_ap(1):
@@ -1555,6 +1586,20 @@ class App:
                 self.client.logout(lambda self=self: (self.done_wait(), self.logged_out()))
         elif i == 3:
             appuifw.note(u"Log: E:\\retrotele_log.txt, data: " + to_u(self.dir), "info")
+        elif i == 5:
+            if self.cfg.get("verify", "0") == "1":
+                self.cfg.set("verify", "0")
+                appuifw.note(u"Fast mode on: received data is decrypted but its SHA-256 "
+                             u"integrity hash is not checked (2-3x faster).", "info")
+            else:
+                self.cfg.set("verify", "1")
+                appuifw.note(u"Full check on: every received message is verified (slower).",
+                             "info")
+            self.cfg.save()
+            v = self.cfg.get("verify") == "1"
+            self.client.verify = v
+            for sess in self.client.sessions.values():
+                sess.verify = v
         elif i == 4:
             if self.auto_photos():
                 self.cfg.set("auto_photos", "0")

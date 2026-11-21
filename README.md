@@ -13,7 +13,7 @@ Modern Symbian Telegram apps such as Symbigram need Qt Quick Components (Symbian
 - Log in with your phone number and the code Telegram sends you, including the two-step verification password
 - Read chats and load older messages automatically by scrolling up. Replies, forwards and media show as labels such as `Photo`, `Voice message 0:04` and `Sticker`.
 - Write messages and reply to a selected one. Any number key in a chat starts a message.
-- **Edit** and **delete** your messages (for you, or for everyone)
+- **Edit**, **delete** (for you, or for everyone) and **forward** messages
 - **Pictures:** photos, GIFs and videos show a preview in the chat (a blurry one at once, then the real picture). Select a message, then *View picture* to see it full screen. Downloads can be turned off in Settings.
 - **Emoji** are drawn as pictures (the phone's fonts have none), and **stickers** show as their big emoji
 - An **incoming Telegram call** pops up so you can decline it, call back by phone, or reply with a message
@@ -21,6 +21,7 @@ Modern Symbian Telegram apps such as Symbigram need Qt Quick Components (Symbian
 - Search your chats and contacts, or open any @username
 - **Call** a contact's phone number as a normal phone call
 - The chat list is cached, so it appears instantly when the app starts
+- **Fast mode** (on by default): received data is decrypted but its SHA-256 integrity hash isn't checked, which makes loading 2-3x faster on the phone. Switch it off in Settings for the full check. Big packets are decrypted in slices so keys keep working meanwhile.
 
 There's no secret chats, file/video download, playback of GIFs or animated stickers, or answering **Telegram** voice/video calls. Calls need real-time audio streaming with the Opus codec and GIFs/stickers are MP4/WebP/Lottie, none of which Python for S60 1.4.5 can decode, so "Call" uses the normal phone line.
 
