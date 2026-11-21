@@ -1,0 +1,969 @@
+# RetroTele screens drawn on a Canvas: chat list with tabs, chat view with
+# bubbles, welcome screen. Telegram-like colours, round avatars (initials or
+# the tiny photo thumbnail Telegram sends with every chat).
+# Python 2.2 compatible: no conditional expressions, no sorted/enumerate.
+
+import appuifw
+import e32
+import graphics
+import key_codes
+
+# ---------------------------------------------------------------- look
+
+BLUE = 0x3390EC          # header, selection, badges
+BLUE_DARK = 0x2A7BCB
+BLUE_SOFT = 0xD6E8FB
+WHITE = 0xFFFFFF
+TEXT = 0x101418
+GREY = 0x707579
+GREY_LIGHT = 0xA7ABB0
+LINE = 0xE7EAED
+BG_CHAT = 0xC9DDEC       # chat background
+BUBBLE_IN = 0xFFFFFF
+BUBBLE_OUT = 0xE3FBC8
+TIME_IN = 0x8D969C
+TIME_OUT = 0x4FAE4E
+SERVICE = 0x6F8BA1
+MUTED = 0xC4C9CC
+GREEN = 0x4DCD5E
+HEADER_SUB = 0xD5E6FA
+
+AVATAR_COLOURS = [0xFF516A, 0xFF885E, 0x665FFF, 0x54CB68, 0x28C9B7, 0x2A9EF1, 0xD669ED]
+NAME_COLOURS = [0xE5464B, 0xE08A14, 0x8E59D8, 0x3BA83E, 0x1E9EA8, 0x2E86D6, 0xC2467F]
+
+try:
+    _AA = graphics.FONT_ANTIALIAS
+    _BOLD = graphics.FONT_BOLD
+except:
+    _AA = 0
+    _BOLD = 0
+
+FONTS = {
+    "title": (None, 18, _BOLD | _AA),
+    "name": (None, 15, _BOLD | _AA),
+    "text": (None, 15, _AA),
+    "small": (None, 12, _AA),
+    "smallb": (None, 12, _BOLD | _AA),
+    "tab": (None, 13, _BOLD | _AA),
+    "avatar": (None, 15, _BOLD | _AA),
+    "big": (None, 26, _BOLD | _AA),
+}
+FALLBACK = {"title": "title", "name": "title", "text": "normal", "small": "dense",
+            "smallb": "dense", "tab": "dense", "avatar": "title", "big": "title"}
+_font_ok = [None]
+
+
+def font(name):
+    if _font_ok[0] == 0:
+        return FALLBACK[name]
+    return FONTS[name]
+
+
+def check_fonts(img):
+    """Scalable fonts given as (name, size, flags) need S60 3rd FP1+; fall back."""
+    if _font_ok[0] is not None:
+        return
+    try:
+        img.text((0, 10), u"x", fill=0, font=FONTS["text"])
+        img.measure_text(u"x", font=FONTS["text"])
+        _font_ok[0] = 1
+    except:
+        _font_ok[0] = 0
+
+
+def to_u(s):
+    if type(s) is type(u""):
+        return s
+    if s is None:
+        return u""
+    try:
+        return unicode(s, "utf-8")
+    except:
+        return unicode(s, "latin-1")
+
+
+def width(g, text, f):
+    try:
+        return g.measure_text(text, font=font(f))[1]
+    except:
+        return len(text) * 7
+
+
+def fit(g, text, f, maxw):
+    """text shortened with an ellipsis to fit maxw pixels."""
+    text = to_u(text).replace(u"\n", u" ")
+    if maxw <= 0:
+        return u""
+    try:
+        n = g.measure_text(text, font=font(f), maxwidth=maxw)[2]
+    except:
+        n = maxw / 7
+    if n >= len(text):
+        return text
+    if n < 2:
+        return u""
+    try:
+        n = g.measure_text(text, font=font(f), maxwidth=maxw - width(g, u"\u2026", f))[2]
+    except:
+        n = n - 1
+    return text[:n].rstrip() + u"\u2026"
+
+
+def wrap(g, text, f, maxw, max_lines=200):
+    """Word-wraps text into lines of at most maxw pixels."""
+    out = []
+    for para in to_u(text).split(u"\n"):
+        while 1:
+            if len(out) >= max_lines:
+                return out
+            if not para:
+                out.append(u"")
+                break
+            try:
+                n = g.measure_text(para, font=font(f), maxwidth=maxw)[2]
+            except:
+                n = maxw / 7
+            if n >= len(para):
+                out.append(para)
+                break
+            if n < 1:
+                n = 1
+            cut = para.rfind(u" ", 0, n + 1)
+            if cut <= 0:
+                cut = n
+                out.append(para[:cut])
+                para = para[cut:]
+            else:
+                out.append(para[:cut])
+                para = para[cut + 1:]
+    return out
+
+
+def rrect(g, x1, y1, x2, y2, r, fill):
+    """Filled rounded rectangle."""
+    if r * 2 > y2 - y1:
+        r = (y2 - y1) / 2
+    if r * 2 > x2 - x1:
+        r = (x2 - x1) / 2
+    if r < 1:
+        g.rectangle((x1, y1, x2, y2), fill=fill)
+        return
+    d = r * 2
+    g.rectangle((x1 + r, y1, x2 - r, y2), fill=fill)
+    g.rectangle((x1, y1 + r, x2, y2 - r), fill=fill)
+    g.ellipse((x1, y1, x1 + d, y1 + d), fill=fill)
+    g.ellipse((x2 - d, y1, x2, y1 + d), fill=fill)
+    g.ellipse((x1, y2 - d, x1 + d, y2), fill=fill)
+    g.ellipse((x2 - d, y2 - d, x2, y2), fill=fill)
+
+
+def tick(g, x, y, colour, double):
+    """Sent (one tick) or read (two ticks) mark, 12x8 px from (x, y)."""
+    g.line((x, y + 4, x + 3, y + 7), outline=colour, width=2)
+    g.line((x + 3, y + 7, x + 8, y + 1), outline=colour, width=2)
+    if double:
+        g.line((x + 5, y + 6, x + 6, y + 7), outline=colour, width=2)
+        g.line((x + 6, y + 7, x + 11, y + 1), outline=colour, width=2)
+
+
+def plane(g, cx, cy, s, colour):
+    """A paper plane of size s centred at (cx, cy)."""
+    g.polygon([(cx - s / 2, cy - s / 10), (cx + s / 2, cy - s / 2), (cx + s / 5, cy + s / 2),
+               (cx, cy + s / 8)], fill=colour)
+    g.polygon([(cx, cy + s / 8), (cx - s / 12, cy + s / 3), (cx + s / 10, cy + s / 5)],
+              fill=colour)
+
+
+def bookmark(g, cx, cy, s, colour):
+    w = s * 2 / 5
+    g.polygon([(cx - w / 2, cy - s / 2), (cx + w / 2, cy - s / 2), (cx + w / 2, cy + s / 2),
+               (cx, cy + s / 4), (cx - w / 2, cy + s / 2)], fill=colour)
+
+
+def initials(name):
+    words = []
+    for w in to_u(name).split(u" "):
+        if w and (w[0].isalnum()):
+            words.append(w)
+    if not words:
+        n = to_u(name).strip()
+        if n:
+            return n[0].upper()
+        return u"?"
+    s = words[0][0]
+    if len(words) > 1:
+        s = s + words[1][0]
+    return s.upper()
+
+
+def colour_for(key, palette):
+    try:
+        n = long(key[1:])
+    except:
+        n = 0
+    return palette[int(n % len(palette))]
+
+
+def short_time(ts, now, tz):
+    """12:34 today, Mon this week, 21.11.24 older."""
+    import time
+    if not ts:
+        return u""
+    t = time.gmtime(ts + tz)
+    n = time.gmtime(now + tz)
+    if t[:3] == n[:3]:
+        return unicode(time.strftime("%H:%M", t))
+    if now - ts < 6 * 86400:
+        return unicode(time.strftime("%a", t))
+    return unicode(time.strftime("%d.%m.%y", t))
+
+
+def day_label(ts, now, tz):
+    import time
+    t = time.gmtime(ts + tz)
+    n = time.gmtime(now + tz)
+    if t[:3] == n[:3]:
+        return u"Today"
+    y = time.gmtime(now - 86400 + tz)
+    if t[:3] == y[:3]:
+        return u"Yesterday"
+    if t[0] == n[0]:
+        return unicode(time.strftime("%d %B", t)).lstrip(u"0")
+    return unicode(time.strftime("%d %B %Y", t)).lstrip(u"0")
+
+
+# ---------------------------------------------------------------- avatars
+
+class Avatars:
+    """Round avatars: initials on a colour, replaced by the photo thumbnail
+    once decoded. Thumbnails are decoded one per timer tick (keys stay
+    responsive) and kept for at most LIMIT chats."""
+    LIMIT = 60
+
+    def __init__(self, app, tmp_path):
+        self.app = app
+        self.tmp = tmp_path
+        self.images = {}       # (key, size) -> Image or None (no photo)
+        self.order = []
+        self.queue = []
+        self.masks = {}
+        self.busy = 0
+
+    def mask(self, s):
+        m = self.masks.get(s)
+        if m is None:
+            m = graphics.Image.new((s, s), "1")
+            m.clear(0)
+            m.ellipse((0, 0, s, s), fill=0xFFFFFF)
+            self.masks[s] = m
+        return m
+
+    def draw(self, g, key, name, photo, x, y, s, special=None):
+        img = self.images.get((key, s), 0)
+        if img:
+            try:
+                g.blit(img, target=(x, y), mask=self.mask(s))
+                return
+            except:
+                pass
+        g.ellipse((x, y, x + s, y + s), fill=colour_for(key, AVATAR_COLOURS))
+        if special == "saved":
+            bookmark(g, x + s / 2, y + s / 2, s / 2, WHITE)
+            return
+        t = initials(name)
+        f = "avatar"
+        w = width(g, t, f)
+        g.text((x + (s - w) / 2, y + s / 2 + 5), t, fill=WHITE, font=font(f))
+        if img == 0 and photo:
+            self.images[(key, s)] = None
+            self.queue.append((key, s, photo))
+            if not self.busy:
+                self.busy = 1
+                self.app.net.later(0.05, self.work)
+
+    def work(self):
+        if not self.queue:
+            self.busy = 0
+            return
+        key, s, photo = self.queue.pop(0)
+        try:
+            import tgclient
+            jpg = tgclient.stripped_to_jpeg(photo)
+            if jpg:
+                f = open(self.tmp, "wb")
+                f.write(jpg)
+                f.close()
+                img = graphics.Image.open(self.tmp)
+                img = img.resize((s, s))
+                self.images[(key, s)] = img
+                self.order.append((key, s))
+                if len(self.order) > self.LIMIT:
+                    old = self.order.pop(0)
+                    self.images[old] = None
+                self.app.avatar_ready()
+        except:
+            pass
+        self.app.net.later(0.05, self.work)
+
+
+# ---------------------------------------------------------------- base view
+
+class CanvasView:
+    HEADER_H = 46
+
+    def __init__(self, app):
+        self.app = app
+        self.canvas = None
+        self.buf = None
+
+    def show(self):
+        self.canvas = appuifw.Canvas(redraw_callback=self.on_redraw)
+        appuifw.app.body = self.canvas
+        c = self.canvas
+        c.bind(key_codes.EKeyUpArrow, lambda self=self: self.key("up"))
+        c.bind(key_codes.EKeyDownArrow, lambda self=self: self.key("down"))
+        c.bind(key_codes.EKeyLeftArrow, lambda self=self: self.key("left"))
+        c.bind(key_codes.EKeyRightArrow, lambda self=self: self.key("right"))
+        c.bind(key_codes.EKeySelect, lambda self=self: self.key("select"))
+        for ch in "0123456789*#":
+            try:
+                c.bind(ord(ch), lambda self=self, ch=ch: self.key(ch))
+            except:
+                pass
+        self.draw()
+
+    def size(self):
+        try:
+            return self.canvas.size
+        except:
+            return (240, 292)
+
+    def on_redraw(self, rect):
+        if self.buf is not None:
+            try:
+                self.canvas.blit(self.buf)
+                return
+            except:
+                pass
+        self.draw()
+
+    def draw(self):
+        if self.canvas is None:
+            return
+        w, h = self.size()
+        if self.buf is None or self.buf.size != (w, h):
+            self.buf = graphics.Image.new((w, h))
+        g = self.buf
+        check_fonts(g)
+        try:
+            self.paint(g, w, h)
+        except:
+            import sys
+            self.app.log("paint: " + str(sys.exc_info()[1]))
+            try:
+                import traceback
+                self.app.log("".join(traceback.format_exception(
+                    sys.exc_info()[0], sys.exc_info()[1], sys.exc_info()[2])))
+            except:
+                pass
+        try:
+            self.canvas.blit(g)
+        except:
+            pass
+
+    def key(self, k):
+        pass
+
+    def paint(self, g, w, h):
+        pass
+
+    def header(self, g, w, title, sub, key=None, special=None, online=0):
+        H = self.HEADER_H
+        g.rectangle((0, 0, w, H), fill=BLUE)
+        x = 10
+        if key is not None:
+            self.app.avatars.draw(g, key, title, self.app.client.peer(key).get("photo"),
+                                  8, 7, 32, special)
+            if online:
+                g.ellipse((31, 30, 41, 40), fill=BLUE)
+                g.ellipse((33, 32, 39, 38), fill=GREEN)
+            x = 48
+        busy = self.app.busy
+        if busy:
+            sub = busy
+        if sub:
+            g.text((x, 21), fit(g, title, "name", w - x - 8), fill=WHITE, font=font("name"))
+            g.text((x, 38), fit(g, sub, "small", w - x - 8), fill=HEADER_SUB,
+                   font=font("small"))
+        else:
+            g.text((x, 30), fit(g, title, "title", w - x - 8), fill=WHITE,
+                   font=font("title"))
+
+    def toast(self, g, w, h):
+        t = self.app.toast_text
+        if not t:
+            return
+        y = self.HEADER_H + 4
+        rrect(g, 6, y, w - 6, y + 40, 8, 0x25303A)
+        g.text((14, y + 17), fit(g, t[0], "smallb", w - 28), fill=0x8CC8FF,
+               font=font("smallb"))
+        g.text((14, y + 33), fit(g, t[1], "small", w - 28), fill=WHITE, font=font("small"))
+
+    def scrollbar(self, g, w, y1, y2, first, shown, total):
+        if total <= shown or total <= 0:
+            return
+        span = y2 - y1
+        th = max(span * shown / total, 12)
+        ty = y1 + (span - th) * first / max(total - shown, 1)
+        rrect(g, w - 4, ty, w - 1, ty + th, 1, 0xB9C3CC)
+
+
+# ---------------------------------------------------------------- chat list
+
+class ChatListView(CanvasView):
+    ROW_H = 54
+    TABS_H = 30
+
+    def __init__(self, app):
+        CanvasView.__init__(self, app)
+        self.tab = 0
+        self.cur = 0
+        self.top = 0
+        self.tab_scroll = 0
+
+    def rows(self):
+        return self.app.tab_rows(self.tab)
+
+    def key(self, k):
+        rows = self.rows()
+        n = len(rows)
+        if k == "up":
+            if self.cur > 0:
+                self.cur = self.cur - 1
+            elif n:
+                self.cur = n - 1
+        elif k == "down":
+            if self.cur < n - 1:
+                self.cur = self.cur + 1
+            else:
+                self.cur = 0
+            if self.cur >= n - 3:
+                self.app.near_end(self.tab)
+        elif k == "left" or k == "right":
+            tabs = self.app.tabs()
+            if k == "left":
+                self.tab = (self.tab - 1) % len(tabs)
+            else:
+                self.tab = (self.tab + 1) % len(tabs)
+            self.cur = 0
+            self.top = 0
+            self.app.tab_changed(self.tab)
+        elif k == "select":
+            if 0 <= self.cur < n:
+                self.app.open_row(rows[self.cur])
+            return
+        elif k in ("2",):
+            return self.key("up")
+        elif k in ("8",):
+            return self.key("down")
+        elif k == "4":
+            return self.key("left")
+        elif k == "6":
+            return self.key("right")
+        elif k == "5":
+            return self.key("select")
+        self.draw()
+
+    def current(self):
+        rows = self.rows()
+        if 0 <= self.cur < len(rows):
+            return rows[self.cur]
+        return None
+
+    def paint(self, g, w, h):
+        app = self.app
+        g.clear(WHITE)
+        sub = None
+        if not app.is_online:
+            sub = u"Waiting for network..."
+        self.header(g, w, u"RetroTele", sub)
+        # tabs
+        tabs = app.tabs()
+        ty = self.HEADER_H
+        g.rectangle((0, ty, w, ty + self.TABS_H), fill=BLUE)
+        xs = []
+        x = 0
+        for t in tabs:
+            label = to_u(t[0])
+            tw = width(g, label, "tab") + 20
+            xs.append((x, tw, label, t))
+            x = x + tw
+        if self.tab >= len(xs):
+            self.tab = 0
+        sx, sw, sl, st = xs[self.tab]
+        if sx - self.tab_scroll < 0:
+            self.tab_scroll = sx
+        if sx + sw - self.tab_scroll > w:
+            self.tab_scroll = sx + sw - w
+        i = 0
+        for x, tw, label, t in xs:
+            xx = x - self.tab_scroll
+            if xx + tw >= 0 and xx <= w:
+                colour = HEADER_SUB
+                if i == self.tab:
+                    colour = WHITE
+                    g.rectangle((xx + 6, ty + self.TABS_H - 3, xx + tw - 6, ty + self.TABS_H),
+                                fill=WHITE)
+                g.text((xx + 10, ty + 19), label, fill=colour, font=font("tab"))
+                badge = t[1]
+                if badge:
+                    pass
+            i = i + 1
+        # rows
+        rows = self.rows()
+        y0 = ty + self.TABS_H
+        visible = max((h - y0) / self.ROW_H, 1)
+        if self.cur >= len(rows):
+            self.cur = max(len(rows) - 1, 0)
+        if self.cur < self.top:
+            self.top = self.cur
+        if self.cur >= self.top + visible:
+            self.top = self.cur - visible + 1
+        if not rows:
+            msg = app.empty_text(self.tab)
+            g.text(((w - width(g, msg, "text")) / 2, y0 + 60), msg, fill=GREY,
+                   font=font("text"))
+        y = y0
+        i = self.top
+        while i < len(rows) and y < h:
+            self.paint_row(g, w, y, rows[i], i == self.cur)
+            y = y + self.ROW_H
+            i = i + 1
+        self.scrollbar(g, w, y0, h, self.top, visible, len(rows))
+        self.toast(g, w, h)
+
+    def paint_row(self, g, w, y, r, sel):
+        app = self.app
+        cl = app.client
+        key = r["key"]
+        RH = self.ROW_H
+        if sel:
+            g.rectangle((0, y, w, y + RH), fill=BLUE)
+            c_name = WHITE
+            c_sub = WHITE
+            c_time = WHITE
+            c_sender = WHITE
+        else:
+            c_name = TEXT
+            c_sub = GREY
+            c_time = GREY
+            c_sender = BLUE
+        p = cl.peer(key)
+        special = None
+        name = cl.peer_name(key)
+        if p["kind"] == "self":
+            special = "saved"
+        app.avatars.draw(g, key, name, p.get("photo"), 8, y + 7, 40, special)
+        if r.get("online"):
+            g.ellipse((37, y + 36, 49, y + 48), fill=(sel and BLUE) or WHITE)
+            g.ellipse((39, y + 38, 47, y + 46), fill=GREEN)
+        x = 58
+        # right column: time and ticks
+        rt = r.get("time", u"")
+        tw = width(g, rt, "small")
+        g.text((w - 8 - tw, y + 20), rt, fill=c_time, font=font("small"))
+        right = tw + 14
+        if r.get("out") and r.get("read_out") is not None and not r.get("contact_row"):
+            read = r["top"] <= r.get("read_out", 0)
+            tc = TIME_OUT
+            if sel:
+                tc = WHITE
+            tick(g, w - 8 - tw - 15, y + 11, tc, read)
+            right = right + 16
+        kind = p["kind"]
+        nx = x
+        if kind in ("group", "supergroup", "channel") and not r.get("contact_row"):
+            # a small group / channel marker before the name
+            ic = GREY
+            if sel:
+                ic = WHITE
+            if kind == "channel":
+                g.polygon([(nx, y + 13), (nx + 4, y + 13), (nx + 9, y + 9), (nx + 9, y + 21),
+                           (nx + 4, y + 17), (nx, y + 17)], fill=ic)
+            else:
+                g.ellipse((nx + 1, y + 9, nx + 6, y + 14), fill=ic)
+                g.ellipse((nx, y + 15, nx + 7, y + 22), fill=ic)
+                g.ellipse((nx + 6, y + 10, nx + 10, y + 14), fill=ic)
+            nx = nx + 13
+        g.text((nx, y + 21), fit(g, name, "name", w - nx - right), fill=c_name,
+               font=font("name"))
+        # second line: sender, preview, unread badge
+        badge = u""
+        if r.get("unread"):
+            badge = unicode(str(r["unread"]))
+        elif r.get("mark"):
+            badge = u" "
+        bw = 0
+        if badge:
+            bw = max(width(g, badge, "smallb") + 12, 22)
+            bc = BLUE
+            if r.get("muted"):
+                bc = MUTED
+            fc = WHITE
+            if sel:
+                bc = WHITE
+                fc = BLUE
+            rrect(g, w - 8 - bw, y + 30, w - 8, y + 50, 10, bc)
+            g.text((w - 8 - bw + (bw - width(g, badge, "smallb")) / 2, y + 45), badge,
+                   fill=fc, font=font("smallb"))
+            bw = bw + 6
+        px = x
+        maxw = w - 8 - bw - px
+        sender = to_u(r.get("sender", u""))
+        if sender:
+            s = sender + u": "
+            sw = width(g, s, "text")
+            if sw < maxw / 2:
+                g.text((px, y + 44), s, fill=c_sender, font=font("text"))
+                px = px + sw
+                maxw = maxw - sw
+        g.text((px, y + 44), fit(g, r.get("preview", u""), "text", maxw), fill=c_sub,
+               font=font("text"))
+        if not sel:
+            g.line((x, y + RH - 1, w, y + RH - 1), outline=LINE)
+
+
+# ---------------------------------------------------------------- chat view
+
+class ChatView(CanvasView):
+    INPUT_H = 38
+    PAD = 7
+
+    def __init__(self, app, key):
+        CanvasView.__init__(self, app)
+        self.key_ = key
+        self.sel = -1          # index into messages; len(messages) = input bar
+        self.layout_cache = {}  # (id, text, width) -> layout
+        self.scroll_to_sel = 1
+
+    def messages(self):
+        return self.app.chat_messages(self.key_)
+
+    def key(self, k):
+        msgs = self.messages()
+        n = len(msgs)
+        if self.sel < 0 or self.sel > n:
+            self.sel = n
+        if k == "up" or k == "2":
+            if self.sel > 0:
+                self.sel = self.sel - 1
+                if self.sel < 3:
+                    self.app.load_older()
+            else:
+                self.app.load_older()
+        elif k == "down" or k == "8":
+            if self.sel < n:
+                self.sel = self.sel + 1
+        elif k == "select" or k == "5":
+            if self.sel >= n:
+                self.app.compose()
+            else:
+                self.app.message_menu(msgs[self.sel])
+            return
+        elif k == "left":
+            self.app.back_to_chats()
+            return
+        elif k == "right":
+            pass
+        elif k in "0134679*#":
+            self.app.compose()
+            return
+        self.draw()
+
+    def selected(self):
+        msgs = self.messages()
+        if 0 <= self.sel < len(msgs):
+            return msgs[self.sel]
+        return None
+
+    def at_bottom(self):
+        return self.sel < 0 or self.sel >= len(self.messages())
+
+    def layout(self, g, m, maxw, group):
+        """Lines and size of one bubble (cached)."""
+        ck = (m["id"], m["text"], m["media"], maxw, m.get("edited", 0))
+        lay = self.layout_cache.get(ck)
+        if lay is not None:
+            return lay
+        lines = []
+        if m["service"]:
+            lines = wrap(g, m["text"], "small", maxw - 16, 4)
+            lw = 0
+            for l in lines:
+                lw = max(lw, width(g, l, "small"))
+            lay = {"service": 1, "lines": lines, "w": lw + 16, "h": len(lines) * 15 + 8}
+            self.layout_cache[ck] = lay
+            return lay
+        inner = maxw - 2 * self.PAD
+        head = []
+        if group and not m["out"]:
+            head.append(("name", fit(g, m["from"], "smallb", inner)))
+        if m.get("fwd"):
+            head.append(("fwd", fit(g, u"Forwarded from " + to_u(m["fwd"]), "small", inner)))
+        if m.get("reply_to"):
+            q = self.app.quote_for(self.key_, m["reply_to"])
+            head.append(("reply", (fit(g, q[0], "smallb", inner - 8),
+                                   fit(g, q[1], "small", inner - 8))))
+        body = []
+        if m["media"]:
+            for l in wrap(g, m["media"], "text", inner, 3):
+                body.append(("media", l))
+        if m["text"]:
+            for l in wrap(g, m["text"], "text", inner, 120):
+                body.append(("text", l))
+        meta = self.app.hhmm(m["date"])
+        if m.get("edited"):
+            meta = u"edited " + meta
+        mw = width(g, meta, "small") + 4
+        if m["out"]:
+            mw = mw + 16
+        bw = mw
+        for kind, l in head:
+            if kind == "reply":
+                bw = max(bw, max(width(g, l[0], "smallb"), width(g, l[1], "small")) + 8)
+            else:
+                bw = max(bw, width(g, l, "small"))
+        last_w = 0
+        for kind, l in body:
+            last_w = width(g, l, "text")
+            bw = max(bw, last_w)
+        h = self.PAD
+        for kind, l in head:
+            if kind == "reply":
+                h = h + 34
+            else:
+                h = h + 15
+        h = h + len(body) * 18
+        # time on the last line if it fits, else on its own line
+        meta_own_line = 1
+        if body and last_w + mw + 8 <= inner:
+            meta_own_line = 0
+            bw = max(bw, last_w + mw + 8)
+        if meta_own_line:
+            h = h + 15
+        h = h + 6
+        lay = {"service": 0, "head": head, "body": body, "meta": meta, "mw": mw,
+               "own": meta_own_line, "w": bw + 2 * self.PAD, "h": h}
+        self.layout_cache[ck] = lay
+        return lay
+
+    def items(self, g, w):
+        """[(kind, data, height)] for the whole conversation."""
+        app = self.app
+        msgs = self.messages()
+        maxw = w * 4 / 5
+        group = app.client.is_group(self.key_)
+        out = []
+        last_day = None
+        import time
+        i = 0
+        for m in msgs:
+            day = time.gmtime(m["date"] + app.tz)[:3]
+            if day != last_day:
+                out.append(("day", day_label(m["date"], app.client.server_time(), app.tz),
+                            30, -1))
+                last_day = day
+            lay = self.layout(g, m, maxw, group)
+            out.append(("msg", (m, lay), lay["h"] + 6, i))
+            i = i + 1
+        return out
+
+    def paint(self, g, w, h):
+        app = self.app
+        cl = app.client
+        key = self.key_
+        g.clear(BG_CHAT)
+        msgs = self.messages()
+        n = len(msgs)
+        if self.sel < 0 or self.sel > n:
+            self.sel = n
+        top = self.HEADER_H
+        bottom = h - self.INPUT_H
+        items = self.items(g, w)
+        # total height and position of the selected item
+        total = 0
+        sel_y = None
+        sel_h = 0
+        for kind, data, ih, idx in items:
+            if idx == self.sel:
+                sel_y = total
+                sel_h = ih
+            total = total + ih
+        total = total + 6
+        view = bottom - top
+        # the end of the conversation sits at the bottom; scroll to keep the
+        # selection visible
+        if sel_y is None:
+            off = max(total - view, 0)
+        else:
+            off = max(total - view, 0)
+            if sel_y < off:
+                off = sel_y
+            if sel_y + sel_h > off + view:
+                off = sel_y + sel_h - view
+            if sel_h > view:
+                off = sel_y
+            off = max(min(off, max(total - view, 0)), 0)
+        base = top + max(view - total, 0) - off
+        y = base + 4
+        for kind, data, ih, idx in items:
+            if y + ih >= top and y <= bottom:
+                if kind == "day":
+                    tw = width(g, data, "smallb") + 20
+                    rrect(g, (w - tw) / 2, y + 6, (w + tw) / 2, y + 24, 9, 0x8FA9BE)
+                    g.text(((w - tw) / 2 + 10, y + 20), data, fill=WHITE, font=font("smallb"))
+                else:
+                    self.paint_msg(g, w, y, data[0], data[1], idx == self.sel)
+            y = y + ih
+        if not msgs:
+            t = app.chat_empty_text()
+            tw = width(g, t, "small") + 24
+            rrect(g, (w - tw) / 2, top + 60, (w + tw) / 2, top + 84, 12, 0x8FA9BE)
+            g.text(((w - tw) / 2 + 12, top + 77), t, fill=WHITE, font=font("small"))
+        # input bar
+        g.rectangle((0, bottom, w, h), fill=WHITE)
+        g.line((0, bottom, w, bottom), outline=LINE)
+        focus = self.sel >= n
+        if cl.can_write(key):
+            fc = 0xF1F3F5
+            if focus:
+                rrect(g, 5, bottom + 4, w - 5, h - 4, 15, BLUE)
+                rrect(g, 7, bottom + 6, w - 7, h - 6, 13, WHITE)
+            else:
+                rrect(g, 6, bottom + 5, w - 6, h - 5, 14, fc)
+            hint = app.draft_preview(key)
+            colour = TEXT
+            if not hint:
+                hint = u"Message"
+                colour = GREY_LIGHT
+            g.text((18, bottom + 25), fit(g, hint, "text", w - 64), fill=colour,
+                   font=font("text"))
+            plane(g, w - 24, bottom + self.INPUT_H / 2, 16, (focus and BLUE) or GREY_LIGHT)
+        else:
+            t = u"Only admins can post here"
+            g.text(((w - width(g, t, "small")) / 2, bottom + 24), t, fill=GREY,
+                   font=font("small"))
+        # header last so it covers scrolled bubbles
+        p = cl.peer(key)
+        special = None
+        if p["kind"] == "self":
+            special = "saved"
+        self.header(g, w, cl.peer_name(key), cl.status_text(key), key, special,
+                    cl.is_online(key))
+        self.toast(g, w, h)
+
+    def paint_msg(self, g, w, y, m, lay, sel):
+        if lay["service"]:
+            bw = lay["w"]
+            x1 = (w - bw) / 2
+            bg = 0x8FA9BE
+            if sel:
+                bg = BLUE
+            rrect(g, x1, y + 2, x1 + bw, y + 2 + lay["h"], 9, bg)
+            ly = y + 17
+            for l in lay["lines"]:
+                g.text(((w - width(g, l, "small")) / 2, ly), l, fill=WHITE, font=font("small"))
+                ly = ly + 15
+            return
+        bw = lay["w"]
+        bh = lay["h"]
+        if m["out"]:
+            x1 = w - 8 - bw
+            fill = BUBBLE_OUT
+        else:
+            x1 = 8
+            fill = BUBBLE_IN
+        x2 = x1 + bw
+        y1 = y + 2
+        y2 = y1 + bh
+        if sel:
+            rrect(g, x1 - 2, y1 - 2, x2 + 2, y2 + 2, 12, BLUE)
+        # tail
+        if m["out"]:
+            g.polygon([(x2 - 6, y2 - 10), (x2 + 5, y2), (x2 - 8, y2)], fill=fill)
+        else:
+            g.polygon([(x1 + 6, y2 - 10), (x1 - 5, y2), (x1 + 8, y2)], fill=fill)
+        rrect(g, x1, y1, x2, y2, 10, fill)
+        P = self.PAD
+        ty = y1 + P
+        for kind, l in lay["head"]:
+            if kind == "name":
+                g.text((x1 + P, ty + 11), l, fill=colour_for(m.get("from_key") or "u0",
+                                                             NAME_COLOURS),
+                       font=font("smallb"))
+                ty = ty + 15
+            elif kind == "fwd":
+                g.text((x1 + P, ty + 11), l, fill=BLUE, font=font("small"))
+                ty = ty + 15
+            else:
+                qc = BLUE
+                if m["out"]:
+                    qc = TIME_OUT
+                g.rectangle((x1 + P, ty + 2, x1 + P + 2, ty + 31), fill=qc)
+                g.text((x1 + P + 7, ty + 13), l[0], fill=qc, font=font("smallb"))
+                g.text((x1 + P + 7, ty + 28), l[1], fill=GREY, font=font("small"))
+                ty = ty + 34
+        for kind, l in lay["body"]:
+            colour = TEXT
+            if kind == "media":
+                colour = BLUE_DARK
+                if m["out"]:
+                    colour = 0x3A8E3B
+            g.text((x1 + P, ty + 14), l, fill=colour, font=font("text"))
+            ty = ty + 18
+        mc = TIME_IN
+        if m["out"]:
+            mc = TIME_OUT
+        mx = x2 - P - lay["mw"]
+        my = y2 - 6
+        g.text((mx, my), lay["meta"], fill=mc, font=font("small"))
+        if m["out"]:
+            read = m["id"] <= self.app.read_out(self.key_)
+            tick(g, x2 - P - 13, my - 9, mc, read)
+
+
+# ---------------------------------------------------------------- welcome
+
+class WelcomeView(CanvasView):
+    def __init__(self, app, lines):
+        CanvasView.__init__(self, app)
+        self.lines = lines
+
+    def key(self, k):
+        if k == "select" or k == "5":
+            self.app.login_phone()
+
+    def paint(self, g, w, h):
+        g.clear(WHITE)
+        cx = w / 2
+        r = 36
+        top = max((h - 250) / 2, 8)
+        g.ellipse((cx - r, top, cx + r, top + 2 * r), fill=0x2AABEE)
+        plane(g, cx - 2, top + r, 38, WHITE)
+        t = u"RetroTele"
+        y = top + 2 * r + 38
+        g.text((cx - width(g, t, "big") / 2, y), t, fill=TEXT, font=font("big"))
+        y = y + 26
+        for l in self.lines:
+            for ll in wrap(g, l, "text", w - 30, 3):
+                if y > h - 64:
+                    break
+                g.text((cx - width(g, ll, "text") / 2, y), ll, fill=GREY, font=font("text"))
+                y = y + 19
+        if self.app.busy:
+            b = self.app.busy
+            g.text((cx - width(g, b, "small") / 2, h - 50), b, fill=BLUE, font=font("small"))
+        lbl = u"Start messaging"
+        bw = width(g, lbl, "name") + 40
+        rrect(g, cx - bw / 2, h - 40, cx + bw / 2, h - 8, 16, BLUE)
+        g.text((cx - width(g, lbl, "name") / 2, h - 19), lbl, fill=WHITE, font=font("name"))

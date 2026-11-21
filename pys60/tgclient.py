@@ -1,6 +1,6 @@
 # Telegram client logic for RetroTele: sessions per data centre, login,
-# chats, history, sending and live updates. No UI code here.
-# Python 2.2 compatible.
+# chats and folders, history, sending, read state and live updates.
+# No UI code here. Python 2.2 compatible.
 
 import time
 import sys
@@ -14,6 +14,9 @@ from mtproto import RpcError
 # ui object (the app) gets:
 #   log(text), status(text)
 #   new_message(key, msg)        msg as returned by norm_message()
+#   message_edited(key, msg)
+#   read_changed(key)            read ticks / unread counts changed
+#   peer_changed(key)            name / online status changed
 #   refresh_needed()             updates were missed: reload what is shown
 #   logged_out()                 the authorization is gone
 #   online(flag)                 connection state of the main data centre
@@ -32,7 +35,7 @@ def err_text():
 
 
 class Store:
-    """key=value text file (session data); written atomically enough for us."""
+    """key=value text file (session data and settings)."""
     def __init__(self, path):
         self.path = path
         self.d = {}
@@ -71,44 +74,46 @@ class Store:
 
 
 MEDIA_LABELS = {
-    "messageMediaPhoto": "[Photo]", "messageMediaGeo": "[Location]",
-    "messageMediaContact": "[Contact]", "messageMediaUnsupported": "[Unsupported]",
-    "messageMediaDocument": "[File]", "messageMediaWebPage": "",
-    "messageMediaVenue": "[Venue]", "messageMediaGame": "[Game]",
-    "messageMediaInvoice": "[Invoice]", "messageMediaGeoLive": "[Live location]",
-    "messageMediaPoll": "[Poll]", "messageMediaDice": "[Dice]",
-    "messageMediaStory": "[Story]", "messageMediaGiveaway": "[Giveaway]",
-    "messageMediaPaidMedia": "[Paid media]", "messageMediaToDo": "[To-do list]",
+    "messageMediaPhoto": "Photo", "messageMediaGeo": "Location",
+    "messageMediaContact": "Contact", "messageMediaUnsupported": "Unsupported message",
+    "messageMediaDocument": "File", "messageMediaWebPage": "",
+    "messageMediaVenue": "Venue", "messageMediaGame": "Game",
+    "messageMediaInvoice": "Invoice", "messageMediaGeoLive": "Live location",
+    "messageMediaPoll": "Poll", "messageMediaDice": "Dice",
+    "messageMediaStory": "Story", "messageMediaGiveaway": "Giveaway",
+    "messageMediaPaidMedia": "Paid media", "messageMediaToDo": "To-do list",
 }
 
 
 def doc_label(doc):
-    """[Sticker], [Voice message], [Video], [Music] or [File name.ext]."""
+    """Sticker, Voice message, Video, Music or the file name."""
     if type(doc) is not type({}):
-        return "[File]"
+        return "File"
     name = ""
     for a in doc.get("attributes", []):
         n = a["_"]
         if n == "documentAttributeSticker":
-            return "[Sticker " + a.get("alt", "") + "]"
+            return ("Sticker " + a.get("alt", "")).strip()
         if n == "documentAttributeAnimated":
-            return "[GIF]"
+            return "GIF"
         if n == "documentAttributeAudio":
             if a.get("voice"):
-                return "[Voice message %ds]" % a.get("duration", 0)
+                return "Voice message %d:%02d" % (a.get("duration", 0) / 60,
+                                                  a.get("duration", 0) % 60)
             t = a.get("title") or ""
             if a.get("performer"):
                 t = a["performer"] + " - " + t
-            return "[Music " + t + "]"
+            return ("Music " + t).strip()
         if n == "documentAttributeVideo":
+            d = int(a.get("duration", 0))
             if a.get("round_message"):
-                return "[Video message]"
-            return "[Video %ds]" % int(a.get("duration", 0))
+                return "Video message %d:%02d" % (d / 60, d % 60)
+            return "Video %d:%02d" % (d / 60, d % 60)
         if n == "documentAttributeFilename":
             name = a.get("file_name", "")
     if name:
-        return "[File " + name + "]"
-    return "[File]"
+        return name
+    return "File"
 
 
 def peer_key(p):
@@ -124,6 +129,27 @@ def peer_key(p):
     return None
 
 
+def input_peer_key(p, me):
+    """InputPeer (as found in folders) -> key."""
+    n = p.get("_")
+    if n == "inputPeerSelf":
+        return "u%d" % (me or 0)
+    if n == "inputPeerUser":
+        return "u%d" % p["user_id"]
+    if n == "inputPeerChat":
+        return "c%d" % p["chat_id"]
+    if n == "inputPeerChannel":
+        return "h%d" % p["channel_id"]
+    return None
+
+
+def text_of(t):
+    """TextWithEntities or plain string -> string."""
+    if type(t) is type({}):
+        return t.get("text", "")
+    return t or ""
+
+
 class Client:
     def __init__(self, net, schema, ui, store, api_id, api_hash, version="1.0.0"):
         self.net = net
@@ -136,8 +162,7 @@ class Client:
         self.version = version
         self.sessions = {}
         self.main_dc = int(store.get("main_dc", "2"))
-        self.users = {}
-        self.chats = {}
+        self.peers = {}        # key -> info dict (see peer_info)
         self.me = None
         uid = store.get("user_id")
         if uid:
@@ -177,6 +202,9 @@ class Client:
     def logged_in(self):
         return self.me is not None and self.store.get("dc%d_key" % self.main_dc)
 
+    def server_time(self):
+        return int(time.time() + self.session().time_offset)
+
     # events from mtproto.Session
     def status(self, text):
         self.ui.status(text)
@@ -197,6 +225,7 @@ class Client:
             if self.me is not None:
                 # tell the server we want updates on this connection
                 self.call({"_": "updates.getState"}, lambda r: None, lambda e: None)
+                self.set_online(1)
 
     def disconnected(self, s, why):
         if s.dc_id == self.main_dc:
@@ -245,6 +274,11 @@ class Client:
 
     def start(self):
         self.session().start()
+
+    def set_online(self, flag):
+        """Shows you as online (or last seen now) to your contacts."""
+        self.call({"_": "account.updateStatus", "offline": not flag},
+                  lambda r: None, lambda e: None)
 
     def forget_login(self):
         self.me = None
@@ -304,25 +338,98 @@ class Client:
     # ---------------------------------------------------------- peers
 
     def collect(self, res):
-        """Remembers users and chats (names, access hashes) from any result."""
+        """Remembers users and chats (names, access hashes, photos) from any result."""
         if type(res) is not type({}):
             return
         for u in res.get("users", []):
-            if type(u) is type({}) and u.get("id") is not None:
-                old = self.users.get(u["id"])
-                if u.get("min") and old is not None and old.get("access_hash"):
-                    continue
-                self.users[u["id"]] = u
+            self.add_user(u)
         for c in res.get("chats", []):
-            if type(c) is type({}) and c.get("id") is not None:
-                old = self.chats.get(c["id"])
-                if c.get("min") and old is not None and old.get("access_hash"):
-                    continue
-                self.chats[c["id"]] = c
+            self.add_chat(c)
         if res.get("user"):
-            u = res["user"]
-            if type(u) is type({}) and u.get("id") is not None:
-                self.users[u["id"]] = u
+            self.add_user(res["user"])
+
+    def add_user(self, u):
+        if type(u) is not type({}) or u.get("id") is None:
+            return
+        key = "u%d" % u["id"]
+        old = self.peers.get(key)
+        if u.get("min") and old is not None:
+            return    # min objects lack the access hash and phone
+        if u["_"] == "userEmpty":
+            name = "Deleted account"
+        else:
+            name = ((u.get("first_name") or "") + " " + (u.get("last_name") or "")).strip()
+        if u.get("deleted"):
+            name = "Deleted account"
+        if not name:
+            name = u.get("username") or u.get("phone") or ("User %d" % u["id"])
+        kind = "user"
+        if u.get("bot"):
+            kind = "bot"
+        if u.get("self") or u["id"] == self.me:
+            kind = "self"
+        photo = None
+        p = u.get("photo")
+        if type(p) is type({}):
+            photo = p.get("stripped_thumb")
+        status = u.get("status")
+        if status is None and old is not None:
+            status = old.get("status")
+        info = {"name": name, "kind": kind, "hash": u.get("access_hash", 0),
+                "phone": u.get("phone") or "", "contact": u.get("contact", 0),
+                "username": u.get("username") or "", "photo": photo,
+                "status": status, "members": 0}
+        if old is not None:
+            if not info["hash"]:
+                info["hash"] = old.get("hash", 0)
+            if not info["phone"]:
+                info["phone"] = old.get("phone", "")
+        self.peers[key] = info
+
+    def add_chat(self, c):
+        if type(c) is not type({}) or c.get("id") is None:
+            return
+        n = c["_"]
+        if n in ("chat", "chatForbidden", "chatEmpty"):
+            key = "c%d" % c["id"]
+            kind = "group"
+        else:
+            key = "h%d" % c["id"]
+            kind = "channel"
+            if c.get("megagroup") or c.get("gigagroup"):
+                kind = "supergroup"
+        old = self.peers.get(key)
+        if c.get("min") and old is not None:
+            return
+        photo = None
+        p = c.get("photo")
+        if type(p) is type({}):
+            photo = p.get("stripped_thumb")
+        info = {"name": c.get("title") or "Chat", "kind": kind,
+                "hash": c.get("access_hash", 0), "phone": "", "contact": 0,
+                "username": c.get("username") or "", "photo": photo, "status": None,
+                "members": c.get("participants_count") or 0,
+                "can_write": not (kind == "channel" and not (c.get("creator") or
+                                                              c.get("admin_rights"))),
+                "left": c.get("left", 0)}
+        if old is not None:
+            if not info["hash"]:
+                info["hash"] = old.get("hash", 0)
+            if not info["members"]:
+                info["members"] = old.get("members", 0)
+        self.peers[key] = info
+
+    def peer(self, key):
+        p = self.peers.get(key)
+        if p is None:
+            kind = "user"
+            if key[:1] == "c":
+                kind = "group"
+            elif key[:1] == "h":
+                kind = "channel"
+            p = {"name": "Unknown", "kind": kind, "hash": 0, "phone": "", "contact": 0,
+                 "username": "", "photo": None, "status": None, "members": 0}
+        return p
 
     def input_peer(self, key):
         kind = key[0]
@@ -330,156 +437,272 @@ class Client:
         if kind == "u":
             if pid == self.me:
                 return {"_": "inputPeerSelf"}
-            u = self.users.get(pid) or {}
             return {"_": "inputPeerUser", "user_id": pid,
-                    "access_hash": u.get("access_hash", 0)}
+                    "access_hash": self.peer(key).get("hash", 0)}
         if kind == "c":
             return {"_": "inputPeerChat", "chat_id": pid}
-        c = self.chats.get(pid) or {}
         return {"_": "inputPeerChannel", "channel_id": pid,
-                "access_hash": c.get("access_hash", 0)}
-
-    def user_name(self, uid):
-        if uid == self.me:
-            return "You"
-        u = self.users.get(uid)
-        if u is None:
-            return "User %d" % uid
-        if u["_"] == "userEmpty":
-            return "Deleted account"
-        name = (u.get("first_name") or "") + " " + (u.get("last_name") or "")
-        name = name.strip()
-        if not name:
-            name = u.get("username") or u.get("phone") or ("User %d" % uid)
-        if u.get("deleted"):
-            name = "Deleted account"
-        return name
+                "access_hash": self.peer(key).get("hash", 0)}
 
     def peer_name(self, key):
         if key is None:
             return "?"
-        pid = long(key[1:])
-        if key[0] == "u":
-            if pid == self.me:
-                return "Saved Messages"
-            return self.user_name(pid)
-        c = self.chats.get(pid)
-        if c is None:
-            return "Chat %d" % pid
-        return c.get("title") or "Chat"
+        if key == "u%d" % (self.me or 0):
+            return "Saved Messages"
+        return self.peer(key)["name"]
 
-    def is_channel(self, key):
-        """Broadcast channel (you usually cannot write)."""
-        if key[0] != "h":
-            return 0
-        c = self.chats.get(long(key[1:])) or {}
-        return c.get("broadcast") and not (c.get("creator") or c.get("admin_rights"))
+    def short_name(self, key):
+        if key == "u%d" % (self.me or 0):
+            return "You"
+        n = self.peer(key)["name"]
+        if key[0] == "u":
+            return n.split(" ")[0]
+        return n
+
+    def can_write(self, key):
+        return self.peer(key).get("can_write", 1)
+
+    def is_group(self, key):
+        return self.peer(key)["kind"] in ("group", "supergroup")
+
+    def status_text(self, key):
+        """Header subtitle: online / last seen / members / bot."""
+        p = self.peer(key)
+        kind = p["kind"]
+        if kind == "self":
+            return "your cloud storage"
+        if kind == "bot":
+            return "bot"
+        if kind in ("group", "supergroup"):
+            if p.get("members"):
+                return "%d members" % p["members"]
+            return "group"
+        if kind == "channel":
+            if p.get("members"):
+                return "%d subscribers" % p["members"]
+            return "channel"
+        s = p.get("status") or {}
+        n = s.get("_", "")
+        now = self.server_time()
+        if n == "userStatusOnline" and s.get("expires", 0) > now:
+            return "online"
+        if n == "userStatusOnline" or n == "userStatusOffline":
+            t = s.get("was_online") or s.get("expires") or 0
+            ago = now - t
+            if ago < 60:
+                return "last seen just now"
+            if ago < 3600:
+                return "last seen %d min ago" % (ago / 60)
+            if ago < 86400:
+                return "last seen %d h ago" % (ago / 3600)
+            return "last seen %d days ago" % (ago / 86400)
+        if n == "userStatusRecently":
+            return "last seen recently"
+        if n == "userStatusLastWeek":
+            return "last seen within a week"
+        if n == "userStatusLastMonth":
+            return "last seen within a month"
+        return "last seen a long time ago"
+
+    def is_online(self, key):
+        s = self.peer(key).get("status") or {}
+        return s.get("_") == "userStatusOnline" and s.get("expires", 0) > self.server_time()
 
     # ---------------------------------------------------------- messages
 
     def norm_message(self, m):
-        """Telegram message -> {"id", "key", "out", "from", "text", "date"}."""
+        """Telegram message -> {"id", "key", "out", "from", "from_key", "text",
+        "date", "media", "reply_to", "edited", "fwd", "service"}."""
         n = m["_"]
         key = peer_key(m.get("peer_id"))
         d = {"id": m.get("id", 0), "key": key, "out": m.get("out", 0),
-             "date": m.get("date", 0), "text": ""}
+             "date": m.get("date", 0), "text": "", "media": "", "reply_to": 0,
+             "edited": 0, "fwd": "", "service": 0, "from": "", "from_key": None}
         if n == "messageEmpty":
-            d["text"] = "[Deleted]"
-            d["from"] = ""
+            d["text"] = "Deleted message"
+            d["service"] = 1
             return d
         sender = peer_key(m.get("from_id"))
         if sender is None:
             if d["out"]:
                 sender = "u%d" % (self.me or 0)
-            elif key is not None and key[0] == "u":
-                sender = key
             else:
                 sender = key
+        d["from_key"] = sender
         if d["out"]:
             d["from"] = "You"
         else:
             d["from"] = self.peer_name(sender)
+        rt = m.get("reply_to")
+        if type(rt) is type({}) and rt.get("reply_to_msg_id"):
+            d["reply_to"] = rt["reply_to_msg_id"]
+        if m.get("edit_date") and not m.get("edit_hide"):
+            d["edited"] = 1
         if n == "messageService":
-            d["text"] = "[" + self.action_text(m.get("action") or {}) + "]"
+            d["service"] = 1
+            d["text"] = self.action_text(m.get("action") or {}, d["from"])
             return d
-        text = m.get("message") or ""
+        f = m.get("fwd_from")
+        if type(f) is type({}):
+            fk = peer_key(f.get("from_id"))
+            if fk is not None:
+                d["fwd"] = self.peer_name(fk)
+            else:
+                d["fwd"] = f.get("from_name") or "unknown"
+        d["text"] = m.get("message") or ""
         media = m.get("media")
         if media is not None:
             mn = media["_"]
-            label = MEDIA_LABELS.get(mn, "[" + mn[12:] + "]")
+            label = MEDIA_LABELS.get(mn, mn[12:])
             if mn == "messageMediaDocument":
                 label = doc_label(media.get("document"))
             elif mn == "messageMediaPoll":
                 try:
-                    q = media["poll"]["question"]["text"]
-                    label = "[Poll: " + q + "]"
+                    label = "Poll: " + text_of(media["poll"]["question"])
                 except:
                     pass
             elif mn == "messageMediaGeo" or mn == "messageMediaVenue":
                 try:
                     g = media["geo"]
-                    label = label[:-1] + " %.5f,%.5f]" % (g["lat"], g["long"])
+                    label = label + " %.5f, %.5f" % (g["lat"], g["long"])
                 except:
                     pass
             elif mn == "messageMediaContact":
-                label = "[Contact " + (media.get("first_name") or "") + " " + \
-                        (media.get("phone_number") or "") + "]"
-            if label:
-                if text:
-                    text = label + " " + text
-                else:
-                    text = label
-        if m.get("fwd_from"):
-            text = "[Forwarded] " + text
-        d["text"] = text
+                label = "Contact: " + ((media.get("first_name") or "") + " " +
+                                       (media.get("phone_number") or "")).strip()
+            d["media"] = label
         return d
 
-    def action_text(self, a):
+    def action_text(self, a, who):
         n = a.get("_", "")
         names = {"messageActionChatCreate": "created the group",
-                 "messageActionChatEditTitle": "changed the title",
-                 "messageActionChatEditPhoto": "changed the photo",
+                 "messageActionChatEditTitle": "changed the group name",
+                 "messageActionChatEditPhoto": "changed the group photo",
+                 "messageActionChatDeletePhoto": "removed the group photo",
                  "messageActionChatAddUser": "added a member",
-                 "messageActionChatDeleteUser": "removed a member",
-                 "messageActionChatJoinedByLink": "joined by link",
+                 "messageActionChatDeleteUser": "left the group",
+                 "messageActionChatJoinedByLink": "joined via invite link",
+                 "messageActionChatJoinedByRequest": "joined the group",
                  "messageActionPinMessage": "pinned a message",
-                 "messageActionPhoneCall": "call",
+                 "messageActionPhoneCall": "called",
                  "messageActionChannelCreate": "created the channel",
                  "messageActionContactSignUp": "joined Telegram",
-                 "messageActionHistoryClear": "history cleared",
-                 "messageActionScreenshotTaken": "took a screenshot"}
-        return names.get(n, n[13:])
+                 "messageActionHistoryClear": "cleared the history",
+                 "messageActionScreenshotTaken": "took a screenshot",
+                 "messageActionGroupCall": "started a video chat"}
+        t = names.get(n)
+        if t is None:
+            t = n[13:]
+        if n == "messageActionChatEditTitle":
+            t = t + " to \"" + a.get("title", "") + "\""
+        return who + " " + t
 
-    def get_dialogs(self, on_ok, on_err, limit=40):
+    def preview(self, m):
+        """One-line preview of a normalized message for the chat list."""
+        t = m["text"]
+        if m["media"]:
+            if t:
+                t = m["media"] + ", " + t
+            else:
+                t = m["media"]
+        return t
+
+    def dialog_row(self, dg, top):
+        key = peer_key(dg["peer"])
+        preview = ""
+        sender = ""
+        date = 0
+        out = 0
+        if top is not None:
+            nm = self.norm_message(top)
+            preview = self.preview(nm)
+            date = nm["date"]
+            out = nm["out"]
+            if nm["service"]:
+                preview = nm["text"]
+            elif out:
+                sender = "You"
+            elif self.is_group(key) and nm["from_key"]:
+                sender = self.short_name(nm["from_key"])
+        ns = dg.get("notify_settings") or {}
+        muted = ns.get("mute_until", 0) > self.server_time()
+        return {"key": key, "unread": dg.get("unread_count", 0),
+                "mark": dg.get("unread_mark", 0), "preview": preview, "sender": sender,
+                "date": date, "top": dg.get("top_message", 0), "out": out,
+                "pinned": dg.get("pinned", 0), "muted": muted,
+                "read_out": dg.get("read_outbox_max_id", 0),
+                "read_in": dg.get("read_inbox_max_id", 0),
+                "folder": dg.get("folder_id", 0)}
+
+    def get_dialogs(self, on_ok, on_err, limit=50, after=None, folder=0):
+        """One page of chats. after: the last row of the previous page."""
         def ok(res, self=self, on_ok=on_ok):
             msgs = {}
             for m in res.get("messages", []):
-                k = peer_key(m.get("peer_id"))
-                msgs[(k, m.get("id"))] = m
+                msgs[(peer_key(m.get("peer_id")), m.get("id"))] = m
             rows = []
             for dg in res.get("dialogs", []):
-                if dg["_"] != "dialog":
+                if dg["_"] != "dialog" or peer_key(dg["peer"]) is None:
                     continue
-                key = peer_key(dg["peer"])
-                if key is None:
+                rows.append(self.dialog_row(dg, msgs.get((peer_key(dg["peer"]),
+                                                          dg.get("top_message")))))
+            more = res["_"] == "messages.dialogsSlice" and len(rows) > 0
+            on_ok(rows, more)
+        f = {"_": "messages.getDialogs", "offset_date": 0, "offset_id": 0,
+             "offset_peer": {"_": "inputPeerEmpty"}, "limit": limit, "hash": 0}
+        if folder:
+            f["folder_id"] = folder
+        if after is not None:
+            f["offset_date"] = after["date"]
+            f["offset_id"] = after["top"]
+            f["offset_peer"] = self.input_peer(after["key"])
+        self.call(f, ok, on_err)
+
+    def get_filters(self, on_ok, on_err):
+        """Your chat folders as simple dicts."""
+        def ok(res, self=self, on_ok=on_ok):
+            out = []
+            for f in res.get("filters", []):
+                if f["_"] not in ("dialogFilter", "dialogFilterChatlist"):
                     continue
-                top = msgs.get((key, dg.get("top_message")))
-                preview = ""
-                date = 0
-                if top is not None:
-                    nm = self.norm_message(top)
-                    preview = nm["text"]
-                    date = nm["date"]
-                    if key[0] != "u" and nm["from"] and not self.is_channel(key):
-                        preview = nm["from"].split(" ")[0] + ": " + preview
-                rows.append({"key": key, "name": self.peer_name(key),
-                             "unread": dg.get("unread_count", 0), "preview": preview,
-                             "date": date, "top": dg.get("top_message", 0),
-                             "pinned": dg.get("pinned", 0)})
-            on_ok(rows)
-        self.call({"_": "messages.getDialogs", "offset_date": 0, "offset_id": 0,
-                   "offset_peer": {"_": "inputPeerEmpty"}, "limit": limit, "hash": 0},
-                  ok, on_err)
+                d = {"id": f["id"], "title": text_of(f.get("title")),
+                     "contacts": f.get("contacts", 0), "non_contacts": f.get("non_contacts", 0),
+                     "groups": f.get("groups", 0), "broadcasts": f.get("broadcasts", 0),
+                     "bots": f.get("bots", 0), "exclude_muted": f.get("exclude_muted", 0),
+                     "exclude_read": f.get("exclude_read", 0)}
+                for name in ("include_peers", "exclude_peers", "pinned_peers"):
+                    keys = []
+                    for p in f.get(name, []):
+                        k = input_peer_key(p, self.me)
+                        if k is not None:
+                            keys.append(k)
+                    d[name] = keys
+                out.append(d)
+            on_ok(out)
+        self.call({"_": "messages.getDialogFilters"}, ok, on_err)
+
+    def in_filter(self, f, row):
+        key = row["key"]
+        if key in f.get("pinned_peers", []) or key in f.get("include_peers", []):
+            return 1
+        if key in f.get("exclude_peers", []):
+            return 0
+        if f.get("exclude_muted") and row.get("muted"):
+            return 0
+        if f.get("exclude_read") and not row.get("unread") and not row.get("mark"):
+            return 0
+        kind = self.peer(key)["kind"]
+        if kind == "bot":
+            return f.get("bots", 0)
+        if kind in ("user", "self"):
+            if self.peer(key).get("contact") or kind == "self":
+                return f.get("contacts", 0)
+            return f.get("non_contacts", 0)
+        if kind in ("group", "supergroup"):
+            return f.get("groups", 0)
+        if kind == "channel":
+            return f.get("broadcasts", 0)
+        return 0
 
     def get_history(self, key, on_ok, on_err, offset_id=0, limit=20):
         def ok(res, self=self, on_ok=on_ok):
@@ -492,27 +715,32 @@ class Client:
                    "offset_id": offset_id, "offset_date": 0, "add_offset": 0,
                    "limit": limit, "max_id": 0, "min_id": 0, "hash": 0}, ok, on_err)
 
-    def send_text(self, key, text, on_ok, on_err):
+    def send_text(self, key, text, on_ok, on_err, reply_to=0):
         if type(text) is type(u""):
             text = text.encode("utf-8")
         rid = tgcrypto.random_long()
 
-        def ok(res, self=self, key=key, text=text, on_ok=on_ok):
-            msg = {"id": res.get("id", 0), "key": key, "out": 1, "from": "You",
-                   "text": text, "date": res.get("date", int(time.time()))}
-            if res["_"] != "updateShortSentMessage":
-                self.handle_updates(res, key)
-                msg = None
+        def ok(res, self=self, key=key, text=text, on_ok=on_ok, reply_to=reply_to):
+            msg = None
+            if res["_"] == "updateShortSentMessage":
+                msg = {"id": res.get("id", 0), "key": key, "out": 1, "from": "You",
+                       "from_key": "u%d" % (self.me or 0), "text": text, "media": "",
+                       "date": res.get("date", self.server_time()), "reply_to": reply_to,
+                       "edited": 0, "fwd": "", "service": 0}
+            else:
+                self.handle_updates(res)
             on_ok(msg)
-        self.call({"_": "messages.sendMessage", "peer": self.input_peer(key),
-                   "message": text, "random_id": rid}, ok, on_err)
+        f = {"_": "messages.sendMessage", "peer": self.input_peer(key),
+             "message": text, "random_id": rid}
+        if reply_to:
+            f["reply_to"] = {"_": "inputReplyToMessage", "reply_to_msg_id": reply_to}
+        self.call(f, ok, on_err)
 
     def mark_read(self, key, max_id):
         if key[0] == "h":
-            c = self.chats.get(long(key[1:])) or {}
             f = {"_": "channels.readHistory", "max_id": max_id,
                  "channel": {"_": "inputChannel", "channel_id": long(key[1:]),
-                             "access_hash": c.get("access_hash", 0)}}
+                             "access_hash": self.peer(key).get("hash", 0)}}
         else:
             f = {"_": "messages.readHistory", "peer": self.input_peer(key), "max_id": max_id}
         self.call(f, lambda r: None, lambda e: None)
@@ -526,42 +754,43 @@ class Client:
 
     def get_contacts(self, on_ok, on_err):
         def ok(res, self=self, on_ok=on_ok):
-            rows = []
+            keys = []
             for c in res.get("contacts", []):
-                rows.append(("u%d" % c["user_id"], self.user_name(c["user_id"])))
-            rows.sort(lambda a, b: cmp(a[1].lower(), b[1].lower()))
-            on_ok(rows)
+                keys.append("u%d" % c["user_id"])
+            on_ok(keys)
         self.call({"_": "contacts.getContacts", "hash": 0}, ok, on_err)
 
     # ---------------------------------------------------------- updates
 
-    def handle_updates(self, u, sent_key=None):
+    def short_msg(self, u, key, from_key):
+        return {"id": u["id"], "key": key, "out": u.get("out", 0),
+                "from": self.peer_name(from_key), "from_key": from_key,
+                "text": u.get("message", ""), "media": "", "date": u.get("date", 0),
+                "reply_to": 0, "edited": 0, "fwd": "", "service": 0}
+
+    def handle_updates(self, u):
         n = u["_"]
         if n == "newSession" or n == "updatesTooLong":
             self.ui.refresh_needed()
             return
         if n == "updateShortMessage":
-            uid = u["user_id"]
-            key = "u%d" % uid
+            key = "u%d" % u["user_id"]
+            frm = key
             if u.get("out"):
-                frm = "You"
-            else:
-                frm = self.user_name(uid)
-            self.ui.new_message(key, {"id": u["id"], "key": key, "out": u.get("out", 0),
-                                      "from": frm, "text": u.get("message", ""),
-                                      "date": u.get("date", 0)})
-            if not self.users.has_key(uid):
+                frm = "u%d" % (self.me or 0)
+            m = self.short_msg(u, key, frm)
+            if u.get("out"):
+                m["from"] = "You"
+            self.ui.new_message(key, m)
+            if not self.peers.has_key(key):
                 self.ui.refresh_needed()
             return
         if n == "updateShortChatMessage":
             key = "c%d" % u["chat_id"]
+            m = self.short_msg(u, key, "u%d" % u["from_id"])
             if u.get("out"):
-                frm = "You"
-            else:
-                frm = self.user_name(u["from_id"])
-            self.ui.new_message(key, {"id": u["id"], "key": key, "out": u.get("out", 0),
-                                      "from": frm, "text": u.get("message", ""),
-                                      "date": u.get("date", 0)})
+                m["from"] = "You"
+            self.ui.new_message(key, m)
             return
         if n == "updateShort":
             self.one_update(u["update"])
@@ -580,15 +809,68 @@ class Client:
             m = self.norm_message(x["message"])
             if m["key"] is not None:
                 self.ui.new_message(m["key"], m)
+        elif n == "updateEditMessage" or n == "updateEditChannelMessage":
+            m = self.norm_message(x["message"])
+            if m["key"] is not None:
+                self.ui.message_edited(m["key"], m)
+        elif n == "updateReadHistoryOutbox":
+            self.ui.read_changed(peer_key(x["peer"]), "out", x["max_id"], -1)
+        elif n == "updateReadHistoryInbox":
+            self.ui.read_changed(peer_key(x["peer"]), "in", x["max_id"],
+                                 x.get("still_unread_count", 0))
+        elif n == "updateReadChannelInbox":
+            self.ui.read_changed("h%d" % x["channel_id"], "in", x["max_id"],
+                                 x.get("still_unread_count", 0))
+        elif n == "updateReadChannelOutbox":
+            self.ui.read_changed("h%d" % x["channel_id"], "out", x["max_id"], -1)
+        elif n == "updateUserStatus":
+            key = "u%d" % x["user_id"]
+            p = self.peers.get(key)
+            if p is not None:
+                p["status"] = x["status"]
+                self.ui.peer_changed(key)
+        elif n == "updateUserTyping" or n == "updateChatUserTyping":
+            pass
         elif n == "updateChannelTooLong":
             self.ui.refresh_needed()
+
+
+# ---------------------------------------------------------------- avatars
+
+STRIPPED_HEADER = (
+    "ffd8ffe000104a46494600010100000100010000ffdb004300281c1e231e19282321232d2b28303c"
+    "64413c37373c7b585d4964918099968f808c8aa0b4e6c3a0aadaad8a8cc8ffcbdaeef5ffffff9bc1"
+    "fffffffaffe6fdfff8ffdb0043012b2d2d3c353c76414176f8a58ca5f8f8f8f8f8f8f8f8f8f8f8f8"
+    "f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8ffc0"
+    "0011080000000003012200021101031101ffc4001f00000105010101010101000000000000000001"
+    "02030405060708090a0bffc400b5100002010303020403050504040000017d010203000411051221"
+    "31410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a2526272829"
+    "2a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a"
+    "838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6"
+    "c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffc4001f010003"
+    "0101010101010101010000000000000102030405060708090a0bffc400b511000201020404030407"
+    "05040400010277000102031104052131061241510761711322328108144291a1b1c109233352f015"
+    "6272d10a162434e125f11718191a262728292a35363738393a434445464748494a53545556575859"
+    "5a636465666768696a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6"
+    "a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9ea"
+    "f2f3f4f5f6f7f8f9faffda000c03010002110311003f00")
+
+
+def stripped_to_jpeg(s):
+    """Telegram's stripped photo thumbnail (a tiny JPEG without its standard
+    header) -> a complete JPEG file."""
+    if not s or len(s) < 3 or s[0] != "\x01":
+        return None
+    h = unhex(STRIPPED_HEADER)
+    h = h[:164] + s[1] + h[165] + s[2] + h[167:]
+    return h + s[3:] + "\xff\xd9"
 
 
 # ---------------------------------------------------------------- 2FA (SRP)
 
 def srp_answer(pw, x_hash):
     """Builds inputCheckPasswordSRP from account.password and the slow
-    password hash x (see pbkdf2 note in retrotele.py / tools/tg2fa.py)."""
+    password hash x (tgsrp.PasswordHash or tools/tg2fa.py)."""
     algo = pw["current_algo"]
     g = algo["g"]
     p_bytes = algo["p"]

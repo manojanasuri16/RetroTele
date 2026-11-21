@@ -1,6 +1,6 @@
 # RetroTele: a small Telegram client for Python for S60 1.4.5 (Nokia N79 and
 # other S60 3rd Edition phones). Talks MTProto 2.0 directly to Telegram's
-# servers, no PC or proxy needed. Text chats: log in, chat list, read, write.
+# servers, no PC or proxy needed: chats, folders, contacts, read and write.
 #
 # Written for Python 2.2: no enumerate/sorted/sets/generators, no
 # conditional expressions, no "with", no "except X as e", and substring
@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.1.3"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.2.0"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -75,6 +75,7 @@ import tgcrypto
 import tl
 import tgclient
 import tgsrp
+import tgui
 from mtproto import RpcError
 
 UID = "e7a3d5c2"
@@ -298,6 +299,10 @@ def local_offset(server_now):
         return 0
 
 
+BUILTIN_TABS = [(u"All", "all"), (u"Unread", "unread"), (u"Personal", "personal"),
+                (u"Groups", "groups"), (u"Channels", "channels")]
+
+
 class App:
     def __init__(self):
         self.lock = e32.Ao_lock()
@@ -308,16 +313,33 @@ class App:
         self.store = tgclient.Store(self.dir + "session.txt")
         self.schema = None
         self.client = None
-        self.screen = None          # "chats", "chat", "text", "compose", "login"
-        self.dialogs = []
+        self.screen = None          # "welcome", "chats", "chat", "compose", "text"
+        self.dialogs = []           # chat list rows (tgclient.dialog_row)
+        self.more_dialogs = 0
+        self.loading_dialogs = 0
+        self.archived = None
+        self.filters = []
+        self.contacts = None
+        self.msgs = {}              # key -> [message] (oldest first)
+        self.older = {}             # key -> 1 while older messages may exist
+        self.loading_older = 0
+        self.drafts = {}
+        self.read_outs = {}
+        self.rows_cache = {}
         self.chat_key = None
-        self.messages = []
-        self.has_older = 0
+        self.reply_to = 0
         self.is_online = 0
         self.busy = u""
         self.apo = None
         self.tz = 0
         self.hash_job = None
+        self.toast_text = None
+        self.toast_gen = 0
+        self.redraw_armed = 0
+        self.cache_armed = 0
+        self.avatars = tgui.Avatars(self, self.dir + "avatar.jpg")
+        self.list_view = tgui.ChatListView(self)
+        self.view = None
 
     # ---------------------------------------------------------- helpers
 
@@ -339,24 +361,32 @@ class App:
 
     def status(self, text):
         self.busy = to_u(text)
-        self.set_title()
+        self.redraw()
         try:
             e32.ao_yield()
         except:
             pass
 
-    def set_title(self):
-        t = APP
-        if self.screen in ("chat", "compose", "text") and self.chat_key:
-            t = to_u(self.client.peer_name(self.chat_key))
-        if self.busy:
-            t = self.busy
-        elif not self.is_online:
-            t = t + u" (offline)"
-        try:
-            appuifw.app.title = t
-        except:
-            pass
+    def done_wait(self):
+        self.busy = u""
+        self.redraw()
+
+    def redraw(self):
+        if self.view is not None:
+            self.view.draw()
+
+    def redraw_soon(self):
+        if self.redraw_armed:
+            return
+        self.redraw_armed = 1
+
+        def fire(self=self):
+            self.redraw_armed = 0
+            self.redraw()
+        self.net.later(0.3, fire)
+
+    def avatar_ready(self):
+        self.redraw_soon()
 
     def online(self, flag):
         self.is_online = flag
@@ -364,23 +394,82 @@ class App:
             self.busy = u""
             s = self.client.session()
             self.tz = local_offset(time.time() + s.time_offset)
-        self.set_title()
+        self.redraw()
+
+    def now(self):
+        if self.client is None:
+            return int(time.time())
+        return self.client.server_time()
 
     def hhmm(self, ts):
         if not ts:
             return u""
-        t = time.gmtime(ts + self.tz)
-        now = time.gmtime(time.time() + self.client.session().time_offset + self.tz)
-        if t[:3] == now[:3]:
-            return to_u(time.strftime("%H:%M", t))
-        return to_u(time.strftime("%d.%m %H:%M", t))
+        return to_u(time.strftime("%H:%M", time.gmtime(ts + self.tz)))
 
-    def wait_note(self, text):
-        self.status(text)
+    def show_toast(self, title, text):
+        self.toast_text = (one_line(title, 60), one_line(text, 100))
+        self.toast_gen = self.toast_gen + 1
+        gen = self.toast_gen
 
-    def done_wait(self):
-        self.busy = u""
-        self.set_title()
+        def clear(self=self, gen=gen):
+            if self.toast_gen == gen:
+                self.toast_text = None
+                self.redraw()
+        self.net.later(3.5, clear)
+        self.redraw()
+
+    def set_screen(self, mode):
+        try:
+            appuifw.app.screen = mode
+        except:
+            pass
+
+    # ---------------------------------------------------------- cache
+    # The chat list, names and folders are kept in cache.bin so the app
+    # shows your chats instantly at start, then refreshes them.
+
+    def load_cache(self):
+        try:
+            import marshal
+            f = open(self.dir + "cache.bin", "rb")
+            d = marshal.loads(f.read())
+            f.close()
+            if d.get("me") != self.client.me:
+                return
+            self.client.peers = d.get("peers", {})
+            self.dialogs = d.get("dialogs", [])
+            self.filters = d.get("filters", [])
+            self.rows_cache = {}
+        except:
+            pass
+
+    def save_cache(self):
+        self.cache_armed = 0
+        if self.client is None or self.client.me is None:
+            return
+        try:
+            import marshal
+            keep = {}
+            for r in self.dialogs:
+                p = self.client.peers.get(r["key"])
+                if p is not None:
+                    keep[r["key"]] = p
+            for r in self.dialogs:
+                s = r.get("sender_key")
+                if s and self.client.peers.has_key(s):
+                    keep[s] = self.client.peers[s]
+            data = marshal.dumps({"me": self.client.me, "peers": keep,
+                                  "dialogs": self.dialogs[:150], "filters": self.filters})
+            f = open(self.dir + "cache.bin", "wb")
+            f.write(data)
+            f.close()
+        except:
+            self.log("cache: " + str(sys.exc_info()[1]))
+
+    def save_cache_soon(self):
+        if not self.cache_armed:
+            self.cache_armed = 1
+            self.net.later(8, self.save_cache)
 
     # ---------------------------------------------------------- start-up
 
@@ -429,7 +518,6 @@ class App:
         return 1
 
     def start(self):
-        self.status(u"Loading...")
         try:
             self.schema = tl.Schema(find_schema())
         except:
@@ -444,34 +532,34 @@ class App:
                     return
         self.status(u"Connecting to the network...")
         if not self.setup_ap():
-            appuifw.note(u"No access point chosen. Options > Settings > Access point.", "error")
+            appuifw.note(u"No access point chosen. Options > Settings > Access point.",
+                         "error")
         self.client = tgclient.Client(self.net, self.schema, self, self.store,
                                       self.cfg.get("api_id"), self.cfg.get("api_hash"),
                                       to_b(VERSION))
-        self.status(u"Connecting to Telegram...")
+        self.status(u"Connecting...")
         self.client.start()
         if self.client.logged_in():
+            self.load_cache()
             self.show_chats()
             self.load_dialogs()
         else:
-            self.screen = "login"
-            self.show_login_screen()
-            self.net.later(0.5, self.login_phone)
+            self.show_welcome()
 
     # ---------------------------------------------------------- login
 
-    def show_login_screen(self):
-        self.screen = "login"
-        t = appuifw.Text()
-        t.set(u"RetroTele " + VERSION + u"\n\nLog in with your Telegram phone number. "
-              u"The code arrives in your Telegram app on another device, or by SMS.\n\n"
-              u"Options > Log in to start.")
-        appuifw.app.body = t
+    def show_welcome(self):
+        self.screen = "welcome"
+        self.set_screen("large")
+        self.view = tgui.WelcomeView(self, [
+            u"Telegram for your Nokia.",
+            u"Press the centre key to log in."])
+        self.view.show()
         appuifw.app.menu = [(u"Log in", self.login_phone),
                             (u"Settings", self.settings),
                             (u"Exit", self.exit)]
         appuifw.app.exit_key_handler = self.exit
-        self.set_title()
+        self.done_wait()
 
     def login_phone(self):
         phone = appuifw.query(u"Phone number with country code", "text",
@@ -624,7 +712,7 @@ class App:
     def password_failed(self, e):
         self.done_wait()
         appuifw.note(err_msg(e), "error")
-        self.show_login_screen()
+        self.show_welcome()
 
     def logged_in(self):
         self.done_wait()
@@ -632,104 +720,181 @@ class App:
             os.remove(self.dir + "2fa_salts.txt")
         except:
             pass
-        appuifw.note(u"Logged in to Telegram.", "conf")
         self.show_chats()
         self.load_dialogs()
 
     def logged_out(self):
+        self.dialogs = []
+        self.msgs = {}
+        self.rows_cache = {}
+        try:
+            os.remove(self.dir + "cache.bin")
+        except:
+            pass
         appuifw.note(u"You were logged out of Telegram.", "error")
-        self.show_login_screen()
+        self.show_welcome()
 
-    # ---------------------------------------------------------- chats list
+    # ---------------------------------------------------------- chat list data
 
-    def chat_rows(self):
+    def tabs(self):
+        tabs = list(BUILTIN_TABS)
+        have = {}
+        for t in tabs:
+            have[t[0].lower()] = 1
+        for f in self.filters:
+            title = to_u(f["title"]).strip()
+            if not title:
+                title = u"Folder"
+            if have.has_key(title.lower()):
+                continue
+            tabs.append((title, ("folder", f)))
+        tabs.append((u"Archived", "archived"))
+        tabs.append((u"Contacts", "contacts"))
+        return tabs
+
+    def decorate(self, r):
+        """Adds what the chat list draws (time text, online dot)."""
+        d = {}
+        d.update(r)
+        d["time"] = tgui.short_time(r.get("date", 0), self.now(), self.tz)
+        d["online"] = r["key"][0] == "u" and self.client.is_online(r["key"])
+        d["sender"] = to_u(r.get("sender", ""))
+        d["preview"] = to_u(r.get("preview", ""))
+        return d
+
+    def tab_rows(self, i):
+        tabs = self.tabs()
+        if i >= len(tabs):
+            i = 0
+        spec = tabs[i][1]
+        ck = (i, len(tabs))
+        rows = self.rows_cache.get(ck)
+        if rows is not None:
+            return rows
+        cl = self.client
+        src = self.dialogs
         rows = []
-        for d in self.dialogs:
-            name = one_line(d["name"], 40)
-            if d["unread"]:
-                name = u"(%d) %s" % (d["unread"], name)
-            sub = self.hhmm(d["date"]) + u" " + one_line(d["preview"], 60)
-            rows.append((name, sub))
-        if not rows:
-            rows.append((u"No chats yet", u"Options > Refresh"))
+        if spec == "contacts":
+            if self.contacts is not None:
+                keys = list(self.contacts)
+                online = []
+                rest = []
+                for k in keys:
+                    if cl.is_online(k):
+                        online.append(k)
+                    else:
+                        rest.append(k)
+                for k in online + rest:
+                    rows.append({"key": k, "preview": to_u(cl.status_text(k)), "sender": u"",
+                                 "time": u"", "online": cl.is_online(k), "contact_row": 1,
+                                 "unread": 0, "top": 0})
+            self.rows_cache[ck] = rows
+            return rows
+        if spec == "archived":
+            src = self.archived or []
+        for r in src:
+            ok = 1
+            kind = cl.peer(r["key"])["kind"]
+            if spec == "unread":
+                ok = r.get("unread") or r.get("mark")
+            elif spec == "personal":
+                ok = kind in ("user", "bot", "self")
+            elif spec == "groups":
+                ok = kind in ("group", "supergroup")
+            elif spec == "channels":
+                ok = kind == "channel"
+            elif type(spec) is types.TupleType:
+                ok = cl.in_filter(spec[1], r)
+            if ok:
+                rows.append(self.decorate(r))
+        self.rows_cache[ck] = rows
         return rows
 
-    def show_chats(self):
-        self.screen = "chats"
-        self.chat_key = None
-        self.chat_list = appuifw.Listbox(self.chat_rows(), self.open_selected)
-        appuifw.app.body = self.chat_list
-        appuifw.app.menu = [(u"Open", self.open_selected),
-                            (u"Refresh", self.load_dialogs),
-                            (u"New chat (@username)", self.new_chat),
-                            (u"Contacts", self.contacts),
-                            (u"Settings", self.settings),
-                            (u"About", self.about),
-                            (u"Exit", self.exit)]
-        appuifw.app.exit_key_handler = self.exit
-        self.set_title()
+    def dialogs_changed(self):
+        self.rows_cache = {}
+        self.save_cache_soon()
 
-    def refresh_chats(self):
-        if self.screen != "chats":
-            return
-        try:
-            cur = self.chat_list.current()
-        except:
-            cur = 0
-        rows = self.chat_rows()
-        if cur >= len(rows):
-            cur = len(rows) - 1
-        self.chat_list.set_list(rows, max(cur, 0))
-        self.set_title()
+    def empty_text(self, tab):
+        spec = self.tabs()[tab][1]
+        if spec == "contacts" and self.contacts is None:
+            return u"Loading contacts..."
+        if spec == "archived" and self.archived is None:
+            return u"Loading..."
+        if not self.dialogs and self.busy:
+            return u"Loading chats..."
+        if spec == "unread":
+            return u"All caught up!"
+        return u"No chats here"
+
+    def tab_changed(self, tab):
+        spec = self.tabs()[tab][1]
+        if spec == "contacts" and self.contacts is None:
+            self.client.get_contacts(self.got_contacts, self.load_failed)
+        elif spec == "archived" and self.archived is None:
+            self.client.get_dialogs(self.got_archived, self.load_failed, 50, None, 1)
+        self.update_list_menu()
+
+    def got_contacts(self, keys):
+        self.contacts = keys
+        self.rows_cache = {}
+        self.redraw()
+
+    def got_archived(self, rows, more):
+        self.archived = rows
+        self.rows_cache = {}
+        self.redraw()
+
+    def near_end(self, tab):
+        spec = self.tabs()[tab][1]
+        if spec != "contacts" and spec != "archived" and self.more_dialogs:
+            self.load_more_dialogs()
 
     def load_dialogs(self):
-        self.status(u"Loading chats...")
-        self.client.get_dialogs(self.got_dialogs, self.load_failed)
+        self.status(u"Updating...")
+        self.loading_dialogs = 1
+        self.client.get_dialogs(self.got_dialogs, self.load_failed, 40)
+        self.client.get_filters(self.got_filters, lambda e: None)
 
-    def got_dialogs(self, rows):
+    def got_dialogs(self, rows, more):
+        self.loading_dialogs = 0
         self.done_wait()
         self.dialogs = rows
-        self.refresh_chats()
+        self.more_dialogs = more
+        self.dialogs_changed()
+        self.redraw()
+        if more and len(self.dialogs) < 100:
+            # fetch one more page in the background for the folder tabs
+            self.net.later(1.5, self.load_more_dialogs)
+
+    def load_more_dialogs(self):
+        if self.loading_dialogs or not self.more_dialogs or not self.dialogs:
+            return
+        self.loading_dialogs = 1
+        self.client.get_dialogs(self.got_more_dialogs, self.load_failed, 50, self.dialogs[-1])
+
+    def got_more_dialogs(self, rows, more):
+        self.loading_dialogs = 0
+        have = {}
+        for r in self.dialogs:
+            have[r["key"]] = 1
+        for r in rows:
+            if not have.has_key(r["key"]):
+                self.dialogs.append(r)
+        self.more_dialogs = more and len(self.dialogs) < 400
+        self.dialogs_changed()
+        self.redraw()
+
+    def got_filters(self, filters):
+        self.filters = filters
+        self.dialogs_changed()
+        self.redraw()
 
     def load_failed(self, e):
+        self.loading_dialogs = 0
+        self.loading_older = 0
         self.done_wait()
         self.log("load failed: " + to_b(err_msg(e)))
-        if self.screen == "chats" or self.screen == "chat":
-            appuifw.note(err_msg(e), "error")
-
-    def open_selected(self):
-        if not self.dialogs:
-            self.load_dialogs()
-            return
-        i = self.chat_list.current()
-        if 0 <= i < len(self.dialogs):
-            self.open_chat(self.dialogs[i]["key"])
-
-    def new_chat(self):
-        name = appuifw.query(u"Username (without @)", "text")
-        if not name:
-            return
-        self.status(u"Looking up...")
-        self.client.resolve_username(to_b(name).strip(),
-                                     lambda key, self=self: (self.done_wait(),
-                                                             self.open_chat(key)),
-                                     self.load_failed)
-
-    def contacts(self):
-        self.status(u"Loading contacts...")
-        self.client.get_contacts(self.got_contacts, self.load_failed)
-
-    def got_contacts(self, rows):
-        self.done_wait()
-        if not rows:
-            appuifw.note(u"No contacts.", "info")
-            return
-        names = []
-        for k, n in rows:
-            names.append(one_line(n, 40))
-        i = appuifw.selection_list(names, 1)
-        if i is not None:
-            self.open_chat(rows[i][0])
+        self.show_toast(u"Could not load", err_msg(e))
 
     def dialog_for(self, key):
         for d in self.dialogs:
@@ -737,145 +902,349 @@ class App:
                 return d
         return None
 
+    # ---------------------------------------------------------- chat list screen
+
+    def show_chats(self):
+        self.screen = "chats"
+        self.chat_key = None
+        self.set_screen("large")
+        self.view = self.list_view
+        self.view.show()
+        self.update_list_menu()
+        appuifw.app.exit_key_handler = self.exit
+
+    def update_list_menu(self):
+        if self.screen != "chats":
+            return
+        m = [(u"Open chat", self.open_selected),
+             (u"Search chats", self.search),
+             (u"New chat (@username)", self.new_chat)]
+        r = self.list_view.current()
+        if r is not None and r["key"][0] == "u" and self.client.peer(r["key"]).get("phone"):
+            m.append((u"Call " + one_line(self.client.short_name(r["key"]), 20),
+                      lambda self=self, k=r["key"]: self.call_peer(k)))
+        m = m + [(u"Mark all read", self.mark_tab_read),
+                 (u"Refresh", self.refresh_all),
+                 (u"Settings", self.settings),
+                 (u"About", self.about),
+                 (u"Exit", self.exit)]
+        appuifw.app.menu = m
+
+    def open_selected(self):
+        r = self.list_view.current()
+        if r is not None:
+            self.open_row(r)
+
+    def open_row(self, r):
+        self.open_chat(r["key"])
+
+    def refresh_all(self):
+        self.contacts = None
+        self.archived = None
+        self.load_dialogs()
+
+    def search(self):
+        q = appuifw.query(u"Search chats and contacts", "text")
+        if not q:
+            return
+        q = to_u(q).lower()
+        found = []
+        seen = {}
+        for r in self.dialogs + (self.archived or []):
+            if to_u(self.client.peer_name(r["key"])).lower().find(q) >= 0:
+                found.append(r["key"])
+                seen[r["key"]] = 1
+        for k in (self.contacts or []):
+            if not seen.has_key(k) and to_u(self.client.peer_name(k)).lower().find(q) >= 0:
+                found.append(k)
+        if not found:
+            if appuifw.query(u"No chat found. Look up @" + q + u" on Telegram?", "query"):
+                self.lookup(to_b(q))
+            return
+        names = []
+        for k in found:
+            names.append(one_line(self.client.peer_name(k), 40))
+        i = appuifw.selection_list(names, 1)
+        if i is not None:
+            self.open_chat(found[i])
+
+    def new_chat(self):
+        name = appuifw.query(u"Username (without @)", "text")
+        if name:
+            self.lookup(to_b(name).strip())
+
+    def lookup(self, name):
+        self.status(u"Looking up...")
+        self.client.resolve_username(name, lambda key, self=self: (self.done_wait(),
+                                                                   self.open_chat(key)),
+                                     self.load_failed)
+
+    def mark_tab_read(self):
+        rows = self.tab_rows(self.list_view.tab)
+        n = 0
+        for r in rows:
+            if r.get("unread") and not r.get("contact_row"):
+                self.client.mark_read(r["key"], r.get("top", 0))
+                d = self.dialog_for(r["key"])
+                if d is not None:
+                    d["unread"] = 0
+                    d["mark"] = 0
+                n = n + 1
+        self.dialogs_changed()
+        self.redraw()
+        self.show_toast(u"Done", u"%d chats marked as read" % n)
+
+    def call_peer(self, key):
+        p = self.client.peer(key)
+        phone = p.get("phone")
+        if not phone:
+            appuifw.note(u"This person doesn't share a phone number with you. "
+                         u"Telegram voice calls aren't possible on this phone.", "info")
+            return
+        num = u"+" + to_u(phone)
+        if appuifw.query(u"Call " + to_u(p["name"]) + u" at " + num +
+                         u" (normal phone call)?", "query"):
+            try:
+                import telephone
+                telephone.dial(num)
+            except:
+                appuifw.note(u"Cannot dial: " + err_text(), "error")
+
     # ---------------------------------------------------------- one chat
+
+    def chat_messages(self, key):
+        return self.msgs.get(key, [])
+
+    def read_out(self, key):
+        d = self.dialog_for(key)
+        v = self.read_outs.get(key, 0)
+        if d is not None:
+            v = max(v, d.get("read_out", 0))
+        return v
+
+    def quote_for(self, key, mid):
+        for m in self.msgs.get(key, []):
+            if m["id"] == mid:
+                t = m["text"]
+                if m["media"]:
+                    t = m["media"]
+                return (to_u(m["from"]), to_u(t))
+        return (u"Reply", u"to an earlier message")
+
+    def draft_preview(self, key):
+        d = self.drafts.get(key)
+        if d:
+            return one_line(d, 80)
+        return u""
+
+    def chat_empty_text(self):
+        if self.busy:
+            return u"Loading messages..."
+        return u"No messages here yet"
 
     def open_chat(self, key):
         if key is None:
             return
         self.chat_key = key
-        self.messages = []
-        self.has_older = 0
         self.screen = "chat"
-        self.msg_list = appuifw.Listbox([(u"Loading...", u"")], self.msg_selected)
-        appuifw.app.body = self.msg_list
-        appuifw.app.menu = [(u"Write message", self.compose),
-                            (u"Read message", self.msg_selected),
-                            (u"Older messages", self.load_older),
-                            (u"Refresh", self.reload_chat),
-                            (u"Back to chats", self.back_to_chats)]
+        self.set_screen("large")
+        self.view = tgui.ChatView(self, key)
+        self.view.show()
+        self.update_chat_menu()
         appuifw.app.exit_key_handler = self.back_to_chats
-        self.set_title()
         self.reload_chat()
+
+    def update_chat_menu(self):
+        key = self.chat_key
+        m = []
+        if self.client.can_write(key):
+            m.append((u"Write message", self.compose))
+        m.append((u"Reply to selected", self.reply_selected))
+        m.append((u"Read selected message", self.read_selected))
+        if key[0] == "u" and self.client.peer(key).get("phone"):
+            m.append((u"Call " + one_line(self.client.short_name(key), 20),
+                      lambda self=self, k=key: self.call_peer(k)))
+        m = m + [(u"Load older messages", self.load_older),
+                 (u"Jump to latest", self.jump_latest),
+                 (u"Chat info", self.chat_info),
+                 (u"Refresh", self.reload_chat),
+                 (u"Back to chats", self.back_to_chats)]
+        appuifw.app.menu = m
 
     def reload_chat(self):
         key = self.chat_key
-        self.status(u"Loading messages...")
+        if not self.msgs.get(key):
+            self.status(u"Loading messages...")
         self.client.get_history(key, lambda msgs, self=self, key=key:
                                 self.got_history(key, msgs, 0), self.load_failed)
 
     def load_older(self):
-        if not self.messages:
-            return
         key = self.chat_key
-        first = self.messages[0]["id"]
+        msgs = self.msgs.get(key, [])
+        if self.loading_older or not msgs or not self.older.get(key, 1):
+            return
+        self.loading_older = 1
         self.status(u"Loading older...")
-        self.client.get_history(key, lambda msgs, self=self, key=key:
-                                self.got_history(key, msgs, 1), self.load_failed,
-                                offset_id=first)
+        self.client.get_history(key, lambda m, self=self, key=key:
+                                self.got_history(key, m, 1), self.load_failed,
+                                offset_id=msgs[0]["id"])
 
     def got_history(self, key, msgs, older):
         self.done_wait()
-        if key != self.chat_key:
-            return
-        self.has_older = len(msgs) >= 20
+        self.loading_older = 0
+        old = self.msgs.get(key, [])
+        view = self.view
         if older:
-            self.messages = msgs + self.messages
-            focus = len(msgs)
+            self.older[key] = len(msgs) >= 20
+            self.msgs[key] = msgs + old
+            if isinstance(view, tgui.ChatView) and view.key_ == key and view.sel >= 0:
+                view.sel = view.sel + len(msgs)
         else:
-            self.messages = msgs
-            focus = None
-        self.refresh_chat(focus)
-        if msgs and not older:
-            last = msgs[-1]["id"]
-            d = self.dialog_for(key)
-            if d is not None and d["unread"]:
-                d["unread"] = 0
-                self.client.mark_read(key, last)
-            elif d is None:
-                self.client.mark_read(key, last)
+            if not old:
+                self.older[key] = len(msgs) >= 20
+            # keep older pages already loaded
+            if old and msgs:
+                first = msgs[0]["id"]
+                keep = []
+                for m in old:
+                    if m["id"] < first:
+                        keep.append(m)
+                msgs = keep + msgs
+            at_end = not isinstance(view, tgui.ChatView) or view.at_bottom()
+            self.msgs[key] = msgs
+            if isinstance(view, tgui.ChatView) and view.key_ == key and at_end:
+                view.sel = len(msgs)
+        # keep at most 12 chats in memory
+        if len(self.msgs) > 12:
+            for k in self.msgs.keys():
+                if k != key and len(self.msgs) > 12:
+                    del self.msgs[k]
+        if key == self.chat_key:
+            self.redraw()
+            if msgs and not older:
+                d = self.dialog_for(key)
+                if d is None or d.get("unread") or d.get("mark"):
+                    self.client.mark_read(key, msgs[-1]["id"])
+                if d is not None and (d.get("unread") or d.get("mark")):
+                    d["unread"] = 0
+                    d["mark"] = 0
+                    self.dialogs_changed()
 
-    def msg_rows(self):
-        rows = []
-        if self.has_older:
-            rows.append((u"\u2191 Older messages", u""))
-        for m in self.messages:
-            head = one_line(m["from"], 30) + u"  " + self.hhmm(m["date"])
-            rows.append((head, one_line(m["text"] or u"(empty)", 100)))
-        if self.client.is_channel(self.chat_key):
-            rows.append((u"(channel)", u"Only admins can post here"))
-        else:
-            rows.append((u"\u270e Write message", u"Select to type"))
-        return rows
+    def jump_latest(self):
+        if isinstance(self.view, tgui.ChatView):
+            self.view.sel = len(self.chat_messages(self.chat_key))
+            self.view.draw()
 
-    def refresh_chat(self, focus=None):
-        if self.screen != "chat":
+    def selected_message(self):
+        if isinstance(self.view, tgui.ChatView):
+            return self.view.selected()
+        return None
+
+    def reply_selected(self):
+        m = self.selected_message()
+        if m is None:
+            appuifw.note(u"Select a message with up/down first.", "info")
             return
-        rows = self.msg_rows()
-        if focus is None:
-            focus = len(rows) - 1
-        elif self.has_older:
-            focus = focus + 1
-        if focus >= len(rows):
-            focus = len(rows) - 1
-        self.msg_list.set_list(rows, max(focus, 0))
-        self.set_title()
+        self.compose(m["id"])
 
-    def msg_selected(self):
-        i = self.msg_list.current()
-        off = 0
-        if self.has_older:
-            if i == 0:
-                self.load_older()
-                return
-            off = 1
-        j = i - off
-        if j >= len(self.messages):
-            if not self.client.is_channel(self.chat_key):
-                self.compose()
+    def read_selected(self):
+        m = self.selected_message()
+        if m is None:
+            appuifw.note(u"Select a message with up/down first.", "info")
             return
-        if j >= 0:
-            self.show_text(self.messages[j])
+        self.show_text(m)
+
+    def message_menu(self, m):
+        items = []
+        acts = []
+        if self.client.can_write(self.chat_key) and not m["service"]:
+            items.append(u"Reply")
+            acts.append(lambda self=self, m=m: self.compose(m["id"]))
+        items.append(u"Read full message")
+        acts.append(lambda self=self, m=m: self.show_text(m))
+        if m.get("from_key") and m["from_key"] != self.chat_key and not m["out"] and \
+                m["from_key"][0] == "u":
+            items.append(u"Message " + to_u(self.client.short_name(m["from_key"])))
+            acts.append(lambda self=self, k=m["from_key"]: self.open_chat(k))
+        i = appuifw.popup_menu(items)
+        if i is not None:
+            acts[i]()
 
     def show_text(self, m):
         self.screen = "text"
-        self.text_return = self.msg_list.current()
+        self.set_screen("normal")
         t = appuifw.Text()
-        t.set(to_u(m["from"]) + u", " + self.hhmm(m["date"]) + u"\n\n" + to_u(m["text"]))
+        head = to_u(m["from"]) + u", " + to_u(time.strftime(
+            "%d.%m.%Y %H:%M", time.gmtime(m["date"] + self.tz)))
+        body = to_u(m["text"])
+        if m["media"]:
+            body = u"[" + to_u(m["media"]) + u"]\n" + body
+        if m.get("fwd"):
+            body = u"Forwarded from " + to_u(m["fwd"]) + u"\n" + body
+        t.set(head + u"\n\n" + body)
         appuifw.app.body = t
-        appuifw.app.menu = [(u"Reply", self.compose), (u"Back", self.back_to_chat)]
+        appuifw.app.title = to_u(self.client.peer_name(self.chat_key))
+        menu = []
+        if self.client.can_write(self.chat_key):
+            menu.append((u"Reply", lambda self=self, m=m: self.compose(m["id"])))
+        menu.append((u"Back", self.back_to_chat))
+        appuifw.app.menu = menu
         appuifw.app.exit_key_handler = self.back_to_chat
-        self.set_title()
+
+    def chat_info(self):
+        key = self.chat_key
+        p = self.client.peer(key)
+        lines = [to_u(self.client.peer_name(key)), to_u(self.client.status_text(key))]
+        if p.get("username"):
+            lines.append(u"@" + to_u(p["username"]))
+        if p.get("phone"):
+            lines.append(u"+" + to_u(p["phone"]))
+        appuifw.note(u"\n".join(lines), "info")
 
     def back_to_chat(self):
+        if self.chat_key is None:
+            self.show_chats()
+            return
         self.screen = "chat"
-        appuifw.app.body = self.msg_list
-        appuifw.app.menu = [(u"Write message", self.compose),
-                            (u"Read message", self.msg_selected),
-                            (u"Older messages", self.load_older),
-                            (u"Refresh", self.reload_chat),
-                            (u"Back to chats", self.back_to_chats)]
+        self.set_screen("large")
+        if not isinstance(self.view, tgui.ChatView) or self.view.key_ != self.chat_key:
+            self.view = tgui.ChatView(self, self.chat_key)
+        self.view.show()
+        self.update_chat_menu()
         appuifw.app.exit_key_handler = self.back_to_chats
-        self.refresh_chat()
-        self.set_title()
 
     def back_to_chats(self):
         self.show_chats()
-        self.refresh_chats()
+        self.list_view.draw()
 
-    def compose(self):
+    def compose(self, reply_to=0):
+        key = self.chat_key
+        if key is None or not self.client.can_write(key):
+            return
+        self.reply_to = reply_to
         self.screen = "compose"
+        self.set_screen("normal")
+        title = u"To " + one_line(self.client.short_name(key), 24)
+        if reply_to:
+            q = self.quote_for(key, reply_to)
+            title = u"Reply to " + one_line(q[0], 20)
+        appuifw.app.title = title
         self.editor = appuifw.Text()
-        draft = getattr(self, "draft", {}).get(self.chat_key, u"")
-        self.editor.set(draft)
+        try:
+            self.editor.color = (16, 20, 24)
+        except:
+            pass
+        self.editor.set(self.drafts.get(key, u""))
         appuifw.app.body = self.editor
         appuifw.app.menu = [(u"Send", self.send_now), (u"Cancel", self.cancel_compose)]
         appuifw.app.exit_key_handler = self.cancel_compose
-        self.set_title()
 
     def cancel_compose(self):
-        if not hasattr(self, "draft"):
-            self.draft = {}
-        self.draft[self.chat_key] = self.editor.get()
+        text = self.editor.get().strip()
+        if text:
+            self.drafts[self.chat_key] = text
+        elif self.drafts.has_key(self.chat_key):
+            del self.drafts[self.chat_key]
         self.back_to_chat()
 
     def send_now(self):
@@ -884,84 +1253,133 @@ class App:
             appuifw.note(u"Type a message first.", "info")
             return
         key = self.chat_key
-        if hasattr(self, "draft") and self.draft.has_key(key):
-            del self.draft[key]
+        reply_to = self.reply_to
+        if self.drafts.has_key(key):
+            del self.drafts[key]
         self.back_to_chat()
+        self.jump_latest()
         self.status(u"Sending...")
         self.client.send_text(key, text, lambda m, self=self, key=key, text=text:
-                              self.sent(key, m, text), self.send_failed)
+                              self.sent(key, m, text), self.send_failed, reply_to)
 
     def sent(self, key, msg, text):
         self.done_wait()
-        if msg is not None and key == self.chat_key:
-            if not self.have_msg(msg["id"]):
-                self.messages.append(msg)
-                self.refresh_chat()
+        if msg is not None:
+            self.add_message(key, msg)
         d = self.dialog_for(key)
         if d is not None:
-            d["preview"] = u"You: " + text
-            d["date"] = int(time.time() + self.client.session().time_offset)
-            self.dialogs.remove(d)
-            self.dialogs.insert(0, d)
+            d["preview"] = to_b(text)
+            d["sender"] = "You"
+            d["out"] = 1
+            d["date"] = self.now()
+            if msg is not None:
+                d["top"] = msg["id"]
+            self.move_to_top(d)
+            self.dialogs_changed()
+        self.redraw()
 
     def send_failed(self, e):
         self.done_wait()
         appuifw.note(u"Not sent: " + err_msg(e), "error")
 
-    def have_msg(self, mid):
-        for m in self.messages:
-            if m["id"] == mid:
-                return 1
-        return 0
+    def add_message(self, key, msg):
+        msgs = self.msgs.get(key)
+        if msgs is None:
+            return
+        for m in msgs:
+            if m["id"] == msg["id"]:
+                return
+        view = self.view
+        at_end = isinstance(view, tgui.ChatView) and view.key_ == key and view.at_bottom()
+        msgs.append(msg)
+        if at_end:
+            view.sel = len(msgs)
+
+    def move_to_top(self, d):
+        try:
+            self.dialogs.remove(d)
+        except:
+            pass
+        if d.get("pinned"):
+            self.dialogs.insert(0, d)
+            return
+        i = 0
+        while i < len(self.dialogs) and self.dialogs[i].get("pinned"):
+            i = i + 1
+        self.dialogs.insert(i, d)
 
     # ---------------------------------------------------------- live updates
 
     def new_message(self, key, msg):
-        if key == self.chat_key and self.screen in ("chat", "text", "compose"):
-            if not self.have_msg(msg["id"]):
-                self.messages.append(msg)
-                if self.screen == "chat":
-                    self.refresh_chat()
-                if not msg["out"]:
-                    self.client.mark_read(key, msg["id"])
+        self.add_message(key, msg)
+        viewing = key == self.chat_key and self.screen in ("chat", "text", "compose")
+        if viewing and not msg["out"]:
+            self.client.mark_read(key, msg["id"])
         d = self.dialog_for(key)
         if d is None:
-            d = {"key": key, "name": self.client.peer_name(key), "unread": 0,
-                 "preview": "", "date": 0, "top": 0, "pinned": 0}
-        else:
-            self.dialogs.remove(d)
-        preview = msg["text"]
-        if key[0] != "u" and msg["from"]:
-            preview = to_u(msg["from"]).split(u" ")[0] + u": " + to_u(preview)
-        d["preview"] = preview
+            d = {"key": key, "unread": 0, "mark": 0, "preview": "", "sender": "",
+                 "date": 0, "top": 0, "out": 0, "pinned": 0, "muted": 0, "read_out": 0,
+                 "read_in": 0, "folder": 0}
+        d["preview"] = self.client.preview(msg)
+        if msg["service"]:
+            d["preview"] = msg["text"]
+        d["sender"] = ""
+        if msg["out"]:
+            d["sender"] = "You"
+        elif self.client.is_group(key) and msg.get("from_key"):
+            d["sender"] = self.client.short_name(msg["from_key"])
         d["date"] = msg["date"]
-        if not msg["out"] and key != self.chat_key:
-            d["unread"] = d["unread"] + 1
-        self.dialogs.insert(0, d)
-        if self.screen == "chats":
-            self.refresh_chats()
-        if not msg["out"] and key != self.chat_key:
-            self.alert(key, msg)
+        d["top"] = msg["id"]
+        d["out"] = msg["out"]
+        if not msg["out"] and not viewing:
+            d["unread"] = d.get("unread", 0) + 1
+        self.move_to_top(d)
+        self.dialogs_changed()
+        if not msg["out"] and not viewing and not d.get("muted"):
+            who = self.client.peer_name(key)
+            text = to_u(self.client.preview(msg))
+            if self.client.is_group(key) and msg.get("from_key"):
+                text = to_u(self.client.short_name(msg["from_key"])) + u": " + text
+            self.show_toast(to_u(who), text)
+        else:
+            self.redraw()
 
-    def alert(self, key, msg):
-        """A short pop-up for a message in another chat."""
-        if self.screen == "compose":
-            return  # do not disturb typing
-        try:
-            appuifw.note(one_line(to_u(self.client.peer_name(key)) + u": " +
-                                  to_u(msg["text"]), 60), "info")
-        except:
-            pass
+    def message_edited(self, key, msg):
+        for m in self.msgs.get(key, []):
+            if m["id"] == msg["id"]:
+                m.update(msg)
+                self.redraw()
+                return
+
+    def read_changed(self, key, which, max_id, still):
+        if key is None:
+            return
+        d = self.dialog_for(key)
+        if which == "out":
+            self.read_outs[key] = max(self.read_outs.get(key, 0), max_id)
+            if d is not None:
+                d["read_out"] = max(d.get("read_out", 0), max_id)
+        elif d is not None and still >= 0:
+            d["unread"] = still
+            if not still:
+                d["mark"] = 0
+        self.dialogs_changed()
+        self.redraw_soon()
+
+    def peer_changed(self, key):
+        if self.screen == "chats" or key == self.chat_key:
+            self.rows_cache = {}
+            self.redraw_soon()
 
     def refresh_needed(self):
-        if self.screen == "chat":
+        if self.screen in ("chat", "text", "compose") and self.chat_key:
             self.reload_chat()
-        self.client.get_dialogs(self.got_dialogs, self.load_failed)
+        self.client.get_dialogs(self.got_dialogs, self.load_failed, 40)
 
     # ---------------------------------------------------------- menus
 
     def settings(self):
-        items = [u"Access point", u"Telegram API key", u"Log out", u"Show log file path"]
+        items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder"]
         i = appuifw.popup_menu(items, u"Settings")
         if i == 0:
             if self.setup_ap(1):
@@ -972,26 +1390,31 @@ class App:
         elif i == 2:
             if self.client is not None and appuifw.query(u"Log out of Telegram?", "query"):
                 self.status(u"Logging out...")
-                self.client.logout(lambda self=self: (self.done_wait(),
-                                                      self.show_login_screen()))
+                self.client.logout(lambda self=self: (self.done_wait(), self.logged_out()))
         elif i == 3:
             appuifw.note(u"Log: E:\\retrotele_log.txt, data: " + to_u(self.dir), "info")
 
     def about(self):
-        appuifw.note(u"RetroTele " + VERSION + u"\nTelegram for S60 3rd Edition, "
-                     u"written in Python. Text chats only.", "info")
+        appuifw.note(u"RetroTele " + VERSION + u"\nTelegram for S60 3rd Edition, written in "
+                     u"Python. Left/right: switch tabs. Any number key in a chat: "
+                     u"write a message.", "info")
 
     def exit(self):
         self.hash_job = None
+        if self.client is not None and self.client.me is not None:
+            self.save_cache()
+            try:
+                self.client.set_online(0)
+            except:
+                pass
         self.lock.signal()
 
     def run(self):
-        appuifw.app.screen = "normal"
         appuifw.app.title = APP
         appuifw.app.exit_key_handler = self.exit
-        t = appuifw.Text()
-        t.set(u"RetroTele " + VERSION + u"\n\nStarting...")
-        appuifw.app.body = t
+        self.set_screen("large")
+        self.view = tgui.WelcomeView(self, [u"Starting..."])
+        self.view.show()
         appuifw.app.menu = [(u"Exit", self.exit)]
         self.net.later(0.3, self.start)
         self.lock.wait()

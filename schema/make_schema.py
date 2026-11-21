@@ -26,7 +26,7 @@ account.getPassword account.updateStatus
 users.getUsers users.getFullUser
 contacts.getContacts contacts.resolveUsername contacts.search
 messages.getDialogs messages.getHistory messages.sendMessage messages.readHistory
-messages.getPeerDialogs messages.getMessages messages.setTyping
+messages.getPeerDialogs messages.getMessages messages.setTyping messages.getDialogFilters
 channels.readHistory channels.getMessages
 updates.getState updates.getDifference updates.getChannelDifference
 upload.getFile

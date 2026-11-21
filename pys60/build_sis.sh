@@ -23,7 +23,7 @@ if [ ! -f cert/retrotele_key.pem ]; then
   openssl rsa -in cert/retrotele_key.pem -traditional -out cert/retrotele_key.pem
 fi
 
-MODULES="tgcrypto.py tl.py mtproto.py tgclient.py tgsrp.py"
+MODULES="tgcrypto.py tl.py mtproto.py tgclient.py tgsrp.py tgui.py"
 for f in retrotele.py launcher.py $MODULES; do python3 tools/check_py22.py "$f" >/dev/null; done
 python3 tools/check_ints.py retrotele.py launcher.py $MODULES
 
