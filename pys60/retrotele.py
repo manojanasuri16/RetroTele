@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.5.0"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.6.0"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -1185,6 +1185,9 @@ class App:
         if self.client.can_write(self.chat_key) and not m["service"]:
             items.append(u"Reply")
             acts.append(lambda self=self, m=m: self.compose(m["id"]))
+        if m.get("audio"):
+            items.insert(0, u"Play")
+            acts.insert(0, lambda self=self, m=m: self.play_audio(m))
         if not m["service"]:
             items.append(u"Forward")
             acts.append(lambda self=self, m=m: self.forward_message(m))
@@ -1206,6 +1209,55 @@ class App:
         i = appuifw.popup_menu(items)
         if i is not None:
             acts[i]()
+
+    def play_audio(self, m):
+        info = m["audio"]
+        if info["voice"] or info["ext"] in ("ogg", "opus", "oga", "flac"):
+            appuifw.note(u"This is an Opus/OGG recording, which the N79 can't play yet. "
+                         u"Support is planned together with the native crypto module.",
+                         "info")
+            return
+        path = self.media.folder + info["id"] + "." + info["ext"]
+        if os.path.exists(path):
+            self.open_player(info, path)
+            return
+        mb = info.get("size", 0) / 1048576.0
+        if mb > 1 and not appuifw.query(u"Download %.1f MB to play it? Large files take a "
+                                        u"while on this phone." % mb, "query"):
+            return
+        size = max(info.get("size", 0), 1)
+        tmp = path + ".part"
+
+        def progress(done, self=self, size=size):
+            self.status(u"Downloading %d%%" % min(done * 100 / size, 99))
+
+        def ok(p, self=self, info=info, path=path, tmp=tmp):
+            self.done_wait()
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                os.rename(tmp, path)
+            except:
+                pass
+            self.open_player(info, path)
+        self.status(u"Downloading 0%")
+        self.client.download(info, tmp, ok, self.load_failed, progress)
+
+    def open_player(self, info, path):
+        self.screen = "player"
+        self.set_screen("large")
+        v = tgui.PlayerView(self, info, path)
+        self.view = v
+        v.show()
+        appuifw.app.menu = [(u"Play / pause", v.toggle), (u"Back", self.close_player)]
+        appuifw.app.exit_key_handler = self.close_player
+        v.start()
+
+    def close_player(self):
+        v = self.view
+        if isinstance(v, tgui.PlayerView):
+            v.close()
+        self.back_to_chat()
 
     def view_photo(self, m):
         info = m["photo"]
@@ -1658,6 +1710,8 @@ class App:
 
     def exit(self):
         self.hash_job = None
+        if isinstance(self.view, tgui.PlayerView):
+            self.view.close()
         if self.client is not None and self.client.me is not None:
             self.save_cache()
             try:

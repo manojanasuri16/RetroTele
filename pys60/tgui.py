@@ -933,6 +933,14 @@ class ChatView(CanvasView):
                 ph = 200
             ph = max(ph, 50)
             photo = (pw, ph)
+        elif m.get("audio"):
+            au = m["audio"]
+            d = au.get("duration", 0)
+            sub = u"%d:%02d" % (d / 60, d % 60)
+            if au.get("performer"):
+                sub = to_u(au["performer"]) + u"  " + sub
+            body.append(("audio", fit(g, au.get("title", ""), "text", inner - 36)))
+            body.append(("audio2", fit(g, sub, "small", inner - 36)))
         elif m["media"]:
             for l in wrap(g, m["media"], "text", inner, 3):
                 body.append(("media", l))
@@ -954,6 +962,8 @@ class ChatView(CanvasView):
         last_w = 0
         for kind, l in body:
             last_w = width(g, l, "text")
+            if kind == "audio" or kind == "audio2":
+                last_w = last_w + 36
             bw = max(bw, last_w)
         h = self.PAD
         for kind, l in head:
@@ -1147,7 +1157,24 @@ class ChatView(CanvasView):
             else:
                 self.paint_photo(g, x1 + 3, ty - P + 3, pw, ph, m["photo"])
                 ty = ty - P + 3 + ph + 4
+        first_audio = 1
         for kind, l in lay["body"]:
+            if kind == "audio":
+                if first_audio:
+                    ac = BLUE
+                    if m["out"]:
+                        ac = TIME_OUT
+                    g.ellipse((x1 + P, ty + 2, x1 + P + 30, ty + 32), fill=ac)
+                    g.polygon([(x1 + P + 11, ty + 9), (x1 + P + 22, ty + 17),
+                               (x1 + P + 11, ty + 25)], fill=WHITE)
+                    first_audio = 0
+                txt(g, x1 + P + 36, ty + 14, l, BLUE_DARK, "text", bg)
+                ty = ty + 18
+                continue
+            if kind == "audio2":
+                txt(g, x1 + P + 36, ty + 12, l, GREY, "small", bg)
+                ty = ty + 18
+                continue
             colour = TEXT
             if kind == "media":
                 colour = BLUE_DARK
@@ -1344,6 +1371,157 @@ class PhotoView(CanvasView):
         else:
             t = u"Downloading picture..."
             g.text(((w - width(g, t, "text")) / 2, h / 2), t, fill=WHITE, font=font("text"))
+
+
+# ---------------------------------------------------------------- audio player
+
+class PlayerView(CanvasView):
+    """Now playing: title, a big play/pause button and the position."""
+
+    def __init__(self, app, info, path):
+        CanvasView.__init__(self, app)
+        self.info = info
+        self.path = path
+        self.sound = None
+        self.pos = 0          # microseconds, while paused
+        self.error = u""
+        self.ticking = 0
+
+    def start(self):
+        try:
+            import audio
+            self.sound = audio.Sound.open(to_u(self.path))
+            self.sound.play(1, 0, self.on_state)
+        except:
+            import sys
+            self.error = u"Cannot play: " + to_u(str(sys.exc_info()[1]))
+        self.tick()
+
+    def on_state(self, prev, cur, err):
+        self.app.redraw_soon()
+
+    def playing(self):
+        try:
+            import audio
+            return self.sound is not None and self.sound.state() == audio.EPlaying
+        except:
+            return 0
+
+    def toggle(self):
+        if self.sound is None:
+            return
+        try:
+            if self.playing():
+                try:
+                    self.pos = self.sound.current_position()
+                except:
+                    self.pos = 0
+                self.sound.stop()
+            else:
+                self.sound.play(1, 0, self.on_state)
+                if self.pos:
+                    try:
+                        self.sound.set_position(self.pos)
+                    except:
+                        pass
+        except:
+            import sys
+            self.error = to_u(str(sys.exc_info()[1]))
+        self.tick()
+
+    def skip(self, seconds):
+        if self.sound is None or not self.playing():
+            return
+        try:
+            p = self.sound.current_position() + seconds * 1000000
+            p = max(p, 0)
+            self.sound.set_position(p)
+        except:
+            pass
+        self.draw()
+
+    def close(self):
+        s = self.sound
+        self.sound = None
+        if s is not None:
+            try:
+                s.stop()
+            except:
+                pass
+            try:
+                s.close()
+            except:
+                pass
+
+    def tick(self):
+        self.draw()
+        if self.sound is not None and self.playing() and not self.ticking:
+            self.ticking = 1
+
+            def again(self=self):
+                self.ticking = 0
+                if self.app.view is self:
+                    self.tick()
+            self.app.net.later(1, again)
+
+    def key(self, k):
+        if k in ("select", "5"):
+            self.toggle()
+        elif k in ("left", "4"):
+            self.skip(-10)
+        elif k in ("right", "6"):
+            self.skip(10)
+
+    def paint(self, g, w, h):
+        g.clear(0x17212B)
+        info = self.info
+        H = self.HEADER_H
+        g.rectangle((0, 0, w, H), fill=BLUE)
+        g.text((12, 30), u"Now playing", fill=WHITE, font=font("title"))
+        cx = w / 2
+        cy = H + 70
+        g.ellipse((cx - 44, cy - 44, cx + 44, cy + 44), fill=BLUE)
+        if self.playing():
+            g.rectangle((cx - 14, cy - 18, cx - 4, cy + 18), fill=WHITE)
+            g.rectangle((cx + 4, cy - 18, cx + 14, cy + 18), fill=WHITE)
+        else:
+            g.polygon([(cx - 10, cy - 20), (cx + 20, cy), (cx - 10, cy + 20)], fill=WHITE)
+        title = fit(g, info.get("title", u""), "name", w - 20)
+        txt(g, (w - width(g, title, "name")) / 2, cy + 72, title, WHITE, "name", "t")
+        perf = fit(g, info.get("performer", u""), "small", w - 20)
+        if perf:
+            txt(g, (w - width(g, perf, "small")) / 2, cy + 92, perf, 0x8CA2B5, "small", "t")
+        # position bar
+        total = 0
+        cur = 0
+        if self.sound is not None:
+            try:
+                total = self.sound.duration() / 1000000
+            except:
+                total = 0
+            try:
+                if self.playing():
+                    cur = self.sound.current_position() / 1000000
+                else:
+                    cur = self.pos / 1000000
+            except:
+                cur = 0
+        if not total:
+            total = info.get("duration", 0)
+        by = cy + 112
+        rrect(g, 20, by, w - 20, by + 5, 2, 0x3A4A5A)
+        if total:
+            fw = (w - 40) * min(cur, total) / max(total, 1)
+            rrect(g, 20, by, 20 + fw, by + 5, 2, 0x5EB5F7)
+        t1 = u"%d:%02d" % (cur / 60, cur % 60)
+        t2 = u"%d:%02d" % (total / 60, total % 60)
+        g.text((20, by + 22), t1, fill=0x8CA2B5, font=font("small"))
+        g.text((w - 20 - width(g, t2, "small"), by + 22), t2, fill=0x8CA2B5, font=font("small"))
+        hint = u"Centre: play/pause   4/6: -10s/+10s"
+        if self.error:
+            hint = self.error
+        g.text((max((w - width(g, hint, "small")) / 2, 4), h - 10), fit(g, hint, "small", w - 8),
+               fill=0x8CA2B5, font=font("small"))
 
 
 # ---------------------------------------------------------------- profile

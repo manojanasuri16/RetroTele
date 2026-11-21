@@ -122,6 +122,11 @@ PRIVATE = [
     M("u11", 70, 11, "Bro did you install that app?", 9000),
     M("u11", 71, 7, "Yes! Telegram on the N79 :)", 8800, 1),
     M("u11", 72, 7, "It even shows read ticks and replies", 8700, 1),
+    M("u11", 76, 11, "", 700, media={"_": "messageMediaDocument", "document": {
+        "_": "document", "id": 55, "access_hash": 1, "file_reference": "r", "date": 0,
+        "mime_type": "audio/mpeg", "size": 90000, "dc_id": 2, "thumbs": [],
+        "attributes": [{"_": "documentAttributeAudio", "duration": 214, "title": "Nokia Tune (Remix)",
+                        "performer": "Francisco Tarrega"}]}}),
     M("u11", 77, 11, "Hie \xf0\x9f\x91\x8b\xf0\x9f\x98\x8a", 600),
 ]
 
@@ -188,7 +193,8 @@ class FakeNet:
         self.q = []
 
     def later(self, sec, f):
-        self.q.append(f)
+        if sec < 1:
+            self.q.append(f)   # repeating timers (player, toasts) don't run here
 
     def run(self):
         while self.q:
@@ -242,6 +248,9 @@ app.read_outs["u11"] = 71
 app.show_toast(u"Retro Phone Club", u"Jakob: anyone tried RetroTele yet?")
 app.net.q = []
 snap("8-private")
+app.play_audio(app.msgs["u11"][-2]); app.net.run()
+snap("10-player")
+app.close_player()
 app.view_profile(); app.net.run(); app.view.draw(); app.net.run()
 snap("9-profile")
 json.dump(screens, open(os.environ["RT_OUT"] + "/screens.json", "w"))

@@ -15,6 +15,7 @@ Modern Symbian Telegram apps such as Symbigram need Qt Quick Components (Symbian
 - Write messages and reply to a selected one. Any number key in a chat starts a message.
 - **Edit**, **delete** (for you, or for everyone) and **forward** messages
 - **Pictures:** photos, GIFs and videos show a preview in the chat (a blurry one at once, then the real picture). Select a message, then *View picture* to see it full screen. Downloads can be turned off in Settings.
+- **Music and audio files** (MP3, M4A, AAC, AMR, WAV): select the message > Play. The file downloads once to the memory card, then plays with a play/pause button and position bar (4/6 skip 10 s). Voice messages use Opus/OGG, which the N79 can't decode yet.
 - **Emoji** are drawn as pictures (the phone's fonts have none), and **stickers** show as their big emoji
 - An **incoming Telegram call** pops up so you can decline it, call back by phone, or reply with a message
 - Live incoming messages with a pop-up banner (muted chats stay quiet), plus read receipts and online status

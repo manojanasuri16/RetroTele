@@ -49,8 +49,12 @@ import retrotele, tgclient, tgsrp, tgcrypto, mtproto
 from mtproto import RpcError
 
 class FakeNet:
-    def __init__(self): self.q = []
-    def later(self, sec, f): self.q.append(f)
+    def __init__(self): self.q = []; self.delayed = []
+    def later(self, sec, f):
+        if sec >= 1:
+            self.delayed.append(f)   # timers (player ticks, toasts) don't run here
+        else:
+            self.q.append(f)
     def run(self):
         n = 0
         while self.q:
@@ -150,7 +154,12 @@ def handle(f):
             {"_": "message", "id": 10, "peer_id": {"_": "peerUser", "user_id": 42}, "date": 1700000000, "message": "hey there"},
             {"_": "message", "id": 9, "out": 1, "peer_id": {"_": "peerUser", "user_id": 42}, "date": 1699999000, "message": "hi",
              "media": {"_": "messageMediaDocument", "document": {"_": "document", "attributes": [
-                 {"_": "documentAttributeAudio", "voice": 1, "duration": 4}]}}}]}
+                 {"_": "documentAttributeAudio", "voice": 1, "duration": 4}]}}},
+            {"_": "message", "id": 8, "peer_id": {"_": "peerUser", "user_id": 42}, "date": 1699990000, "message": "",
+             "media": {"_": "messageMediaDocument", "document": {"_": "document", "id": 77, "access_hash": 1,
+                 "file_reference": "r", "date": 0, "mime_type": "audio/mpeg", "size": 300000, "dc_id": 4,
+                 "thumbs": [], "attributes": [{"_": "documentAttributeAudio", "duration": 185,
+                 "title": "Nokia Tune", "performer": "Nokia"}]}}}]}
     if n == "messages.readHistory":
         return {"_": "messages.affectedMessages", "pts": 2, "pts_count": 1}
     if n == "messages.sendMessage":
@@ -168,6 +177,11 @@ def handle(f):
     if n == "messages.deleteMessages":
         state["deleted"] = (f["id"], f.get("revoke"))
         return {"_": "messages.affectedMessages", "pts": 1, "pts_count": 1}
+    if n == "upload.getFile":
+        assert f["location"]["_"] == "inputDocumentFileLocation" and f["limit"] == 131072
+        size = 300000 - f["offset"]
+        return {"_": "upload.file", "type": {"_": "storage.fileMp3"}, "mtime": 0,
+                "bytes": "x" * min(size, 131072)}
     if n == "users.getFullUser":
         assert f["id"]["user_id"] == 42
         return {"_": "users.userFull", "full_user": {"_": "userFull", "id": 42, "about": "Retro phone fan",
@@ -248,6 +262,20 @@ assert app.screen == "chat"
 txt = screen_text()
 print "chat:", txt
 msgs = app.msgs["u42"]
+assert msgs[0]["audio"]["title"] == "Nokia Tune" and msgs[0]["audio"]["ext"] == "mp3"
+assert msgs[0]["media"] == "Music Nokia - Nokia Tune", msgs[0]["media"]
+answers[:] = [1]                 # "Download 0.3 MB?" isn't asked below 1 MB
+del answers[:]
+app.play_audio(msgs[0]); app.net.run()
+import audio
+assert app.screen == "player" and audio.played and audio.played[-1].endswith(u"f77.mp3"), audio.played
+assert os.path.getsize(app.media.folder + "f77.mp3") == 300000
+pl = screen_text()
+print "player:", pl
+assert pl.find(u"Nokia Tune") >= 0 and pl.find(u"3:05") >= 0, pl
+app.close_player()
+assert app.screen == "chat"
+msgs = msgs[1:]
 assert msgs[0]["media"] == "Voice message 0:04" and msgs[0]["text"] == "hi"
 assert txt.find(u"hey there") >= 0 and txt.find(u"Voice message 0:04") >= 0 and txt.find(u"Message") >= 0
 assert "messages.readHistory" in calls

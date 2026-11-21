@@ -202,6 +202,45 @@ def doc_preview(doc, label):
                     "thumb_size": best[0]}}
 
 
+AUDIO_EXT = {"audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/mp4": "m4a",
+             "audio/x-m4a": "m4a", "audio/m4a": "m4a", "audio/aac": "aac",
+             "audio/ogg": "ogg", "audio/opus": "ogg", "audio/wav": "wav",
+             "audio/x-wav": "wav", "audio/amr": "amr", "audio/3gpp": "3gp",
+             "audio/flac": "flac", "audio/x-flac": "flac"}
+
+
+def audio_info(doc):
+    """Download and playback details of a music file or voice message."""
+    if type(doc) is not type({}) or doc.get("_") != "document":
+        return None
+    mime = doc.get("mime_type", "")
+    a = None
+    name = ""
+    for at in doc.get("attributes", []):
+        if at["_"] == "documentAttributeAudio":
+            a = at
+        elif at["_"] == "documentAttributeFilename":
+            name = at.get("file_name", "")
+    if a is None and mime[:6] != "audio/":
+        return None
+    ext = AUDIO_EXT.get(mime, "")
+    if not ext and name.find(".") > 0:
+        ext = name.split(".")[-1].lower()
+    if not ext:
+        ext = "mp3"
+    a = a or {}
+    title = a.get("title") or name or "Audio"
+    if a.get("voice"):
+        title = "Voice message"
+    return {"id": "f%d" % doc["id"], "dc": doc.get("dc_id", 0), "size": doc.get("size", 0),
+            "mime": mime, "ext": ext, "voice": a.get("voice", 0),
+            "duration": int(a.get("duration", 0)), "title": title,
+            "performer": a.get("performer") or "",
+            "loc": {"_": "inputDocumentFileLocation", "id": doc["id"],
+                    "access_hash": doc["access_hash"], "file_reference": doc["file_reference"],
+                    "thumb_size": ""}}
+
+
 class Client:
     def __init__(self, net, schema, ui, store, api_id, api_hash, version="1.0.0"):
         self.net = net
@@ -346,16 +385,19 @@ class Client:
         self.log("copying login to DC %d" % dc)
         self.call({"_": "auth.exportAuthorization", "dc_id": dc}, exported, on_err)
 
-    def download(self, info, path, on_ok, on_err):
-        """Downloads a preview picture (info from photo_preview) to path."""
+    def download(self, info, path, on_ok, on_err, progress=None):
+        """Downloads a file (info from photo_preview / audio_info) to path.
+        progress(done_bytes) is called after every 128 KB piece."""
         CH = 131072
         chunks = []
 
         def got(res, self=self, info=info, path=path, on_ok=on_ok, on_err=on_err,
-                chunks=chunks):
+                chunks=chunks, progress=progress):
             data = res.get("bytes") or ""
             chunks.append(data)
-            if len(data) == CH and len(chunks) < 16:
+            if progress is not None:
+                progress(len(chunks) * CH)
+            if len(data) == CH and len(chunks) < 400:
                 fetch(len(chunks) * CH)
                 return
             try:
@@ -640,7 +682,7 @@ class Client:
         d = {"id": m.get("id", 0), "key": key, "out": m.get("out", 0),
              "date": m.get("date", 0), "text": "", "media": "", "reply_to": 0,
              "edited": 0, "fwd": "", "service": 0, "from": "", "from_key": None,
-             "photo": None, "sticker": None}
+             "photo": None, "sticker": None, "audio": None}
         if n == "messageEmpty":
             d["text"] = "Deleted message"
             d["service"] = 1
@@ -683,9 +725,16 @@ class Client:
                 if label[:7] == "Sticker":
                     d["sticker"] = label[8:]
                 else:
-                    d["photo"] = doc_preview(doc, label)
+                    try:
+                        d["photo"] = doc_preview(doc, label)
+                        d["audio"] = audio_info(doc)
+                    except:
+                        pass     # unusual document: just show the label
             elif mn == "messageMediaPhoto":
-                d["photo"] = photo_preview(media.get("photo"))
+                try:
+                    d["photo"] = photo_preview(media.get("photo"))
+                except:
+                    pass
             elif mn == "messageMediaPoll":
                 try:
                     label = "Poll: " + text_of(media["poll"]["question"])
