@@ -125,6 +125,15 @@ class PasswordHash:
         self.salt2 = salt2
         sh = lambda d, s: sha256(s + d + s)
         ph1 = sh(sh(password, salt1), salt2)
+        self.native = None
+        import tgcrypto
+        if tgcrypto.NATIVE:
+            # compiled PBKDF2: seconds instead of an hour
+            self.native = tgcrypto.tgnative.pbkdf2_sha512(ph1, salt1, iterations)
+            self.total = iterations
+            self.done_n = 0
+            self.result = None
+            return
         key = ph1
         if len(key) > 128:
             key = sha512(key)
@@ -168,6 +177,12 @@ class PasswordHash:
     def step(self, n):
         """Runs up to n PBKDF2 iterations; returns 1 when finished."""
         if self.result is not None:
+            return 1
+        if self.native is not None:
+            hashed = self.native
+            s = self.salt2
+            self.done_n = self.total
+            self.result = sha256(s + hashed + s)
             return 1
         u = self.u
         t = self.t

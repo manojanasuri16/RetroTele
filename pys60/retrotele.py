@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.6.0"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.6.1"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -551,7 +551,13 @@ class App:
         self.client = tgclient.Client(self.net, self.schema, self, self.store,
                                       self.cfg.get("api_id"), self.cfg.get("api_hash"),
                                       to_b(VERSION))
-        self.client.verify = self.cfg.get("verify", "0") == "1"
+        # the integrity check is cheap with the compiled crypto module, so it
+        # is on by default then; without it fast mode skips it
+        default = "0"
+        if tgcrypto.NATIVE:
+            default = "1"
+        self.client.verify = self.cfg.get("verify", default) == "1"
+        boot_log("native crypto: %d, full check: %d" % (tgcrypto.NATIVE, self.client.verify))
         self.status(u"Connecting...")
         self.client.start()
         if self.client.logged_in():
@@ -643,7 +649,10 @@ class App:
             appuifw.note(u"Unsupported password type: " + to_u(algo.get("_", "?")), "error")
             return
         hint = to_u(pw.get("hint") or "")
-        choice = appuifw.popup_menu([u"Enter password (phone, about 1 hour)",
+        slow = u"Enter password (phone, about 1 hour)"
+        if tgcrypto.NATIVE:
+            slow = u"Enter password"
+        choice = appuifw.popup_menu([slow,
                                      u"Use hash from PC helper"],
                                     u"Two-step verification")
         if choice is None:
@@ -657,8 +666,9 @@ class App:
         pw_text = appuifw.query(label, "code")
         if not pw_text:
             return
-        appuifw.note(u"Computing the password key. This takes a long time on the phone: "
-                     u"keep RetroTele open and the phone charging.", "info")
+        if not tgcrypto.NATIVE:
+            appuifw.note(u"Computing the password key. This takes a long time on the "
+                         u"phone: keep RetroTele open and the phone charging.", "info")
         self.hash_job = tgsrp.PasswordHash(to_b(pw_text), algo["salt1"], algo["salt2"])
         self.hash_t0 = time.time()
         self.net.later(0.05, self.hash_tick)
@@ -1221,27 +1231,53 @@ class App:
         if os.path.exists(path):
             self.open_player(info, path)
             return
-        mb = info.get("size", 0) / 1048576.0
-        if mb > 1 and not appuifw.query(u"Download %.1f MB to play it? Large files take a "
-                                        u"while on this phone." % mb, "query"):
+        if not hasattr(self, "downloads"):
+            self.downloads = {}
+        if self.downloads.has_key(info["id"]):
+            appuifw.note(u"Still downloading. You can use other chats meanwhile; "
+                         u"it plays when you select it again after it's done.", "info")
             return
+        mb = info.get("size", 0) / 1048576.0
+        have = 0
+        try:
+            have = os.path.getsize(path + ".part")
+        except:
+            pass
+        if not tgcrypto.NATIVE and mb > 0.5:
+            mins = int((info.get("size", 0) - have) / 5000 / 60) + 1
+            if not appuifw.query(u"Download %.1f MB? On this phone that takes about %d min. "
+                                 u"It continues in the background and resumes if you "
+                                 u"exit." % (mb, mins), "query"):
+                return
         size = max(info.get("size", 0), 1)
-        tmp = path + ".part"
+        key = self.chat_key
+        t0 = time.time()
+        self.downloads[info["id"]] = 1
+        title = to_u(info.get("title", u"Audio"))
 
-        def progress(done, self=self, size=size):
-            self.status(u"Downloading %d%%" % min(done * 100 / size, 99))
+        def progress(done, self=self, size=size, t0=t0, have=have):
+            el = time.time() - t0
+            left = u""
+            if el > 5 and done > have:
+                rate = (done - have) / el
+                left = u", %d min left" % (int((size - done) / max(rate, 1) / 60) + 1)
+            self.status(u"Downloading %d%% (%.1f/%.1f MB%s)" % (
+                min(done * 100 / size, 99), done / 1048576.0, size / 1048576.0, left))
 
-        def ok(p, self=self, info=info, path=path, tmp=tmp):
+        def ok(p, self=self, info=info, key=key, title=title):
+            del self.downloads[info["id"]]
             self.done_wait()
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-                os.rename(tmp, path)
-            except:
-                pass
-            self.open_player(info, path)
-        self.status(u"Downloading 0%")
-        self.client.download(info, tmp, ok, self.load_failed, progress)
+            if self.screen == "chat" and self.chat_key == key:
+                self.open_player(info, p)
+            else:
+                self.show_toast(u"Downloaded", title + u": select it to play")
+
+        def fail(e, self=self, info=info):
+            if self.downloads.has_key(info["id"]):
+                del self.downloads[info["id"]]
+            self.load_failed(e)
+        self.status(u"Downloading...")
+        self.client.download(info, path, ok, fail, progress)
 
     def open_player(self, info, path):
         self.screen = "player"
@@ -1664,8 +1700,11 @@ class App:
         ap = u"Auto-download pictures: on"
         if not self.auto_photos():
             ap = u"Auto-download pictures: off"
+        default = "0"
+        if tgcrypto.NATIVE:
+            default = "1"
         fm = u"Fast mode: on"
-        if self.cfg.get("verify", "0") == "1":
+        if self.cfg.get("verify", default) == "1":
             fm = u"Fast mode: off (full check)"
         items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder", ap, fm]
         i = appuifw.popup_menu(items, u"Settings")
@@ -1682,7 +1721,7 @@ class App:
         elif i == 3:
             appuifw.note(u"Log: E:\\retrotele_log.txt, data: " + to_u(self.dir), "info")
         elif i == 5:
-            if self.cfg.get("verify", "0") == "1":
+            if self.cfg.get("verify", default) == "1":
                 self.cfg.set("verify", "0")
                 appuifw.note(u"Fast mode on: received data is decrypted but its SHA-256 "
                              u"integrity hash is not checked (2-3x faster).", "info")
@@ -1704,7 +1743,10 @@ class App:
             self.redraw()
 
     def about(self):
-        appuifw.note(u"RetroTele " + VERSION + u"\nTelegram for S60 3rd Edition, written in "
+        engine = u"Python crypto"
+        if tgcrypto.NATIVE:
+            engine = u"native crypto"
+        appuifw.note(u"RetroTele " + VERSION + u" (" + engine + u")\nTelegram for S60 3rd Edition, written in "
                      u"Python. Left/right: switch tabs. Any number key in a chat: "
                      u"write a message.", "info")
 

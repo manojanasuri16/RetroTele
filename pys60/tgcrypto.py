@@ -883,3 +883,54 @@ def random_long():
     if v >= pow(2 + 0 * M32, 63):
         v = v - pow(2 + 0 * M32, 64)
     return v
+
+
+# ---------------------------------------------------------------- native module
+# tgnative.pyd (native/tgnative, compiled C) does the same work hundreds of
+# times faster. When it is installed it replaces the Python versions above.
+
+NATIVE = 0
+try:
+    import tgnative
+    _n_ige_enc = tgnative.ige_encrypt
+    _n_ige_dec = tgnative.ige_decrypt
+    # a quick self-test so a broken build can never corrupt messages
+    _k = "k" * 32
+    _d = "0123456789abcdef" * 3
+    if (_n_ige_enc(_d, _k, _k) != _ige_fast(_d, _k, _k, 0) or
+            tgnative.sha256("abc") != _sha256_fast("abc")):
+        raise ImportError("tgnative self-test failed")
+    NATIVE = 1
+except:
+    NATIVE = 0
+
+if NATIVE:
+    def sha256(data):
+        return tgnative.sha256(data)
+
+    def sha1(data):
+        return tgnative.sha1(data)
+
+    def ige_encrypt(data, key, iv):
+        return _n_ige_enc(data, key, iv)
+
+    def ige_decrypt(data, key, iv):
+        return _n_ige_dec(data, key, iv)
+
+    class IgeJob:
+        """Native version: finishes in the first step."""
+        def __init__(self, data, key, iv, decrypt):
+            self.args = (data, key, iv)
+            self.decrypt = decrypt
+            self.out = None
+
+        def step(self, nblocks):
+            if self.out is None:
+                if self.decrypt:
+                    self.out = _n_ige_dec(*self.args)
+                else:
+                    self.out = _n_ige_enc(*self.args)
+            return 1
+
+        def result(self):
+            return self.out

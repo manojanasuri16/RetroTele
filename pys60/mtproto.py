@@ -347,7 +347,7 @@ class Session:
         if gen != self.gen or job is None:
             return
         try:
-            done = job[0].step(40)
+            done = job[0].step(96)
         except:
             self.rx_job = None
             self.bad_packet()

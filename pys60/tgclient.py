@@ -387,23 +387,46 @@ class Client:
 
     def download(self, info, path, on_ok, on_err, progress=None):
         """Downloads a file (info from photo_preview / audio_info) to path.
+        Pieces go to path + ".part" as they arrive, so an interrupted download
+        continues where it stopped; the file is renamed when complete.
         progress(done_bytes) is called after every 128 KB piece."""
+        import os
         CH = 131072
-        chunks = []
+        part = path + ".part"
+        start = 0
+        try:
+            if os.path.exists(part):
+                start = (os.path.getsize(part) / CH) * CH
+                f = open(part, "r+b")
+                f.truncate(start)
+                f.close()
+            else:
+                open(part, "wb").close()
+        except:
+            on_err(RpcError(-4, "cannot write " + part))
+            return
+        state = {"offset": start}
 
-        def got(res, self=self, info=info, path=path, on_ok=on_ok, on_err=on_err,
-                chunks=chunks, progress=progress):
+        def got(res, self=self, info=info, path=path, part=part, on_ok=on_ok,
+                on_err=on_err, progress=progress, state=state):
             data = res.get("bytes") or ""
-            chunks.append(data)
+            try:
+                f = open(part, "ab")
+                f.write(data)
+                f.close()
+            except:
+                on_err(RpcError(-4, "cannot write " + part))
+                return
+            state["offset"] = state["offset"] + len(data)
             if progress is not None:
-                progress(len(chunks) * CH)
-            if len(data) == CH and len(chunks) < 400:
-                fetch(len(chunks) * CH)
+                progress(state["offset"])
+            if len(data) == CH and state["offset"] < 400 * CH:
+                fetch(state["offset"])
                 return
             try:
-                f = open(path, "wb")
-                f.write("".join(chunks))
-                f.close()
+                if os.path.exists(path):
+                    os.remove(path)
+                os.rename(part, path)
             except:
                 on_err(RpcError(-4, "cannot save " + path))
                 return
@@ -412,7 +435,9 @@ class Client:
         def fetch(offset, self=self, info=info, got=got, on_err=on_err):
             self.file_call(info["dc"], {"_": "upload.getFile", "location": info["loc"],
                                         "offset": offset, "limit": CH}, got, on_err)
-        fetch(0)
+        if progress is not None and start:
+            progress(start)
+        fetch(start)
 
     def set_main_dc(self, dc):
         if dc == self.main_dc:
