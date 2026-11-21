@@ -500,6 +500,54 @@ class Avatars:
         self.app.net.later(0.05, self.work)
 
 
+# ---------------------------------------------------------------- safe drawing
+
+def _ints(c):
+    out = []
+    for v in c:
+        if type(v) is type(()) or type(v) is type([]):
+            out.append(tuple(_ints(v)))
+        else:
+            out.append(int(v))
+    return out
+
+
+class SafeDraw:
+    """Wraps an Image: PyS60 only accepts plain ints as coordinates, while
+    the phone hands out longs (durations, file sizes, big ids)."""
+    def __init__(self, img):
+        self.img = img
+        self.size = img.size
+
+    def clear(self, *a, **k):
+        return self.img.clear(*a, **k)
+
+    def text(self, xy, t, **k):
+        return self.img.text(tuple(_ints(xy)), t, **k)
+
+    def measure_text(self, *a, **k):
+        return self.img.measure_text(*a, **k)
+
+    def rectangle(self, c, **k):
+        return self.img.rectangle(tuple(_ints(c)), **k)
+
+    def ellipse(self, c, **k):
+        return self.img.ellipse(tuple(_ints(c)), **k)
+
+    def line(self, c, **k):
+        return self.img.line(tuple(_ints(c)), **k)
+
+    def polygon(self, c, **k):
+        return self.img.polygon(_ints(c), **k)
+
+    def blit(self, img, **k):
+        if k.has_key("target"):
+            k["target"] = tuple(_ints(k["target"]))
+        if k.has_key("source"):
+            k["source"] = tuple(_ints(k["source"]))
+        return self.img.blit(img, **k)
+
+
 # ---------------------------------------------------------------- base view
 
 class CanvasView:
@@ -549,13 +597,21 @@ class CanvasView:
         w, h = self.size()
         if self.buf is None or self.buf.size != (w, h):
             self.buf = graphics.Image.new((w, h))
-        g = self.buf
-        check_fonts(g)
+        g = SafeDraw(self.buf)
+        check_fonts(self.buf)
         try:
             self.paint(g, w, h)
         except:
             import sys
-            self.app.log("paint: " + str(sys.exc_info()[1]))
+            msg = str(sys.exc_info()[1])
+            try:
+                g.rectangle((0, h - 40, w, h), fill=0x7A1F1F)
+                g.text((6, h - 24), u"Display error, press Back", fill=WHITE,
+                       font=font("small"))
+                g.text((6, h - 8), to_u(msg)[:40], fill=WHITE, font=font("small"))
+            except:
+                pass
+            self.app.log("paint %s: %s" % (self.__class__.__name__, msg))
             try:
                 import traceback
                 self.app.log("".join(traceback.format_exception(
@@ -563,7 +619,7 @@ class CanvasView:
             except:
                 pass
         try:
-            self.canvas.blit(g)
+            self.canvas.blit(self.buf)
         except:
             pass
         dt = time.clock() - t0
@@ -1496,18 +1552,18 @@ class PlayerView(CanvasView):
         cur = 0
         if self.sound is not None:
             try:
-                total = self.sound.duration() / 1000000
+                total = int(self.sound.duration() / 1000000)
             except:
                 total = 0
             try:
                 if self.playing():
-                    cur = self.sound.current_position() / 1000000
+                    cur = int(self.sound.current_position() / 1000000)
                 else:
-                    cur = self.pos / 1000000
+                    cur = int(self.pos / 1000000)
             except:
                 cur = 0
         if not total:
-            total = info.get("duration", 0)
+            total = int(info.get("duration", 0))
         by = cy + 112
         rrect(g, 20, by, w - 20, by + 5, 2, 0x3A4A5A)
         if total:

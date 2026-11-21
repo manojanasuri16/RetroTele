@@ -30,12 +30,13 @@ class Image(object):
         return Image(size)
 
     def _xy(self, coords):
+        # like PyS60: longs are "non-numeric" coordinates
         for v in coords:
             if isinstance(v, tuple):
                 for c in v:
-                    assert isinstance(c, (int, long)), coords
+                    assert type(c) is int, ("non-int coordinate", coords)
             else:
-                assert isinstance(v, (int, long)), coords
+                assert type(v) is int, ("non-int coordinate", coords)
 
     def clear(self, colour=0xffffff):
         pass

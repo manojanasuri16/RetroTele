@@ -26,10 +26,10 @@ class Sound(object):
         return self.st
 
     def duration(self):
-        return 185 * 1000000
+        return long(185 * 1000000)
 
     def current_position(self):
-        return 42 * 1000000
+        return long(42 * 1000000)
 
     def set_position(self, p):
         pass
