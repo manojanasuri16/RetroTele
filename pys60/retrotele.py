@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.4.0"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.5.0"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -1091,7 +1091,7 @@ class App:
                       lambda self=self, k=key: self.call_peer(k)))
         m = m + [(u"Load older messages", self.load_older),
                  (u"Jump to latest", self.jump_latest),
-                 (u"Chat info", self.chat_info),
+                 (u"View profile", self.view_profile),
                  (u"Refresh", self.reload_chat),
                  (u"Back to chats", self.back_to_chats)]
         appuifw.app.menu = m
@@ -1246,6 +1246,49 @@ class App:
         menu.append((u"Back", self.back_to_chat))
         appuifw.app.menu = menu
         appuifw.app.exit_key_handler = self.back_to_chat
+
+    def view_profile(self):
+        key = self.chat_key
+        if key is None:
+            return
+        self.screen = "profile"
+        self.set_screen("large")
+        v = tgui.ProfileView(self, key)
+        self.view = v
+        v.show()
+        menu = [(u"Send message", self.back_to_chat)]
+        if key[0] == "u" and self.client.peer(key).get("phone"):
+            menu.append((u"Call " + one_line(self.client.short_name(key), 20),
+                         lambda self=self, k=key: self.call_peer(k)))
+        d = self.dialog_for(key)
+        if d is not None and self.client.peer(key)["kind"] != "self":
+            if d.get("muted"):
+                menu.append((u"Unmute", lambda self=self, k=key: self.mute(k, 0)))
+            else:
+                menu.append((u"Mute", lambda self=self, k=key: self.mute(k, 1)))
+        menu.append((u"Back", self.back_to_chat))
+        appuifw.app.menu = menu
+        appuifw.app.exit_key_handler = self.back_to_chat
+
+        def got(full, self=self, v=v):
+            v.full = full
+            if self.view is v:
+                v.draw()
+        self.client.get_profile(key, got, self.load_failed)
+
+    def mute(self, key, flag):
+        def ok(res, self=self, key=key, flag=flag):
+            d = self.dialog_for(key)
+            if d is not None:
+                d["muted"] = flag
+                self.dialogs_changed()
+            if flag:
+                self.show_toast(u"Muted", to_u(self.client.peer_name(key)))
+            else:
+                self.show_toast(u"Unmuted", to_u(self.client.peer_name(key)))
+            if self.screen == "profile":
+                self.view_profile()
+        self.client.set_mute(key, flag, ok, self.load_failed)
 
     def chat_info(self):
         key = self.chat_key

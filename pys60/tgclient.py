@@ -481,15 +481,20 @@ class Client:
         if u.get("self") or u["id"] == self.me:
             kind = "self"
         photo = None
+        photo_id = 0
+        photo_dc = 0
         p = u.get("photo")
         if type(p) is type({}):
             photo = p.get("stripped_thumb")
+            photo_id = p.get("photo_id", 0)
+            photo_dc = p.get("dc_id", 0)
         status = u.get("status")
         if status is None and old is not None:
             status = old.get("status")
         info = {"name": name, "kind": kind, "hash": u.get("access_hash", 0),
                 "phone": u.get("phone") or "", "contact": u.get("contact", 0),
                 "username": u.get("username") or "", "photo": photo,
+                "photo_id": photo_id, "photo_dc": photo_dc,
                 "status": status, "members": 0}
         if old is not None:
             if not info["hash"]:
@@ -514,10 +519,15 @@ class Client:
         if c.get("min") and old is not None:
             return
         photo = None
+        photo_id = 0
+        photo_dc = 0
         p = c.get("photo")
         if type(p) is type({}):
             photo = p.get("stripped_thumb")
+            photo_id = p.get("photo_id", 0)
+            photo_dc = p.get("dc_id", 0)
         info = {"name": c.get("title") or "Chat", "kind": kind,
+                "photo_id": photo_id, "photo_dc": photo_dc,
                 "hash": c.get("access_hash", 0), "phone": "", "contact": 0,
                 "username": c.get("username") or "", "photo": photo, "status": None,
                 "members": c.get("participants_count") or 0,
@@ -877,6 +887,56 @@ class Client:
             if revoke:
                 f["revoke"] = 1
         self.call(f, on_ok, on_err)
+
+    def profile_photo(self, key):
+        """Download info for the chat's 160 px profile picture, or None."""
+        p = self.peer(key)
+        if not p.get("photo_id"):
+            return None
+        return {"id": "a%d" % p["photo_id"], "dc": p.get("photo_dc", 0), "w": 160, "h": 160,
+                "stripped": p.get("photo"), "badge": "",
+                "loc": {"_": "inputPeerPhotoFileLocation", "peer": self.input_peer(key),
+                        "photo_id": p["photo_id"]}}
+
+    def get_profile(self, key, on_ok, on_err):
+        """Bio / description and member count: {"about", "members", "calls"}."""
+        def ok(res, self=self, key=key, on_ok=on_ok):
+            full = res.get("full_user") or res.get("full_chat") or {}
+            d = {"about": full.get("about") or "", "members": 0,
+                 "calls": full.get("phone_calls_available", 0)}
+            if full.get("participants_count"):
+                d["members"] = full["participants_count"]
+            parts = full.get("participants")
+            if type(parts) is type({}) and parts.get("participants"):
+                d["members"] = len(parts["participants"])
+            if d["members"] and self.peers.has_key(key):
+                self.peers[key]["members"] = d["members"]
+            on_ok(d)
+        kind = key[0]
+        if kind == "u":
+            ip = self.input_peer(key)
+            if ip["_"] == "inputPeerSelf":
+                iu = {"_": "inputUserSelf"}
+            else:
+                iu = {"_": "inputUser", "user_id": ip["user_id"],
+                      "access_hash": ip["access_hash"]}
+            f = {"_": "users.getFullUser", "id": iu}
+        elif kind == "c":
+            f = {"_": "messages.getFullChat", "chat_id": long(key[1:])}
+        else:
+            f = {"_": "channels.getFullChannel",
+                 "channel": {"_": "inputChannel", "channel_id": long(key[1:]),
+                             "access_hash": self.peer(key).get("hash", 0)}}
+        self.call(f, ok, on_err)
+
+    def set_mute(self, key, mute, on_ok, on_err):
+        until = 0
+        if mute:
+            until = 2147483647
+        self.call({"_": "account.updateNotifySettings",
+                   "peer": {"_": "inputNotifyPeer", "peer": self.input_peer(key)},
+                   "settings": {"_": "inputPeerNotifySettings", "mute_until": until}},
+                  on_ok, on_err)
 
     def forward(self, from_key, ids, to_key, on_ok, on_err):
         rids = []

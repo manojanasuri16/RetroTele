@@ -21,6 +21,7 @@ Modern Symbian Telegram apps such as Symbigram need Qt Quick Components (Symbian
 - Search your chats and contacts, or open any @username
 - **Call** a contact's phone number as a normal phone call
 - The chat list is cached, so it appears instantly when the app starts
+- **Profile** of any chat (Options > View profile, or right key in a chat): big photo, status, phone, username, bio or description, members, and Mute/Unmute
 - **Fast mode** (on by default): received data is decrypted but its SHA-256 integrity hash isn't checked, which makes loading 2-3x faster on the phone. Switch it off in Settings for the full check. Big packets are decrypted in slices so keys keep working meanwhile.
 
 There's no secret chats, file/video download, playback of GIFs or animated stickers, or answering **Telegram** voice/video calls. Calls need real-time audio streaming with the Opus codec and GIFs/stickers are MP4/WebP/Lottie, none of which Python for S60 1.4.5 can decode, so "Call" uses the normal phone line.
@@ -35,6 +36,7 @@ There's no secret chats, file/video download, playback of GIFs or animated stick
 | Chat | Up/down | Select message (scrolling up loads older ones) |
 | Chat | Centre | On a message: reply / read in full. On the input bar: write |
 | Chat | Any number key | Write a message |
+| Chat | Right | Profile |
 | Chat | Left or right softkey | Back to chats |
 
 ## Install

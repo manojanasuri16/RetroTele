@@ -29,6 +29,7 @@ messages.getDialogs messages.getHistory messages.sendMessage messages.readHistor
 messages.getPeerDialogs messages.getMessages messages.setTyping messages.getDialogFilters
 messages.editMessage messages.deleteMessages channels.deleteMessages messages.forwardMessages
 phone.discardCall phone.receivedCall
+messages.getFullChat channels.getFullChannel account.updateNotifySettings
 channels.readHistory channels.getMessages
 updates.getState updates.getDifference updates.getChannelDifference
 upload.getFile

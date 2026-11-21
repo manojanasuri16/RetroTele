@@ -168,6 +168,13 @@ def handle(f):
     if n == "messages.deleteMessages":
         state["deleted"] = (f["id"], f.get("revoke"))
         return {"_": "messages.affectedMessages", "pts": 1, "pts_count": 1}
+    if n == "users.getFullUser":
+        assert f["id"]["user_id"] == 42
+        return {"_": "users.userFull", "full_user": {"_": "userFull", "id": 42, "about": "Retro phone fan",
+                "settings": {}, "notify_settings": {}, "common_chats_count": 0}, "chats": [], "users": [USER]}
+    if n == "account.updateNotifySettings":
+        state["muted"] = f["settings"].get("mute_until")
+        return 1
     if n == "messages.forwardMessages":
         state["forwarded"] = (f["id"], f["to_peer"]["_"], len(f["random_id"]))
         return {"_": "updates", "users": [], "chats": [], "date": 0, "seq": 0, "updates": []}
@@ -291,6 +298,13 @@ app.editor.set(u"Hello again")
 app.send_now(); app.net.run()
 mine = [m for m in app.msgs["u42"] if m["id"] == 11][0]
 assert mine["text"] == "Hello again" and mine["edited"], mine
+app.view_profile(); app.net.run()
+pt = screen_text()
+print "profile:", pt
+assert pt.find(u"Retro phone fan") >= 0 and pt.find(u"+15550001111") >= 0, pt
+app.mute("u42", 1); app.net.run()
+assert state["muted"] == 2147483647 and app.dialog_for("u42")["muted"]
+app.back_to_chat()
 app.forward_message(mine); app.net.run()
 assert state["forwarded"] == ([11], "inputPeerSelf", 1), state
 popups[:] = [1]          # "Delete for me and Alice"

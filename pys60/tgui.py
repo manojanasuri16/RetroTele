@@ -871,7 +871,8 @@ class ChatView(CanvasView):
             self.app.back_to_chats()
             return
         elif k == "right":
-            pass
+            self.app.view_profile()
+            return
         elif k in "0134679*#":
             self.app.compose()
             return
@@ -1343,6 +1344,117 @@ class PhotoView(CanvasView):
         else:
             t = u"Downloading picture..."
             g.text(((w - width(g, t, "text")) / 2, h / 2), t, fill=WHITE, font=font("text"))
+
+
+# ---------------------------------------------------------------- profile
+
+class ProfileView(CanvasView):
+    """Chat info: big photo, name, status, then label/value rows."""
+    PHOTO = 84
+
+    def __init__(self, app, key):
+        CanvasView.__init__(self, app)
+        self.key_ = key
+        self.full = None
+        self.scroll = 0
+        self.total = 0
+
+    def key(self, k):
+        if k in ("up", "2"):
+            self.scroll = max(self.scroll - 40, 0)
+        elif k in ("down", "8"):
+            self.scroll = self.scroll + 40
+        elif k in ("select", "5", "left"):
+            self.app.back_to_chat()
+            return
+        self.draw()
+
+    def rows(self):
+        cl = self.app.client
+        key = self.key_
+        p = cl.peer(key)
+        out = []
+        if p.get("phone"):
+            out.append((u"Mobile", u"+" + to_u(p["phone"])))
+        if p.get("username"):
+            if key[0] == "u":
+                out.append((u"Username", u"@" + to_u(p["username"])))
+            else:
+                out.append((u"Link", u"t.me/" + to_u(p["username"])))
+        about = u""
+        if self.full is not None:
+            about = to_u(self.full.get("about", u""))
+        if about:
+            if key[0] == "u":
+                out.append((u"Bio", about))
+            else:
+                out.append((u"Description", about))
+        if key[0] != "u" and p.get("members"):
+            label = u"Members"
+            if p["kind"] == "channel":
+                label = u"Subscribers"
+            out.append((label, unicode(str(p["members"]))))
+        kinds = {"user": u"Personal chat", "bot": u"Bot", "self": u"Your cloud storage",
+                 "group": u"Group", "supergroup": u"Group", "channel": u"Channel"}
+        out.append((u"Type", kinds.get(p["kind"], u"Chat")))
+        d = self.app.dialog_for(key)
+        if d is not None:
+            if d.get("muted"):
+                out.append((u"Notifications", u"Muted"))
+            else:
+                out.append((u"Notifications", u"On"))
+        if self.full is None:
+            out.append((u"", u"Loading details..."))
+        return out
+
+    def paint(self, g, w, h):
+        app = self.app
+        cl = app.client
+        key = self.key_
+        g.clear(WHITE)
+        H = self.HEADER_H
+        # blue top area with the photo and name
+        top = H + 8 - self.scroll
+        PH = self.PHOTO
+        g.rectangle((0, 0, w, top + PH + 58), fill=BLUE)
+        info = cl.profile_photo(key)
+        img = None
+        if info is not None:
+            img = app.media.image(info, PH, PH)
+        x = (w - PH) / 2
+        if img is not None:
+            try:
+                g.blit(img, target=(x, top), mask=app.avatars.mask(PH))
+            except:
+                img = None
+        if img is None:
+            special = None
+            if cl.peer(key)["kind"] == "self":
+                special = "saved"
+            app.avatars.draw(g, key, cl.peer_name(key), cl.peer(key).get("photo"),
+                             x, top, PH, special)
+        name = fit(g, cl.peer_name(key), "title", w - 20)
+        txt(g, (w - width(g, name, "title")) / 2, top + PH + 26, name, WHITE, "title", "b")
+        sub = fit(g, cl.status_text(key), "small", w - 20)
+        txt(g, (w - width(g, sub, "small")) / 2, top + PH + 46, sub, HEADER_SUB, "small", "b")
+        y = top + PH + 66
+        for label, value in self.rows():
+            lines = wrap(g, value, "text", w - 28, 12)
+            if label:
+                g.text((14, y + 14), label, fill=BLUE, font=font("small"))
+                y = y + 16
+            for l in lines:
+                txt(g, 14, y + 16, l, TEXT, "text", "w")
+                y = y + 19
+            y = y + 6
+            g.line((14, y, w - 14, y), outline=LINE)
+            y = y + 6
+        self.total = y + self.scroll
+        if self.scroll > 0 and y < h - 20:
+            self.scroll = max(self.total - h + 20, 0)
+        # fixed header bar
+        g.rectangle((0, 0, w, H), fill=BLUE)
+        g.text((12, 30), u"Info", fill=WHITE, font=font("title"))
 
 
 # ---------------------------------------------------------------- welcome

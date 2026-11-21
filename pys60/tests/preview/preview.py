@@ -55,7 +55,8 @@ def C(i, title, kind, n=0):
 
 ONLINE = {"_": "userStatusOnline", "expires": NOW + 300}
 USERS = [ME, U(777000, "Telegram", verified=1), U(11, "Sam", "Carter", contact=1,
-         phone="15550001234", status=ONLINE), U(12, "Mia", "Chen", contact=1,
+         phone="15550001234", status=ONLINE, username="sam_n79",
+         photo={"_": "userProfilePhoto", "photo_id": 5, "dc_id": 2}), U(12, "Mia", "Chen", contact=1,
          status={"_": "userStatusOffline", "was_online": NOW - 1500}),
          U(13, "Jakob"), U(14, "Cyan"), U(15, "Leo", "Park", contact=1,
          status={"_": "userStatusRecently"})]
@@ -169,6 +170,9 @@ class FakeSession:
                 ms = list(PRIVATE)
             ms.reverse()
             res = {"_": "messages.messages", "messages": ms, "users": USERS, "chats": CHATS}
+        elif n == "users.getFullUser":
+            res = {"_": "users.userFull", "full_user": {"_": "userFull", "id": 11,
+                   "about": "Symbian fan \xf0\x9f\x93\xb1"}, "chats": [], "users": USERS}
         elif n == "upload.getFile":
             res = {"_": "upload.file", "type": {"_": "storage.fileJpeg"}, "mtime": 0,
                    "bytes": open(os.environ["RT_PHOTO"], "rb").read()}
@@ -238,5 +242,7 @@ app.read_outs["u11"] = 71
 app.show_toast(u"Retro Phone Club", u"Jakob: anyone tried RetroTele yet?")
 app.net.q = []
 snap("8-private")
+app.view_profile(); app.net.run(); app.view.draw(); app.net.run()
+snap("9-profile")
 json.dump(screens, open(os.environ["RT_OUT"] + "/screens.json", "w"))
 shutil.rmtree(TMP)
