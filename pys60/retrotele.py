@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.11.0"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.11.1"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -582,6 +582,7 @@ class App:
         if tgcrypto.NATIVE:
             default = "1"
         self.client.verify = self.cfg.get("verify", default) == "1"
+        self.client.set_call_version(self.cfg.get("call_version", "2.4.4"))
         boot_log("native crypto: %d, full check: %d" % (tgcrypto.NATIVE, self.client.verify))
         self.status(u"Connecting...")
         self.client.start()
@@ -1642,6 +1643,12 @@ class App:
     def call_ready(self, cs):
         """Call reached 'connected': start the relay audio helper."""
         self.stop_call_audio()
+        if self.client.call_version == "2.7.7":
+            # probe mode: signalling only, the media protocol isn't built yet
+            self.audio_state = "failed"
+            self.log("call 2.7.7 probe: connected at the servers, no audio helper")
+            self.call_changed()
+            return
         try:
             if tgui.AUDIO_FACTORY is not None:
                 ca = tgui.AUDIO_FACTORY()
@@ -1904,8 +1911,11 @@ class App:
         fm = u"Fast mode: on"
         if self.cfg.get("verify", default) == "1":
             fm = u"Fast mode: off (full check)"
+        cv = u"Call version: 2.4.4 (old clients/modded)"
+        if self.cfg.get("call_version", "2.4.4") == "2.7.7":
+            cv = u"Call version: 2.7.7 (official apps, probe)"
         items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder", ap, fm,
-                 u"Call test (experimental)"]
+                 u"Call test (experimental)", cv]
         i = appuifw.popup_menu(items, u"Settings")
         if i == 0:
             if self.setup_ap(1):
@@ -1921,6 +1931,16 @@ class App:
             appuifw.note(u"Log: E:\\retrotele_log.txt, data: " + to_u(self.dir), "info")
         elif i == 6:
             self.call_test()
+        elif i == 7:
+            if self.cfg.get("call_version", "2.4.4") == "2.7.7":
+                self.cfg.set("call_version", "2.4.4")
+            else:
+                self.cfg.set("call_version", "2.7.7")
+                appuifw.note(u"2.7.7 is a PROBE: the call connects at Telegram's servers and "
+                             u"the log shows if the other app accepts it, but there is no "
+                             u"audio yet.", "info")
+            self.cfg.save()
+            self.client.set_call_version(self.cfg.get("call_version", "2.4.4"))
         elif i == 5:
             if self.cfg.get("verify", default) == "1":
                 self.cfg.set("verify", "0")

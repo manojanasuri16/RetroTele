@@ -257,6 +257,8 @@ class Client:
         self.cs = None         # current Telegram call
         self.dh = None         # cached (g, p) from messages.getDhConfig
         self.verify = 0        # full msg_key check on received data (slow)
+        self.call_protocol = self.CALL_PROTOCOL
+        self.call_version = "2.4.4"
         self.me = None
         uid = store.get("user_id")
         if uid:
@@ -1035,6 +1037,17 @@ class Client:
 
     CALL_PROTOCOL = {"_": "phoneCallProtocol", "udp_p2p": 1, "udp_reflector": 1,
                      "min_layer": 65, "max_layer": 92, "library_versions": ["2.4.4"]}
+    CALL_PROTOCOL_277 = {"_": "phoneCallProtocol", "udp_p2p": 0, "udp_reflector": 1,
+                         "min_layer": 65, "max_layer": 92, "library_versions": ["2.7.7"]}
+
+    def set_call_version(self, version):
+        """'2.4.4' (legacy, works with modded/old clients) or '2.7.7' (what
+        official apps accept; probe only: signalling, no audio yet)."""
+        if version == "2.7.7":
+            self.call_protocol = self.CALL_PROTOCOL_277
+        else:
+            self.call_protocol = self.CALL_PROTOCOL
+        self.call_version = version
 
     def call_busy(self):
         return self.cs is not None and self.cs["state"] != "ended"
@@ -1137,7 +1150,7 @@ class Client:
                        "random_id": int(tgcrypto.bytes_to_long(tgcrypto.random_bytes(4))
                                         % 2147483647),
                        "g_a_hash": tgcrypto.sha256(gab),
-                       "protocol": self.CALL_PROTOCOL}, sent, fail)
+                       "protocol": self.call_protocol}, sent, fail)
         self.get_dh_config(have, fail)
         return 1
 
@@ -1167,7 +1180,7 @@ class Client:
                 self.call_log(cs, "accepted, waiting for the caller's key")
             self.call({"_": "phone.acceptCall", "peer": self.call_input(cs),
                        "g_b": tgcrypto.long_to_bytes(gb, 256),
-                       "protocol": self.CALL_PROTOCOL}, sent, fail)
+                       "protocol": self.call_protocol}, sent, fail)
         self.get_dh_config(have, fail)
 
     def send_discard(self, cs, reason, duration):
@@ -1265,7 +1278,7 @@ class Client:
                 self.call_fail(cs, e)
             self.call({"_": "phone.confirmCall", "peer": self.call_input(cs),
                        "g_a": cs["g_a"], "key_fingerprint": cs["fp"],
-                       "protocol": self.CALL_PROTOCOL}, done, fail)
+                       "protocol": self.call_protocol}, done, fail)
         elif n == "phoneCall" and not cs["out"] and cs["state"] == "keys":
             ga = c.get("g_a_or_b", "")
             if tgcrypto.sha256(ga) != cs["g_a_hash"]:
@@ -1388,6 +1401,10 @@ class Client:
             self.ui.messages_deleted(None, x.get("messages", []))
         elif n == "updateDeleteChannelMessages":
             self.ui.messages_deleted("h%d" % x["channel_id"], x.get("messages", []))
+        elif n == "updatePhoneCallSignalingData":
+            self.log("call signaling data: %d bytes, call %s: %s" % (
+                len(x.get("data", "")), str(x.get("phone_call_id")),
+                binascii.hexlify(x.get("data", "")[:48])))
         elif n == "updatePhoneCall":
             self.call_update(x.get("phone_call") or {})
         elif n == "updateUserTyping" or n == "updateChatUserTyping":
