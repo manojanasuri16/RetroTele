@@ -1037,7 +1037,7 @@ class Client:
 
     CALL_PROTOCOL = {"_": "phoneCallProtocol", "udp_p2p": 1, "udp_reflector": 1,
                      "min_layer": 65, "max_layer": 92, "library_versions": ["2.4.4"]}
-    CALL_PROTOCOL_277 = {"_": "phoneCallProtocol", "udp_p2p": 0, "udp_reflector": 1,
+    CALL_PROTOCOL_277 = {"_": "phoneCallProtocol", "udp_p2p": 1, "udp_reflector": 1,
                          "min_layer": 65, "max_layer": 92, "library_versions": ["2.7.7"]}
 
     def protocol_for(self, cs):
@@ -1242,6 +1242,11 @@ class Client:
             self.log("call connection: %s ip=%s port=%s tag=%s id=%s" % (
                 x.get("_"), x.get("ip", ""), x.get("port", ""),
                 binascii.hexlify(x.get("peer_tag", "")), x.get("id", "")))
+        self.log("call server protocol: %s" % str(c.get("protocol")))
+        if self.call_version != "2.4.4":
+            # experiment calls only: the key lets the PC decode the peer's setup messages
+            self.log("PROBE call key %s" % binascii.hexlify(cs["kb"]))
+            self.log("PROBE call is_outgoing %d" % cs["out"])
         self.log("call key fingerprint %s, key sha1 %s" % (
             str(cs["fp"]), binascii.hexlify(tgcrypto.sha1(cs["kb"]))))
         h = binascii.hexlify(tgcrypto.sha256(cs["kb"] + cs["g_a"]))
@@ -1433,9 +1438,9 @@ class Client:
         elif n == "updateDeleteChannelMessages":
             self.ui.messages_deleted("h%d" % x["channel_id"], x.get("messages", []))
         elif n == "updatePhoneCallSignalingData":
-            self.log("call signaling data: %d bytes, call %s: %s" % (
-                len(x.get("data", "")), str(x.get("phone_call_id")),
-                binascii.hexlify(x.get("data", "")[:48])))
+            self.log("call signaling data: %d bytes" % len(x.get("data", "")))
+            if self.call_version != "2.4.4":
+                self.log("PROBE signaling %s" % binascii.hexlify(x.get("data", "")))
         elif n == "updatePhoneCall":
             self.call_update(x.get("phone_call") or {})
         elif n == "updateUserTyping" or n == "updateChatUserTyping":
