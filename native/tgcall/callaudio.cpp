@@ -22,8 +22,8 @@
 const TInt KFrameBytes = 320;
 const TInt KFrameSamples = 160;
 const TInt KMaxPkt = 1500;
-const TInt KRingSize = 15;
-const TInt KPrefill = 3;
+const TInt KRingSize = 30;
+const TInt KPrefill = 6;       /* 120 ms: the RetroTele bridge delivers in bursts */
 const TInt KPortOut = 47001;
 const TInt KPortIn = 47002;
 
@@ -182,6 +182,8 @@ public:
         local.SetAddress(INET_ADDR(127, 0, 0, 1));
         local.SetPort(KPortIn);
         if (!Check(_L8("SocketBind"), iSock.Bind(local))) return;
+        iSock.SetOpt(KSORecvBuf, KSOLSocket, 32768);   /* queue bursts instead of dropping */
+        iSock.SetOpt(KSOSendBuf, KSOLSocket, 16384);
         iDest.SetAddress(INET_ADDR(127, 0, 0, 1));
         iDest.SetPort(KPortOut);
         iSend = new CSend;

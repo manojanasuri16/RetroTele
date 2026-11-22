@@ -1715,11 +1715,16 @@ class CallTestView(CanvasView):
         if self.ca_ticks < 20:
             self.app.net.later(1, self.echo_tick)
         else:
-            ca.stop()
+            try:
+                ca.stop()
+            except:
+                pass
             self.ca = None
-            self.lines = out + [u"Done."]
+            self.lines = out + [u"Done. Details are in the log."]
             self.draw()
-            self.app.log("call audio echo result:\n" + text)
+            self.app.log("call audio echo: python rx %d, echoed %d, errors %d %s" %
+                         (ca.rx, self.ca_echoed, ca.errors, ca.last_error))
+            self.app.log("call audio echo helper log:\n" + text)
 
     def helper_test(self, exe=u"tgaudiotest.exe", fname="retrotele_audiotest.txt",
                     label=u"Helper"):
