@@ -90,4 +90,36 @@ xa = b"\x00\x01" + struct.pack(">H", port ^ 0x2112) + struct.pack(">I", ip ^ 0x2
 out("stun_ok", finish(0x0101, TX, attr(0x0020, xa), b"pwdpwdpwdpwdpwdpwdpwdp"))
 out("stun_ok_sw", finish(0x0101, TX, attr(0x8022, b"Telegram ") + attr(0x0020, xa), b"k"))
 # SDP
-out("sdp", b"candidate:1 1 udp 33554431 reflector-3-4000000000.reflector 599 typ relay raddr 0.0.0.0 rport 0 generation 0 ufrag Ab9z network-id 1 network-cost 10")
+out("sdp", b"candidate:1 0 udp 33554431 reflector-3-4000000000.reflector 599 typ relay generation 0 ufrag Ab9z network-id 1 network-cost 10")
+
+# ---- RTP (c277_rtp) : tx header for rnd6 = data(6,3,1), caller (ssrc 2), opus 60 ms SILK NB (TOC 0x18)
+OPUS60 = bytes([0x18]) + data(40, 5, 3)
+r6 = data(6, 3, 1)
+seq0 = struct.unpack(">H", r6[0:2])[0]; ts0 = struct.unpack(">I", r6[2:6])[0]
+rtp1 = struct.pack(">BBHII", 0x80, 111, seq0, ts0, 2) + OPUS60
+rtp2 = struct.pack(">BBHII", 0x80, 111, (seq0 + 1) & 0xFFFF, (ts0 + 2880) & 0xFFFFFFFF, 2) + OPUS60
+out("rtp_tx1", rtp1); out("rtp_tx2", rtp2)
+# header with CSRC x2 + one-byte extension (0xBEDE, 2 words) + padding 3
+ext = b"\xbe\xde" + struct.pack(">H", 2) + b"\x10\xaa\x00\x00\x21\x01\x02\x00"
+out("rtp_rx_ext", struct.pack(">BBHII", 0x80 | 0x20 | 0x10 | 2, 0x80 | 111, 500, 123456, 1)
+    + struct.pack(">II", 7, 8) + ext + OPUS60 + b"\0\0\x03")
+
+# ---- ICE request produced by c277_ice (rnd = data(44,3,1); remote ufrag "wxyz", pwd 24 x 'p')
+ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+rnd = data(44, 3, 1)
+lufrag = "".join(ALPHA[b & 63] for b in rnd[0:4]).encode()
+lpwd = "".join(ALPHA[b & 63] for b in rnd[4:28]).encode()
+out("ice_ufrag", lufrag); out("ice_pwd", lpwd)
+txid = rnd[36:44] + struct.pack(">I", 1)
+a = attr(0x0006, b"wxyz:" + lufrag) + attr(0x0024, u32(0x6EFFFFFF)) + attr(0x802A, rnd[28:36])
+out("ice_req1", finish(0x0001, txid, a, b"p" * 24))
+# the same, after a first response: USE-CANDIDATE added, txid counter 2
+a2 = a + attr(0x0025, b"")
+out("ice_req2_uc", finish(0x0001, rnd[36:44] + struct.pack(">I", 3), a2, b"p" * 24))
+# a peer request to us (controlled peer: ICE-CONTROLLED not conflicting with our controlling role),
+# and its expected response
+txp = bytes(range(0x50, 0x5C))
+peer_req = finish(0x0001, txp, attr(0x0006, lufrag + b":wxyz") + attr(0x0024, u32(1)) + attr(0x8029, TB), lpwd)
+out("ice_peer_req", peer_req)
+xa2 = b"\x00\x01" + struct.pack(">H", 596 ^ 0x2112) + struct.pack(">I", 0x5B6C1108 ^ 0x2112A442)
+out("ice_peer_resp", finish(0x0101, txp, attr(0x0020, xa2), lpwd))

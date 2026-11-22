@@ -185,11 +185,11 @@ int c277_sdp_cand_build(char *out, u32 cap, u32 foundation, u32 priority, u32 id
 {
     u32 p = 0;
     if (app(out, cap, &p, "candidate:") || appn(out, cap, &p, foundation) ||
-        app(out, cap, &p, " 1 udp ") || appn(out, cap, &p, priority) ||
+        app(out, cap, &p, " 0 udp ") || appn(out, cap, &p, priority) ||
         app(out, cap, &p, " reflector-") || appn(out, cap, &p, id) ||
         app(out, cap, &p, "-") || appn(out, cap, &p, tag) ||
         app(out, cap, &p, ".reflector ") || appn(out, cap, &p, port) ||
-        app(out, cap, &p, " typ relay raddr 0.0.0.0 rport 0 generation 0 ufrag ") ||
+        app(out, cap, &p, " typ relay generation 0 ufrag ") ||
         app(out, cap, &p, ufrag) ||
         app(out, cap, &p, " network-id 1 network-cost 10"))
         return -1;
@@ -229,7 +229,7 @@ int c277_sdp_cand_parse(const char *s, u32 len, c277_sdp_cand *o)
     k = st[0];
     if (en[0] - k > 2 && s[k] == 'a' && s[k + 1] == '=') k += 2;
     if (en[0] - k < 10 || memcmp(s + k, pre, 10) != 0) return -1;
-    if (en[1] - st[1] != 1 || s[st[1]] != '1') return -1;
+    if (en[1] - st[1] != 1 || (s[st[1]] != '0' && s[st[1]] != '1')) return -1;   /* real clients send 0 */
     if (en[2] - st[2] != 3 || (s[st[2]] | 0x20) != 'u' || (s[st[2] + 1] | 0x20) != 'd' ||
         (s[st[2] + 2] | 0x20) != 'p') return -1;
     i = st[3];

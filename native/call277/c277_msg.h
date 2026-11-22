@@ -55,8 +55,8 @@ u8   c277_msg_media_state_build(int audio, int video);
 void c277_msg_media_state_parse(u8 b, int *audio, int *video);
 
 /* SDP candidate line (sent in CandidatesList):
- * candidate:<foundation> 1 udp <priority> reflector-<id>-<tag>.reflector <port>
- *   typ relay raddr 0.0.0.0 rport 0 generation 0 ufrag <ufrag> network-id 1 network-cost 10
+ * candidate:<foundation> 0 udp <priority> reflector-<id>-<tag>.reflector <port>
+ *   typ relay generation 0 ufrag <ufrag> network-id 1 network-cost 10  (component 0, no raddr: as in the real capture)
  * Returns length (no NUL) or -1 if cap too small. */
 int c277_sdp_cand_build(char *out, u32 cap, u32 foundation, u32 priority, u32 id, u32 tag,
                         u32 port, const char *ufrag);
