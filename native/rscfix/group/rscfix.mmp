@@ -1,0 +1,16 @@
+// retrotele_rscfix.exe: run by the installer, puts appuifwmodule.rsc on the
+// app's drive so RetroTele starts from phone memory or the memory card
+// (see ..\rscfix.cpp)
+TARGET          retrotele_rscfix.exe
+TARGETTYPE      exe
+UID             0 0xE7A3D5C9
+CAPABILITY      NONE
+VENDORID        0
+EPOCSTACKSIZE   0x5000
+
+SOURCEPATH      ..
+SOURCE          rscfix.cpp
+
+SYSTEMINCLUDE   \epoc32\include
+
+LIBRARY         euser.lib efsrv.lib

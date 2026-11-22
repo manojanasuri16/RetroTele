@@ -1,11 +1,10 @@
 #!/bin/sh
 # Builds the native S60 3rd Edition app (needs Python for S60 1.4.5 on the
-# phone). Run ../tools/setup.sh once first. Two packages:
-#   dist/RetroTele.sis       installs to phone memory (C:)
-#   dist/RetroTele-card.sis  installs to the memory card (E:), plus a 2 KB copy
-#                            of the launcher on C:. PyS60 1.4.5 looks for
-#                            default.py on C: even for card installs, so a
-#                            plain card install never starts (tools/py2sis_card.py).
+# phone). Run ../tools/setup.sh once first. One package, dist/RetroTele.sis:
+# the installer asks for phone memory or the memory card, and it works on
+# either, wherever Python for S60 is installed: retrotele_rscfix.exe, run once
+# by the installer, puts appuifw's resource file on the app's drive (see
+# rscfix/README.md).
 set -e
 cd "$(dirname "$0")"
 PY=../tools/mamba/py27/bin/python2
@@ -45,14 +44,21 @@ if [ -f native/tgnative.pyd ] && [ "$NATIVE" != 0 ]; then
   EXTRAS="--extrasdir=extras"
   echo "including native/tgnative.pyd"
 fi
+if [ -f native/retrotele_rscfix.exe ]; then
+  mkdir -p build/app/extras/sys/bin build/app/extras/resource/retrotele
+  cp native/retrotele_rscfix.exe build/app/extras/sys/bin/
+  cp rscfix/appuifwmodule.rsc build/app/extras/resource/retrotele/
+  EXTRAS="--extrasdir=extras"
+  echo "including native/retrotele_rscfix.exe (any-drive install)"
+fi
 
 OPTS="--uid=0xE7A3D5C2 --appname=RetroTele --version=$VERSION \
   --caption=RetroTele --shortcaption=RetroTele --vendor=RetroTele --icon=icon.svg \
   --caps=NetworkServices+LocalServices+ReadUserData+WriteUserData+UserEnvironment \
   --heapsize=4k,24M --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem $EXTRAS"
-$PY $ENS py2sis $OPTS --drive=C build/app dist/RetroTele.sis </dev/null >build/py2sis.log
-$PY tools/py2sis_card.py "$(dirname $ENS)" $OPTS --drive=E build/app dist/RetroTele-card.sis \
-  </dev/null >build/py2sis_card.log
-grep "launcher copy" build/py2sis_card.log
-echo "built dist/RetroTele.sis and dist/RetroTele-card.sis"
+rm -f dist/RetroTele-card.sis
+$PY tools/py2sis_rscfix.py "$(dirname $ENS)" $OPTS --drive=any build/app dist/RetroTele.sis \
+  </dev/null >build/py2sis.log
+grep "rscfix" build/py2sis.log || true
+echo "built dist/RetroTele.sis"
 ls -la dist
