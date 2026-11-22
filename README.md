@@ -43,7 +43,7 @@ There's no secret chats, file/video download, playback of GIFs or animated stick
 ## Install
 
 1. Install **Python for S60 1.4.5** (`PythonForS60_1_4_5_3rdEd.sis`) if it's not on the phone yet.
-2. Install `RetroTele.sis` and choose **phone memory or memory card**: either works, wherever Python for S60 is installed, on an unlocked phone (e.g. the Open4All patch). A Python for S60 1.4.5 app on a different drive from Python normally closes at once, because Python's `appuifw` looks for its resource file `appuifwmodule.rsc` on the app's drive. The package includes that file and a tiny native program that the installer runs once to put it in place (see [pys60/rscfix/README.md](pys60/rscfix/README.md)). On a phone that isn't unlocked, install RetroTele on the same drive as Python.
+2. Install `RetroTele.sis` and choose **phone memory or memory card**: either works, wherever Python for S60 is installed, on an unlocked phone (e.g. the Open4All patch). A Python for S60 1.4.5 app on a different drive from Python normally closes at once, because Python's `appuifw` looks for its resource file `appuifwmodule.rsc` on the app's drive. The package includes that file and a tiny native program that the installer runs once to put it in place (see [pys60/rscfix/README.md](pys60/rscfix/README.md)). Tested on a Nokia N79 with RetroTele on the memory card and Python in phone memory. On a phone that isn't unlocked, install RetroTele on the same drive as Python.
 3. On a computer, open <https://my.telegram.org>, go to **API development tools** and create an app. Note the **api_id** and **api_hash**.
 4. Open RetroTele and enter api_id and api_hash once. Choose an access point (Wi-Fi or packet data), then log in.
 
@@ -76,6 +76,13 @@ sh pys60/build_sis.sh          # -> pys60/dist/RetroTele.sis
 `schema/make_schema.py` regenerates `pys60/schema.txt` from Telegram Desktop's `api.tl` and `mtproto.tl` (currently layer 233).
 
 The PyS60 networking pitfalls (main-thread sockets, never `close()`) are the same as in [RetroSend](https://github.com/manojanasuri16/RetroSend/blob/main/docs/PYS60-NOTES.md). Crypto code follows the Python 2.2 integer rules described at the top of `pys60/tgcrypto.py`, which `tools/check_ints.py` enforces.
+
+## More apps for the Nokia N79
+
+- **[RetroTorch](https://github.com/manojanasuri16/RetroTorch)**: a torch app: the camera's LED flash as a steady light, plus the screen, keypad and extra lights.
+- **[RetroSend](https://github.com/manojanasuri16/RetroSend)**: send and receive files and text with the LocalSend app on phones and computers, over Wi-Fi.
+
+Like this app, both are Python for S60 1.4.5 apps that install to phone memory or the memory card.
 
 ## Credits
 
