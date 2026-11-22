@@ -23,7 +23,11 @@ def query(label, kind, initial=None):
     print "  query %r -> %r" % (label, a)
     return a
 appuifw.query = query
-appuifw.popup_menu = lambda items, title=None: popups.pop(0)
+def popup_menu(items, title=None):
+    if popups:
+        return popups.pop(0)
+    return 0       # "Send" (no caption)
+appuifw.popup_menu = popup_menu
 
 class Listbox:
     def __init__(self, rows, cb):
@@ -565,7 +569,11 @@ def reset_up():
 def upload_ui(path, caption=u"", extra=()):
     reset_up()
     del qlog[:]
-    answers[:] = [caption, 1] + list(extra)
+    if caption:
+        popups[:] = [1]
+        answers[:] = [caption, 1] + list(extra)
+    else:
+        answers[:] = [1] + list(extra)
     del notes[:]
     app.toast_text = None
     app.file_picked(path)
@@ -602,7 +610,7 @@ assert fl["id"] == up["parts"][0][1] and up["parts"][0][0] == "upload.saveFilePa
 assert m["peer"]["user_id"] == 42 and "reply_to" not in m
 assert app.toast_text and app.toast_text[0] == u"Sent", app.toast_text
 assert app.upload is None and app.busy == u""
-assert qlog == [u"Caption (optional)", u"Send a.jpg (100 B)?"], qlog
+assert qlog == [u"Caption", u"Send a.jpg (100 B)?"], qlog
 assert app.msgs["u42"][-1]["text"] == "look" and app.msgs["u42"][-1]["out"]
 assert seen and seen[-1].startswith(u"Uploading a.jpg 100%"), seen
 
@@ -649,7 +657,7 @@ check_parts("upload.saveBigFilePart", sz)
 m = up["media"][0]["media"]
 assert m["_"] == "inputMediaUploadedDocument" and m["force_file"] and m["mime_type"] == "image/jpeg"
 reset_up(); del qlog[:]
-answers[:] = [u"", 1, 0]
+answers[:] = [1, 0]
 app.file_picked(p4); app.net.run()
 assert not up["parts"] and app.upload is None and not answers
 
@@ -674,7 +682,7 @@ assert up["media"][0]["media"]["attributes"] == [{"_": "documentAttributeFilenam
 sz = 5 * 65536
 p7 = mkfile("cancel.zip", sz)
 reset_up(); up["hook"] = (2, app.cancel_upload)
-answers[:] = [u"", 1]; app.file_picked(p7); app.net.run()
+answers[:] = [1]; app.file_picked(p7); app.net.run()
 assert [p[2] for p in up["parts"]] == [0, 1, 2], up["parts"]
 assert not up["media"] and app.upload is None and app.busy == u""
 assert app.toast_text[0] == u"Upload cancelled", app.toast_text
@@ -684,21 +692,21 @@ assert len(up["media"]) == 1
 
 # 8. retry: two failures of part 1 are survived, four are not
 reset_up(); up["fail"] = {1: 2}
-answers[:] = [u"", 1]; app.file_picked(mkfile("r.zip", 3 * 65536)); app.net.run()
+answers[:] = [1]; app.file_picked(mkfile("r.zip", 3 * 65536)); app.net.run()
 assert [p[2] for p in up["parts"]] == [0, 1, 1, 1, 2] and len(up["media"]) == 1, up["parts"]
 assert up["bytes"] == 5 * 65536
 reset_up(); up["fail"] = {1: 9}
-answers[:] = [u"", 1]; del notes[:]; app.file_picked(mkfile("r2.zip", 3 * 65536)); app.net.run()
+answers[:] = [1]; del notes[:]; app.file_picked(mkfile("r2.zip", 3 * 65536)); app.net.run()
 assert [p[2] for p in up["parts"]] == [0, 1, 1, 1, 1] and not up["media"], up["parts"]
 assert app.upload is None and notes and notes[-1].startswith(u"Not sent"), notes
 
 # 9. server errors: plain text; unusable photo falls back to a document
 reset_up(); up["media_err"] = ["FILE_PARTS_INVALID"]
-answers[:] = [u"", 1]; del notes[:]; app.file_picked(p2); app.net.run()
+answers[:] = [1]; del notes[:]; app.file_picked(p2); app.net.run()
 assert notes[-1] == u"Not sent: " + retrotele.ERRORS["FILE_PARTS_INVALID"], notes
 assert retrotele.err_msg(RpcError(400, "FILE_PART_5_MISSING")).find(u"part of the file") >= 0
 reset_up(); up["media_err"] = ["PHOTO_INVALID_DIMENSIONS"]
-answers[:] = [u"", 1]; app.file_picked(p1); app.net.run()
+answers[:] = [1]; app.file_picked(p1); app.net.run()
 assert [x["media"]["_"] for x in up["media"]] == ["inputMediaUploadedPhoto", "inputMediaUploadedDocument"]
 assert up["media"][1]["media"]["force_file"] and len(up["parts"]) == 1
 assert app.toast_text[0] == u"Sent"
@@ -770,19 +778,58 @@ pkr.key("left"); assert app.picker is None and app.screen == "chat"
 app.attach_file(); pkr = app.picker
 assert pkr.path == root, pkr.path
 pkr.cur = 3; reset_up()
-answers[:] = [u"", 1]
-pkr.key("select"); app.net.run()
+answers[:] = [1]
+pkr.key("0"); app.net.run()      # nothing marked: sends the highlighted file
 assert app.picker is None and len(up["media"]) == 1
 assert up["media"][0]["media"]["file"]["name"] == "b.txt" and up["media"][0]["media"]["mime_type"] == "text/plain"
 assert app.screen == "chat" and not errors, errors
 # exit while uploading asks first
-reset_up(); answers[:] = [u"", 1]
+reset_up(); answers[:] = [1]
 app.file_picked(p7)
 answers[:] = [0]
 app.exit(); assert app.upload is not None and not answers
 answers[:] = [1]
 app.upload["h"].cancel(); app.upload = None
 print "attach OK"
+# caption popup: cancel, empty/cancelled caption text, multi-file queue
+reset_up(); popups[:] = [2]; answers[:] = []
+app.file_picked(p2); app.net.run()
+assert not up["parts"] and not up["media"] and not popups
+reset_up(); popups[:] = [1]; answers[:] = [None, 1]
+app.file_picked(p2); app.net.run()
+assert len(up["media"]) == 1 and up["media"][0]["message"] == "", up["media"]
+m1 = mkfile("m1.zip", 2000); m2 = mkfile("m2.zip", 3000); m3 = mkfile("m3.zip", 4000)
+reset_up(); popups[:] = [1]; answers[:] = [u"cap", 1]; del qlog[:]
+seen = []
+oldr = app.redraw
+app.redraw = lambda: (seen.append(app.busy) if app.busy.startswith(u"Uploading") else None, oldr())
+app.file_picked([m1, m2, m3]); app.net.run()
+app.redraw = oldr
+assert qlog[-1] == u"Send 3 files (9 KB)?", qlog
+assert [x["message"] for x in up["media"]] == ["cap", "", ""], up["media"]
+assert [x["media"]["file"]["name"] for x in up["media"]] == ["m1.zip", "m2.zip", "m3.zip"]
+assert [s for s in seen if s.startswith(u"Uploading 2/3 m2.zip")], seen
+assert app.toast_text[0] == u"Sent 3 files" and app.upload is None and app.queue is None
+# first fails: continue with the rest; stop at the question
+reset_up(); up["media_err"] = ["FILE_PARTS_INVALID"]; popups[:] = [0]; answers[:] = [1, 1]
+app.file_picked([m1, m2]); app.net.run()
+assert len(up["media"]) == 2 and up["media"][1]["media"]["file"]["name"] == "m2.zip" and app.toast_text[0] == u"Sent"
+reset_up(); up["media_err"] = ["FILE_PARTS_INVALID"]; popups[:] = [0]; answers[:] = [1, 0]
+app.file_picked([m1, m2]); app.net.run()
+assert len(up["media"]) == 1 and app.queue is None and app.upload is None
+# marks in the picker
+app.attach_file(); pkr = app.picker
+pkr.path = root; pkr.load(u""); pkr.cur = 3
+pkr.key("select"); pkr.cur = 4; pkr.key("select")
+assert len(pkr.marks) == 2 and pkr.entries[3][2] in pkr.marks
+pkr.cur = 2; pkr.key("select"); assert len(pkr.marks) == 3; pkr.key("select"); assert len(pkr.marks) == 2
+pkr.draw()
+reset_up(); got = []
+pkr.on_pick = lambda ps: got.append(ps)
+pkr.key("0"); assert len(got[0]) == 2
+pkr.unmark_all(); assert not pkr.marks
+pkr.mark_all(); assert len(pkr.marks) == len([e for e in pkr.entries if e[0] == "file"]) >= 3, (pkr.marks, pkr.entries, pkr.path)
+pkr.cancel(); assert app.picker is None
 app.call_test()
 app.view.toggle(); app.net.run(); app.view.tick()
 ct = screen_text()

@@ -335,3 +335,22 @@ def media_info(name, path):
     except:
         pass
     return out
+
+
+def exif_thumb(path):
+    """The small JPEG preview that cameras store inside the photo (bytes), or None."""
+    try:
+        f = open(path, "rb")
+        head = f.read(65536)
+        f.close()
+    except:
+        return None
+    if head[:2] != "\xff\xd8":
+        return None
+    i = head.find("\xff\xd8\xff", 2)
+    if i < 0:
+        return None
+    j = head.find("\xff\xd9", i)
+    if j < 0:
+        return None
+    return head[i:j + 2]

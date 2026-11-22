@@ -135,6 +135,49 @@ def fmt_date(t):
         return u""
 
 
+THUMB_EXT = ["jpg", "jpeg", "png", "gif", "bmp"]
+THUMB_MAX = 40
+THUMB_BIG = 1536 * 1024
+THUMB_SIZE = 28
+
+
+def temp_dir():
+    for d in [u"D:\\", u"C:\\Data\\", u"E:\\"]:
+        try:
+            if os.path.isdir(d):
+                return d
+        except:
+            pass
+    return u""
+
+
+def load_thumb(path, name, size):
+    """A small Image for an image file, or None (never raises)."""
+    import graphics
+    ext = fileinfo.ext_of(name)
+    tmp = temp_dir() + u"rt_thumb.jpg"
+    img = None
+    if ext in ("jpg", "jpeg"):
+        data = fileinfo.exif_thumb(path)
+        if data:
+            try:
+                f = open(tmp, "wb")
+                f.write(data)
+                f.close()
+                img = graphics.Image.open(tmp)
+            except:
+                img = None
+            try:
+                os.remove(tmp)
+            except:
+                pass
+    if img is None:
+        if size > THUMB_BIG:
+            return None
+        img = graphics.Image.open(path)
+    return img.resize((THUMB_SIZE, THUMB_SIZE), keepaspect=1)
+
+
 _CLS = []
 
 
@@ -161,7 +204,13 @@ def make_view(*a):
             self.msg = u""
             self.cache = {}
             self.free = {}
-            self.path_ = u""
+            self.marks = {}       # full path -> 1, kept across folders
+            self.thumbs = {}      # path -> Image
+            self.thumb_order = []
+            self.thumb_fail = {}
+            self.gen = 0
+            self.tpending = 0
+            self.vis = (0, 0)
             if start and self.can_list(start):
                 self.path = folder(start)
             self.load(u"")
@@ -177,6 +226,8 @@ def make_view(*a):
         def load(self, select):
             """Fill entries for self.path; select = full path to highlight."""
             ents = []
+            self.gen = self.gen + 1
+            self.thumb_fail = {}
             if self.path == u"":
                 self.free = free_space()
                 for d in drives():
@@ -257,8 +308,17 @@ def make_view(*a):
         def show(self):
             import appuifw
             tgui.CanvasView.show(self)
+            self.set_menu()
+            appuifw.app.exit_key_handler = self.up
+
+        def set_menu(self):
+            import appuifw
             appuifw.app.menu = [
-                (u"Open", self.open_cur), (u"Up", self.up),
+                (u"Open / mark", self.open_cur),
+                (u"Send marked (%d)" % len(self.marks), self.send),
+                (u"Mark all files here", self.mark_all),
+                (u"Unmark all", self.unmark_all),
+                (u"Up", self.up),
                 (u"Go to memory card", lambda self=self: self.goto([u"E:" + SEP])),
                 (u"Go to phone memory", lambda self=self: self.goto(
                     [u"C:" + SEP + u"Data" + SEP])),
@@ -271,7 +331,31 @@ def make_view(*a):
                     u"C:" + SEP + u"Data" + SEP + u"Sounds" + SEP])),
                 (u"Sort by name/size/date", self.cycle_sort),
                 (u"Cancel", self.cancel)]
-            appuifw.app.exit_key_handler = self.up
+
+        def mark_all(self):
+            for kind, n, full in self.entries:
+                if kind == "file":
+                    self.marks[full] = 1
+            self.set_menu()
+            self.draw()
+
+        def unmark_all(self):
+            self.marks = {}
+            self.set_menu()
+            self.draw()
+
+        def send(self):
+            paths = []
+            if self.marks:
+                keys = self.marks.keys()
+                keys.sort()
+                paths = keys
+            elif 0 <= self.cur < len(self.entries) and self.entries[self.cur][0] == "file":
+                paths = [self.entries[self.cur][2]]
+            if not paths:
+                self.toast_msg(u"Select a file first")
+                return
+            self.on_pick(paths)
 
         def toast_msg(self, t):
             self.msg = t
@@ -325,7 +409,12 @@ def make_view(*a):
                 return
             kind, name, full = self.entries[self.cur]
             if kind == "file":
-                self.on_pick(full)
+                if self.marks.has_key(full):
+                    del self.marks[full]
+                else:
+                    self.marks[full] = 1
+                self.set_menu()
+                self.draw()
             else:
                 self.enter(full)
 
@@ -342,6 +431,8 @@ def make_view(*a):
                     self.cur = self.cur + 1
                 else:
                     self.cur = 0
+            elif k == "0":
+                return self.send()
             elif k == "select" or k == "5":
                 return self.open_cur()
             elif k == "right" or k == "6":
@@ -367,9 +458,11 @@ def make_view(*a):
             g.rectangle((0, 0, w, H), fill=T.BLUE)
             T.txt(g, 10, 22, T.fit(g, self.title(), "name", w - 20), T.WHITE, "name", "b")
             path = T.to_u(self.path)
+            if self.marks:
+                path = u"%d selected" % len(self.marks)
             if path == u"":
                 path = u"Choose a drive"
-            while len(path) > 4 and T.width(g, path, "small") > w - 20:
+            while not self.marks and len(path) > 4 and T.width(g, path, "small") > w - 20:
                 path = u"..." + path[4:]
             T.txt(g, 10, 41, path, T.HEADER_SUB, "small", "b")
             top = H
@@ -396,14 +489,17 @@ def make_view(*a):
             self.scrollbar(g, w, top, bottom, self.top, visible, len(rows))
             # footer
             g.rectangle((0, bottom, w, h), fill=T.BLUE_SOFT)
-            hints = [(u"Open", 8), (u"Left: Up", None), (u"Back", -8)]
+            hints = [(u"Open", 6), (u"Up", 58), (u"0: Send %d" % len(self.marks), None),
+                     (u"Back", -6)]
             for label, x in hints:
                 tw = T.width(g, label, "small")
                 if x is None:
-                    x = (w - tw) / 2
+                    x = (w - tw) / 2 + 28
                 elif x < 0:
                     x = w + x - tw
                 T.txt(g, x, h - 8, label, T.BLUE_DARK, "small", "w")
+            self.vis = (self.top, self.top + visible)
+            self.want_thumbs()
             if self.msg:
                 y0 = H + 4
                 T.rrect(g, 6, y0, w - 6, y0 + 26, 8, 0x25303A)
@@ -430,7 +526,13 @@ def make_view(*a):
                 d = fmt_date(mt)
                 if d:
                     sub = sub + u", " + d
-                self.icon_file(g, 10, y + 7, name, sel)
+                th = self.thumbs.get(full)
+                if th is not None:
+                    self.icon_thumb(g, 8, y + 6, th)
+                else:
+                    self.icon_file(g, 10, y + 7, name, sel)
+                if self.marks.has_key(full):
+                    self.icon_mark(g, 8, y + 6)
             elif kind == "dir":
                 sub = u"Folder"
                 self.icon_folder(g, 8, y + 9)
@@ -451,6 +553,67 @@ def make_view(*a):
             g.rectangle((x, y, x + 12, y + 5), fill=0xE0A21B)
             g.rectangle((x, y + 3, x + 26, y + 22), fill=0xF5B83D)
             g.rectangle((x, y + 8, x + 26, y + 22), fill=0xFFCB57)
+
+        def icon_thumb(self, g, x, y, img):
+            g.rectangle((x, y, x + 28, y + 28), fill=0xDCE3EA)
+            try:
+                iw, ih = img.size
+                g.blit(img, target=(x + (28 - iw) / 2, y + (28 - ih) / 2))
+            except:
+                pass
+
+        def icon_mark(self, g, x, y):
+            g.ellipse((x + 12, y + 14, x + 30, y + 32), fill=0x4DCD5E, outline=0xFFFFFF)
+            g.line((x + 16, y + 23, x + 20, y + 27), outline=0xFFFFFF, width=2)
+            g.line((x + 20, y + 27, x + 26, y + 19), outline=0xFFFFFF, width=2)
+
+        # ------------------------------------------------ thumbnails
+        def thumb_ok(self, ent):
+            kind, name, full = ent
+            if kind != "file" or self.thumbs.has_key(full) or self.thumb_fail.has_key(full):
+                return 0
+            return fileinfo.ext_of(name) in THUMB_EXT
+
+        def want_thumbs(self):
+            if self.tpending:
+                return
+            i = self.vis[0]
+            while i < self.vis[1] and i < len(self.entries):
+                if self.thumb_ok(self.entries[i]):
+                    self.tpending = 1
+                    self.app.net.later(0.05, self.thumb_tick)
+                    return
+                i = i + 1
+
+        def thumb_tick(self):
+            self.tpending = 0
+            if self.app.view is not self:
+                return
+            gen = self.gen
+            i = self.vis[0]
+            while i < self.vis[1] and i < len(self.entries):
+                ent = self.entries[i]
+                if self.thumb_ok(ent):
+                    img = None
+                    try:
+                        img = load_thumb(ent[2], ent[1], self.stat(ent[2])[0])
+                    except:
+                        img = None
+                    if gen != self.gen:
+                        return
+                    if img is None:
+                        self.thumb_fail[ent[2]] = 1
+                    else:
+                        self.thumbs[ent[2]] = img
+                        self.thumb_order.append(ent[2])
+                        while len(self.thumb_order) > THUMB_MAX:
+                            old = self.thumb_order[0]
+                            del self.thumb_order[0]
+                            if self.thumbs.has_key(old):
+                                del self.thumbs[old]
+                    self.draw()
+                    return
+                i = i + 1
 
         def icon_drive(self, g, x, y, sel):
             c = 0x9AA3AA

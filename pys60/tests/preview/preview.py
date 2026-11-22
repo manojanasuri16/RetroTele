@@ -259,6 +259,8 @@ os.makedirs(ft + "Images"); os.makedirs(ft + "Sounds"); os.makedirs(ft + "A very
 for nm, n in (("holiday.jpg", 2400000), ("song.mp3", 5100000), ("clip.mp4", 31000000),
               ("backup.zip", 880000), ("notes.txt", 1200), ("RetroTele.sis", 640000), ("data.bin", 90)):
     open(ft + nm, "wb").write("x" * 10)
+    if nm.endswith(".jpg"):
+        shutil.copy(os.environ["RT_PHOTO"], ft + nm)
     os.utime(ft + nm, (NOW - 86400 * 3, NOW - 86400 * 3))
 filepick.SEP = "/"
 filepick.is_root = lambda p: p == ft
@@ -273,5 +275,16 @@ snap("11-filepick-drives")
 fv.key("down"); fv.key("select")
 fv.cur = 4; fv.msg = u""
 snap("12-filepick-folder")
+shutil.copy(os.environ["RT_PHOTO"], ft + "IMG_0042.jpg")
+shutil.copy(os.environ["RT_PHOTO"], ft + "IMG_0043.jpg")
+fv.entries = []; fv.load(u"")
+fv.sort = 0
+fv.path = ft; fv.load(u"")
+fv.cur = 0
+fv.marks[ft + "IMG_0043.jpg"] = 1; fv.marks[ft + "song.mp3"] = 1
+fv.top = 5; fv.cur = 6
+app.view = fv
+fv.draw(); app.net.run()
+snap("13-filepick-thumbs-marks")
 json.dump(screens, open(os.environ["RT_OUT"] + "/screens.json", "w"))
 shutil.rmtree(TMP)

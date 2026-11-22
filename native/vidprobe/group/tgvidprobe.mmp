@@ -1,7 +1,7 @@
-// tgvidprobe.exe: reports video hardware/codecs/camera of the phone (see vidprobe.cpp)
-TARGET        tgvidprobe.exe
+// tgvprobe.exe (was tgvidprobe.exe): reports video hardware/codecs/camera of the phone (see vidprobe.cpp)
+TARGET        tgvprobe.exe
 TARGETTYPE    exe
-UID           0x0 0xE7A3D5E4
+UID           0x0 0xE7A3D5E6
 CAPABILITY    MultimediaDD ReadDeviceData WriteDeviceData UserEnvironment LocalServices NetworkServices ReadUserData WriteUserData
 VENDORID      0
 EPOCSTACKSIZE 0x5000

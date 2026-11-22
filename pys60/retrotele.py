@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.13.1"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.13.2"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -373,6 +373,7 @@ class App:
         self.chat_key = None
         self.reply_to = 0
         self.upload = None
+        self.queue = None
         self.picker = None
         self.is_online = 0
         self.busy = u""
@@ -1589,36 +1590,66 @@ class App:
         self.picker = None
         self.back_to_chat()
 
-    def file_picked(self, path):
+    def file_picked(self, paths):
         self.picker = None
         self.back_to_chat()
-        try:
-            size = int(os.path.getsize(path))
-        except:
-            appuifw.note(u"Cannot read the file.", "error")
+        if type(paths) is not type([]):
+            paths = [paths]
+        items = []
+        total = 0
+        for path in paths:
+            try:
+                size = int(os.path.getsize(path))
+            except:
+                appuifw.note(u"Cannot read the file.", "error")
+                continue
+            name = fileinfo.base_name(path)
+            if size <= 0:
+                appuifw.note(u"The file is empty.", "error")
+                continue
+            if size > 2000 * 1024 * 1024:
+                appuifw.note(u"Telegram accepts files up to 2000 MB.", "error")
+                continue
+            items.append((path, name, size))
+            total = total + size
+        if not items:
             return
-        name = fileinfo.base_name(path)
-        if size <= 0:
-            appuifw.note(u"The file is empty.", "error")
+        title = one_line(items[0][1], 30)
+        if len(items) > 1:
+            title = u"%d files" % len(items)
+        c = appuifw.popup_menu([u"Send", u"Add caption and send", u"Cancel"], title)
+        if c is None or c == 2:
             return
-        if size > 2000 * 1024 * 1024:
-            appuifw.note(u"Telegram accepts files up to 2000 MB.", "error")
-            return
-        caption = appuifw.query(u"Caption (optional)", "text", u"")
-        if caption is None:
-            return
-        caption = caption.strip()[:1000]
-        q = u"Send " + one_line(name, 40) + u" (" + fileinfo.human_size(size) + u")?"
+        caption = u""
+        if c == 1:
+            caption = appuifw.query(u"Caption", "text", u"")
+            if caption is None:
+                caption = u""
+            caption = caption.strip()[:1000]
+        if len(items) == 1:
+            q = u"Send " + one_line(items[0][1], 40) + u" (" + fileinfo.human_size(total) + u")?"
+        else:
+            q = u"Send %d files (%s)?" % (len(items), fileinfo.human_size(total))
         if not appuifw.query(q, "query"):
             return
-        if size > 20 * 1024 * 1024:
-            minutes = int((size / 102400 + 59) / 60)
+        if total > 20 * 1024 * 1024:
+            minutes = int((total / 102400 + 59) / 60)
             if minutes < 1:
                 minutes = 1
             if not appuifw.query(u"This phone uploads slowly: about %d minutes?" % minutes,
                                  "query"):
                 return
-        self.start_upload(self.chat_key, path, name, size, caption)
+        self.queue = {"items": items, "i": 0, "caption": caption, "key": self.chat_key,
+                      "sent": 0}
+        self.next_upload()
+
+    def next_upload(self):
+        q = self.queue
+        path, name, size = q["items"][q["i"]]
+        caption = u""
+        if q["i"] == 0:
+            caption = q["caption"]
+        self.start_upload(q["key"], path, name, size, caption)
 
     def start_upload(self, key, path, name, size, caption):
         self.upload = {"name": name, "size": size, "pct": -1, "key": key, "h": None}
@@ -1647,20 +1678,44 @@ class App:
         if pct == u["pct"]:
             return
         u["pct"] = pct
-        self.busy = u"Uploading " + one_line(u["name"], 24) + u" %d%% (%s)" % (
+        q = self.queue
+        pre = u"Uploading "
+        if q is not None and len(q["items"]) > 1:
+            pre = u"Uploading %d/%d " % (q["i"] + 1, len(q["items"]))
+        self.busy = pre + one_line(u["name"], 24) + u" %d%% (%s)" % (
             pct, fileinfo.progress_sizes(done, total))
         self.redraw()
 
     def upload_done(self, name):
         self.upload = None
+        q = self.queue
+        if q is not None:
+            q["sent"] = q["sent"] + 1
+            q["i"] = q["i"] + 1
+            if q["i"] < len(q["items"]):
+                self.next_upload()
+                return
+        self.queue = None
         self.done_wait()
-        self.show_toast(u"Sent", one_line(name, 40))
+        if q is not None and q["sent"] > 1:
+            self.show_toast(u"Sent %d files" % q["sent"], u"")
+        else:
+            self.show_toast(u"Sent", one_line(name, 40))
         self.update_menu_for_upload()
 
     def upload_failed(self, e):
         self.upload = None
+        q = self.queue
         self.done_wait()
-        appuifw.note(u"Not sent: " + err_msg(e), "error")
+        if q is not None and q["i"] + 1 < len(q["items"]):
+            q["i"] = q["i"] + 1
+            if appuifw.query(u"Not sent: " + err_msg(e) + u" Continue with the rest?", "query"):
+                self.next_upload()
+                return
+            self.queue = None
+        else:
+            self.queue = None
+            appuifw.note(u"Not sent: " + err_msg(e), "error")
         self.update_menu_for_upload()
 
     def cancel_upload(self):
@@ -1670,6 +1725,7 @@ class App:
         if u["h"] is not None:
             u["h"].cancel()
         self.upload = None
+        self.queue = None
         self.done_wait()
         self.show_toast(u"Upload cancelled", one_line(u["name"], 40))
         self.update_menu_for_upload()

@@ -71,11 +71,11 @@ echo "built dist/RetroTele.sis"
 ls -la dist
 
 # Video hardware probe (E:\retrotele_videoprobe.txt). Own package, own UID; not part of RetroTele.sis.
-if [ -f native/tgvidprobe.exe ]; then
+if [ -f native/tgvprobe.exe ]; then
   rm -rf build/vidprobe_app && mkdir -p build/vidprobe_app/extras/sys/bin
-  cp native/tgvidprobe.exe build/vidprobe_app/extras/sys/bin/
+  cp native/tgvprobe.exe build/vidprobe_app/extras/sys/bin/
   cat > build/vidprobe_app/default.py <<'PYEOF'
-# RetroTele video probe: runs tgvidprobe.exe, waits for its report file.
+# RetroTele video probe: runs tgvprobe.exe, waits for its report file.
 import e32
 import appuifw
 import os
@@ -103,9 +103,9 @@ def main():
         except:
             pass
     try:
-        e32.start_exe(u"tgvidprobe.exe", u"")
+        e32.start_exe(u"tgvprobe.exe", u"")
     except:
-        appuifw.note(u"Cannot start tgvidprobe.exe", "error")
+        appuifw.note(u"Cannot start tgvprobe.exe", "error")
         return
     appuifw.note(u"Video probe running, please wait...", "info")
     done = None
