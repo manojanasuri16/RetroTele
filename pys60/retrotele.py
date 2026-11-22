@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.12.2"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.13.0"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -76,6 +76,8 @@ import tl
 import tgclient
 import tgsrp
 import tgui
+import fileinfo
+import filepick
 from mtproto import RpcError
 
 UID = "e7a3d5c2"
@@ -141,6 +143,25 @@ def find_schema():
 
 
 ERRORS = {
+    "FILE_PARTS_INVALID": u"The file could not be split for upload. Try again.",
+    "FILE_PART_INVALID": u"Telegram rejected a part of the file. Try again.",
+    "FILE_PART_TOO_BIG": u"Telegram rejected a part of the file as too big.",
+    "FILE_PART_EMPTY": u"Telegram received an empty part of the file.",
+    "FILE_PART_SIZE_INVALID": u"Telegram rejected the upload part size.",
+    "FILE_PART_SIZE_CHANGED": u"The file changed while uploading. Try again.",
+    "FILE_PART_LENGTH_INVALID": u"Telegram rejected the upload part length.",
+    "FILE_EMPTY": u"The file is empty.",
+    "FILE_TOO_BIG": u"The file is too big (2000 MB at most).",
+    "PHOTO_INVALID_DIMENSIONS": u"This picture has unsupported dimensions.",
+    "PHOTO_SAVE_FILE_INVALID": u"Telegram could not use this picture.",
+    "PHOTO_EXT_INVALID": u"This picture type is not supported.",
+    "IMAGE_PROCESS_FAILED": u"Telegram could not process this picture.",
+    "MEDIA_EMPTY": u"Telegram says the file is empty.",
+    "MEDIA_INVALID": u"Telegram does not accept this file.",
+    "MEDIA_CAPTION_TOO_LONG": u"The caption is too long.",
+    "CHAT_SEND_MEDIA_FORBIDDEN": u"You cannot send files in this chat.",
+    "CHAT_SEND_DOCS_FORBIDDEN": u"You cannot send files in this chat.",
+    "CHAT_SEND_PHOTOS_FORBIDDEN": u"You cannot send photos in this chat.",
     "PHONE_NUMBER_INVALID": u"That phone number is not valid. Use the +country code format.",
     "PHONE_CODE_INVALID": u"Wrong code. Try again.",
     "PHONE_CODE_EXPIRED": u"The code has expired. Ask for a new one.",
@@ -164,6 +185,10 @@ def err_msg(e):
             return u"Telegram asks to wait %s seconds before trying again." % m[11:]
         if ERRORS.has_key(m):
             return ERRORS[m]
+        if m[:10] == "FILE_PART_" and m[-8:] == "_MISSING":
+            return u"Telegram lost part of the file. Try again."
+        if m == "cannot read file":
+            return u"Cannot read the file."
         return to_u("%s (%d)" % (m, e.code))
     return to_u(str(e))
 
@@ -347,6 +372,8 @@ class App:
         self.rows_cache = {}
         self.chat_key = None
         self.reply_to = 0
+        self.upload = None
+        self.picker = None
         self.is_online = 0
         self.busy = u""
         self.apo = None
@@ -984,6 +1011,8 @@ class App:
         if r is not None and r["key"][0] == "u" and self.client.peer(r["key"]).get("phone"):
             m.append((u"Call " + one_line(self.client.short_name(r["key"]), 20),
                       lambda self=self, k=r["key"]: self.call_peer(k)))
+        if self.upload is not None:
+            m.append((u"Cancel upload", self.cancel_upload))
         m = m + [(u"Mark all read", self.mark_tab_read),
                  (u"Refresh", self.refresh_all),
                  (u"Settings", self.settings),
@@ -1128,6 +1157,10 @@ class App:
         if key[0] == "u" and self.client.peer(key).get("phone"):
             m.append((u"Call " + one_line(self.client.short_name(key), 20),
                       lambda self=self, k=key: self.call_peer(k)))
+        if self.upload is not None:
+            m.append((u"Cancel upload", self.cancel_upload))
+        elif self.client.can_write(key):
+            m.append((u"Attach file", self.attach_file))
         m = m + [(u"Load older messages", self.load_older),
                  (u"Jump to latest", self.jump_latest),
                  (u"View profile", self.view_profile),
@@ -1521,6 +1554,126 @@ class App:
             self.dialogs_changed()
         self.redraw()
 
+
+    # ---------------------------------------------------------- attach file
+
+    def attach_file(self):
+        key = self.chat_key
+        if key is None or not self.client.can_write(key):
+            return
+        if self.upload is not None:
+            appuifw.note(u"An upload is already running.", "info")
+            return
+        start = self.cfg.get("last_dir") or ""
+        try:
+            start = unicode(start, "utf-8")
+        except:
+            start = u""
+        self.screen = "filepick"
+        self.set_screen("normal")
+        self.picker = filepick.FilePicker(start, self.file_picked, self.pick_cancelled,
+                                          self.remember_dir)
+        self.picker.show()
+
+    def remember_dir(self, path):
+        try:
+            p = path.encode("utf-8")
+        except:
+            return
+        if self.cfg.get("last_dir") != p:
+            self.cfg.set("last_dir", p)
+            self.cfg.save()
+
+    def pick_cancelled(self):
+        self.picker = None
+        self.back_to_chat()
+
+    def file_picked(self, path):
+        self.picker = None
+        self.back_to_chat()
+        try:
+            size = int(os.path.getsize(path))
+        except:
+            appuifw.note(u"Cannot read the file.", "error")
+            return
+        name = fileinfo.base_name(path)
+        if size <= 0:
+            appuifw.note(u"The file is empty.", "error")
+            return
+        if size > 2000 * 1024 * 1024:
+            appuifw.note(u"Telegram accepts files up to 2000 MB.", "error")
+            return
+        caption = appuifw.query(u"Caption (optional)", "text", u"")
+        if caption is None:
+            return
+        caption = caption.strip()[:1000]
+        q = u"Send " + one_line(name, 40) + u" (" + fileinfo.human_size(size) + u")?"
+        if not appuifw.query(q, "query"):
+            return
+        if size > 20 * 1024 * 1024:
+            minutes = int((size / 102400 + 59) / 60)
+            if minutes < 1:
+                minutes = 1
+            if not appuifw.query(u"This phone uploads slowly: about %d minutes?" % minutes,
+                                 "query"):
+                return
+        self.start_upload(self.chat_key, path, name, size, caption)
+
+    def start_upload(self, key, path, name, size, caption):
+        self.upload = {"name": name, "size": size, "pct": -1, "key": key, "h": None}
+        self.upload_progress(0, size)
+        reply_to = 0
+        h = self.client.send_file(
+            key, path, caption, reply_to,
+            self.upload_progress,
+            lambda r, self=self, name=name: self.upload_done(name),
+            self.upload_failed)
+        if self.upload is not None:
+            self.upload["h"] = h
+        self.update_menu_for_upload()
+
+    def update_menu_for_upload(self):
+        if self.screen == "chat":
+            self.update_chat_menu()
+        elif self.screen == "chats":
+            self.update_list_menu()
+
+    def upload_progress(self, done, total):
+        u = self.upload
+        if u is None:
+            return
+        pct = int(done * 100 / total)
+        if pct == u["pct"]:
+            return
+        u["pct"] = pct
+        self.busy = u"Uploading " + one_line(u["name"], 24) + u" %d%% (%s)" % (
+            pct, fileinfo.progress_sizes(done, total))
+        self.redraw()
+
+    def upload_done(self, name):
+        self.upload = None
+        self.done_wait()
+        self.show_toast(u"Sent", one_line(name, 40))
+        self.update_menu_for_upload()
+
+    def upload_failed(self, e):
+        self.upload = None
+        self.done_wait()
+        appuifw.note(u"Not sent: " + err_msg(e), "error")
+        self.update_menu_for_upload()
+
+    def cancel_upload(self):
+        u = self.upload
+        if u is None:
+            return
+        if u["h"] is not None:
+            u["h"].cancel()
+        self.upload = None
+        self.done_wait()
+        self.show_toast(u"Upload cancelled", one_line(u["name"], 40))
+        self.update_menu_for_upload()
+
+
     def send_failed(self, e):
         self.done_wait()
         appuifw.note(u"Not sent: " + err_msg(e), "error")
@@ -1861,7 +2014,7 @@ class App:
 
     def new_message(self, key, msg):
         self.add_message(key, msg)
-        viewing = key == self.chat_key and self.screen in ("chat", "text", "compose")
+        viewing = key == self.chat_key and self.screen in ("chat", "text", "compose", "filepick")
         if viewing and not msg["out"]:
             self.client.mark_read(key, msg["id"])
         d = self.dialog_for(key)
@@ -2005,6 +2158,10 @@ class App:
 
     def exit(self):
         boot_log("exit requested")
+        if self.upload is not None:
+            if not appuifw.query(u"Cancel the upload and exit?", "query"):
+                return
+            self.cancel_upload()
         self.hash_job = None
         if isinstance(self.view, tgui.PlayerView):
             self.view.close()

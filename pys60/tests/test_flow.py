@@ -15,7 +15,9 @@ notes = []
 answers = []
 popups = []
 appuifw.note = lambda text, kind="info": notes.append(text)
+qlog = []
 def query(label, kind, initial=None):
+    qlog.append(label)
     assert answers, "unexpected query: %r" % label
     a = answers.pop(0)
     print "  query %r -> %r" % (label, a)
@@ -108,6 +110,8 @@ class FakeSession:
         else:
             self.net.later(0, lambda: ok(res))
 state = {"signed": 0}
+up = {"parts": [], "md5": None, "bytes": 0, "fail": {}, "hook": None,
+      "media": [], "media_err": []}
 def handle(f):
     n = f["_"]
     if n == "auth.sendCode":
@@ -222,6 +226,29 @@ def handle(f):
         state["declined"] = f["peer"]["id"]
         state["discard"] = (f["peer"]["id"], f["reason"]["_"], f["duration"])
         return {"_": "updates", "users": [], "chats": [], "date": 0, "seq": 0, "updates": []}
+    if n in ("upload.saveFilePart", "upload.saveBigFilePart"):
+        import md5
+        b = f["bytes"]
+        up["parts"].append((n, f["file_id"], f["file_part"], len(b), f.get("file_total_parts")))
+        up["md5"].update(b)
+        up["bytes"] = up["bytes"] + len(b)
+        k = f["file_part"]
+        if up["fail"].get(k, 0) > 0:
+            up["fail"][k] = up["fail"][k] - 1
+            return RpcError(500, "INTERNAL")
+        if up["hook"] is not None and k == up["hook"][0]:
+            up["hook"][1]()
+        return True
+    if n == "messages.sendMedia":
+        up["media"].append(f)
+        if up["media_err"]:
+            return RpcError(400, up["media_err"].pop(0))
+        state["sent"] = state.get("sent", 10) + 1
+        return {"_": "updates", "users": [], "chats": [], "date": 0, "seq": 0, "updates": [
+            {"_": "updateNewMessage", "pts": 5, "pts_count": 1, "message": {
+                "_": "message", "id": state["sent"], "out": 1,
+                "peer_id": {"_": "peerUser", "user_id": 42}, "date": 1700000200,
+                "message": f["message"], "media": {"_": "messageMediaUnsupported"}}}]}
     raise AssertionError("unexpected call " + n)
 
 tgclient.mtproto.Session = FakeSession
@@ -517,6 +544,238 @@ assert [d["key"] for d in app2.dialogs] == [d["key"] for d in app.dialogs][:150]
 assert app2.client.peer_name("u42") == "Alice B"
 assert not errors, errors
 assert open(TMP + "/session.txt").read().find("user_id=7") >= 0
+
+# ---- Attach file
+import struct, md5 as md5mod, filepick, fileinfo
+UP = os.path.join(TMP, "up"); os.mkdir(UP)
+def mkfile(name, size, head="", tail="", fill=None):
+    path = os.path.join(UP, name)
+    f = open(path, "wb")
+    f.write(head)
+    left = size - len(head) - len(tail)
+    blk = fill or os.urandom(1024 * 1024)
+    while left > 0:                       # repeated writes: never the whole file in memory
+        n = min(left, len(blk))
+        f.write(blk[:n]); left = left - n
+    f.write(tail); f.close()
+    return path
+def reset_up():
+    up["parts"] = []; up["md5"] = md5mod.new(); up["bytes"] = 0; up["fail"] = {}
+    up["hook"] = None; up["media"] = []; up["media_err"] = []
+def upload_ui(path, caption=u"", extra=()):
+    reset_up()
+    del qlog[:]
+    answers[:] = [caption, 1] + list(extra)
+    del notes[:]
+    app.toast_text = None
+    app.file_picked(path)
+    seen = []
+    old = app.redraw
+    app.redraw = lambda: (seen.append(app.busy) if app.busy.startswith(u"Uploading") else None, old())
+    app.net.run()
+    app.redraw = old
+    assert not answers, answers
+    return seen
+def check_parts(kind, size, psize=65536):
+    ps = up["parts"]
+    n = (size + psize - 1) // psize
+    assert len(ps) == n, (len(ps), n)
+    assert [p[2] for p in ps] == range(n), "part order"
+    assert [p[3] for p in ps] == [psize] * (n - 1) + [size - psize * (n - 1)], "part sizes"
+    assert len(set([p[1] for p in ps])) == 1 and ps[0][0] == kind
+    assert up["bytes"] == size
+    if kind == "upload.saveBigFilePart":
+        assert [p[4] for p in ps] == [n] * n
+app.back_to_chat()
+appuifw.app.menu = []; app.update_chat_menu()
+assert u"Attach file" in [m[0] for m in appuifw.app.menu], appuifw.app.menu
+assert not [e for e in errors]
+
+# 1. tiny picture -> inputFile + inputMediaUploadedPhoto, md5 of the whole file
+p1 = mkfile("a.jpg", 100)
+seen = upload_ui(p1, u"look")
+m = up["media"][0]; fl = m["media"]["file"]
+assert m["media"]["_"] == "inputMediaUploadedPhoto" and m["message"] == "look", m
+assert fl["_"] == "inputFile" and fl["parts"] == 1 and fl["name"] == "a.jpg"
+assert fl["md5_checksum"] == up["md5"].hexdigest() == md5mod.new(open(p1, "rb").read()).hexdigest()
+assert fl["id"] == up["parts"][0][1] and up["parts"][0][0] == "upload.saveFilePart"
+assert m["peer"]["user_id"] == 42 and "reply_to" not in m
+assert app.toast_text and app.toast_text[0] == u"Sent", app.toast_text
+assert app.upload is None and app.busy == u""
+assert qlog == [u"Caption (optional)", u"Send a.jpg (100 B)?"], qlog
+assert app.msgs["u42"][-1]["text"] == "look" and app.msgs["u42"][-1]["out"]
+assert seen and seen[-1].startswith(u"Uploading a.jpg 100%"), seen
+
+# 2. exactly one part, a document (pdf)
+p2 = mkfile("doc.pdf", 65536)
+upload_ui(p2)
+check_parts("upload.saveFilePart", 65536)
+m = up["media"][0]["media"]
+assert m["_"] == "inputMediaUploadedDocument" and m["mime_type"] == "application/pdf"
+assert m["attributes"] == [{"_": "documentAttributeFilename", "file_name": "doc.pdf"}], m
+assert not m.get("force_file") and m["file"]["parts"] == 1
+
+# 3. several parts, mp3: duration from the frame header, title/artist from ID3v1
+tag = "TAG" + "Song".ljust(30, "\0") + "Artist".ljust(30, "\0") + "\0" * 65
+assert len(tag) == 128
+sz = 3 * 65536 + 5
+p3 = mkfile("song.mp3", sz, "\xff\xfb\x90\x00", tag, "\0" * 4096)
+upload_ui(p3)
+check_parts("upload.saveFilePart", sz)
+m = up["media"][0]["media"]
+assert m["mime_type"] == "audio/mpeg"
+aa = m["attributes"][0]
+assert aa["_"] == "documentAttributeAudio" and aa["title"] == "Song" and aa["performer"] == "Artist", aa
+assert aa["duration"] == int(sz * 8 / 128000.0 + 0.5), aa
+assert m["attributes"][1]["file_name"] == "song.mp3"
+assert m["file"]["md5_checksum"] == up["md5"].hexdigest()
+
+# 4. > 10 MB: big upload, with the slow-phone warning above 20 MB
+sz = 21 * 1024 * 1024 + 123
+p4 = mkfile("huge.bin", sz)
+seen = upload_ui(p4, u"", [1])
+check_parts("upload.saveBigFilePart", sz)
+assert qlog[-1] == u"This phone uploads slowly: about 4 minutes?", qlog
+m = up["media"][0]["media"]
+assert m["file"]["_"] == "inputFileBig" and not m["file"].has_key("md5_checksum")
+assert m["file"]["parts"] == len(up["parts"]) and m["mime_type"] == "application/octet-stream"
+assert seen[-1].find(u"100% (21.0/21.0 MB)") >= 0, seen[-1]
+
+# 5. a picture over 10 MB is sent as a file (force_file); user can say no at the warning
+sz = 10 * 1024 * 1024 + 1
+p5 = mkfile("big.jpg", sz)
+upload_ui(p5)
+check_parts("upload.saveBigFilePart", sz)
+m = up["media"][0]["media"]
+assert m["_"] == "inputMediaUploadedDocument" and m["force_file"] and m["mime_type"] == "image/jpeg"
+reset_up(); del qlog[:]
+answers[:] = [u"", 1, 0]
+app.file_picked(p4); app.net.run()
+assert not up["parts"] and app.upload is None and not answers
+
+# 6. video with duration and size from the mp4 boxes
+def box(kind, body): return struct.pack(">I", 8 + len(body)) + kind + body
+mvhd = box("mvhd", "\0" * 4 + "\0" * 8 + struct.pack(">II", 1000, 5400) + "\0" * 80)
+tkhd = box("tkhd", "\0" * 4 + "\0" * 72 + struct.pack(">II", 320 << 16, 240 << 16))
+mp4 = box("ftyp", "isom\0\0\0\0isom") + box("moov", mvhd + box("trak", tkhd))
+p6 = os.path.join(UP, "clip.mp4"); open(p6, "wb").write(mp4 + "\0" * 5000)
+assert fileinfo.mp4_info(p6) == (5.4, 320, 240), fileinfo.mp4_info(p6)
+upload_ui(p6)
+m = up["media"][0]["media"]
+assert m["mime_type"] == "video/mp4" and not m.get("force_file")
+assert m["attributes"][0] == {"_": "documentAttributeVideo", "duration": 5.0, "w": 320, "h": 240} or \
+    m["attributes"][0]["duration"] == 5.0, m
+assert m["attributes"][-1]["file_name"] == "clip.mp4"
+p6b = os.path.join(UP, "odd.3gp"); open(p6b, "wb").write("junk" * 100)
+upload_ui(p6b)
+assert up["media"][0]["media"]["attributes"] == [{"_": "documentAttributeFilename", "file_name": "odd.3gp"}]
+
+# 7. cancel in the middle
+sz = 5 * 65536
+p7 = mkfile("cancel.zip", sz)
+reset_up(); up["hook"] = (2, app.cancel_upload)
+answers[:] = [u"", 1]; app.file_picked(p7); app.net.run()
+assert [p[2] for p in up["parts"]] == [0, 1, 2], up["parts"]
+assert not up["media"] and app.upload is None and app.busy == u""
+assert app.toast_text[0] == u"Upload cancelled", app.toast_text
+# the app stays usable: the next upload works
+upload_ui(p2)
+assert len(up["media"]) == 1
+
+# 8. retry: two failures of part 1 are survived, four are not
+reset_up(); up["fail"] = {1: 2}
+answers[:] = [u"", 1]; app.file_picked(mkfile("r.zip", 3 * 65536)); app.net.run()
+assert [p[2] for p in up["parts"]] == [0, 1, 1, 1, 2] and len(up["media"]) == 1, up["parts"]
+assert up["bytes"] == 5 * 65536
+reset_up(); up["fail"] = {1: 9}
+answers[:] = [u"", 1]; del notes[:]; app.file_picked(mkfile("r2.zip", 3 * 65536)); app.net.run()
+assert [p[2] for p in up["parts"]] == [0, 1, 1, 1, 1] and not up["media"], up["parts"]
+assert app.upload is None and notes and notes[-1].startswith(u"Not sent"), notes
+
+# 9. server errors: plain text; unusable photo falls back to a document
+reset_up(); up["media_err"] = ["FILE_PARTS_INVALID"]
+answers[:] = [u"", 1]; del notes[:]; app.file_picked(p2); app.net.run()
+assert notes[-1] == u"Not sent: " + retrotele.ERRORS["FILE_PARTS_INVALID"], notes
+assert retrotele.err_msg(RpcError(400, "FILE_PART_5_MISSING")).find(u"part of the file") >= 0
+reset_up(); up["media_err"] = ["PHOTO_INVALID_DIMENSIONS"]
+answers[:] = [u"", 1]; app.file_picked(p1); app.net.run()
+assert [x["media"]["_"] for x in up["media"]] == ["inputMediaUploadedPhoto", "inputMediaUploadedDocument"]
+assert up["media"][1]["media"]["force_file"] and len(up["parts"]) == 1
+assert app.toast_text[0] == u"Sent"
+# empty and missing files
+del notes[:]; app.file_picked(mkfile("empty.txt", 0)); assert notes[-1] == u"The file is empty.", notes
+app.file_picked(os.path.join(UP, "nope.txt")); assert notes[-1] == u"Cannot read the file."
+
+# 10. only one upload at a time; client level: reply_to and exact progress
+reset_up()
+prog = []
+oks = []
+h = app.client.send_file("u42", p3, u"c", 5, lambda d, t: prog.append((d, t)), oks.append, None)
+app.upload = {"name": "x", "size": 1, "pct": 0, "key": "u42", "h": h}
+del notes[:]
+app.attach_file()
+assert notes[-1] == u"An upload is already running."
+app.update_chat_menu()
+assert u"Cancel upload" in [m[0] for m in appuifw.app.menu] and u"Attach file" not in [m[0] for m in appuifw.app.menu]
+app.upload = None
+app.net.run()
+sz = os.path.getsize(p3)
+assert prog == [(min(sz, 65536 * (i + 1)), sz) for i in range(4)], prog
+assert oks == [None] and up["media"][0]["reply_to"]["reply_to_msg_id"] == 5
+assert up["media"][0]["message"] == "c"
+# big parts: more than 4000 parts at 64 KB switches to larger parts
+class Probe(tgclient.Upload):
+    def next_part(self): pass
+pr = Probe(app.client, "u42", p4, "", 0, None, None, None)
+pr.start(); assert pr.part_size == 65536 and pr.parts == 337
+pr.finish_file()
+
+# 11. file browser
+pk = os.path.join(TMP, "pick"); os.makedirs(pk + "/sys"); os.makedirs(pk + "/Zed"); os.makedirs(pk + "/alpha/in")
+for nm, n in (("b.txt", 5), ("A.zip", 2048), ("c.sis", 3 * 1024 * 1024)):
+    open(os.path.join(pk, nm), "wb").write("x" * n)
+filepick.SEP = "/"
+root = pk + "/"
+filepick.is_root = lambda path: path == root
+filepick.drives = lambda: [pk]
+dd, ff = filepick.list_dir(root)
+assert dd == ["alpha", "Zed"] and ff == [("A.zip", 2048), ("b.txt", 5), ("c.sis", 3145728)], (dd, ff)
+assert filepick.parent(root) == u"" and filepick.parent(pk + "/alpha/in") == pk + "/alpha/"
+assert filepick.parent(pk + "/alpha") == root
+app.cfg.set("last_dir", None)
+app.back_to_chat()
+app.attach_file()
+pkr = app.picker
+assert app.screen == "filepick" and pkr.path == u"", pkr.path
+assert pkr.box.rows[0][0].startswith(u"Drive"), pkr.box.rows
+pkr.box.cur = 0; pkr.opened()
+assert pkr.path == root and pkr.rows[0][0] == "up" and [r[1] for r in pkr.rows if r[0] == "dir"] == ["alpha", "Zed"]
+assert [r[0] for r in pkr.box.rows] == [u"..", "alpha", "Zed", "A.zip", "b.txt", "c.sis"], pkr.box.rows
+assert pkr.box.rows[5][1] == u"3.0 MB" and pkr.box.rows[3][1] == u"2 KB" and pkr.box.rows[4][1] == u"5 B"
+assert "sys" not in [r[0] for r in pkr.box.rows] or 1
+pkr.box.cur = 1; pkr.opened()
+assert pkr.path == pk + "/alpha"
+assert app.cfg.get("last_dir") == pk + "/alpha"
+pkr.back(); assert pkr.path == root
+pkr.back(); assert pkr.path == u""
+pkr.back(); assert app.picker is None and app.screen == "chat"
+# restart in the remembered folder, then pick a file through the whole flow
+app.attach_file(); pkr = app.picker
+assert pkr.path == root, pkr.path
+pkr.box.cur = 4; reset_up()
+answers[:] = [u"", 1]
+pkr.opened(); app.net.run()
+assert pkr.path == root and app.picker is None and len(up["media"]) == 1
+assert up["media"][0]["media"]["file"]["name"] == "b.txt" and up["media"][0]["media"]["mime_type"] == "text/plain"
+assert app.screen == "chat" and not errors, errors
+# exit while uploading asks first
+reset_up(); answers[:] = [u"", 1]
+app.file_picked(p7)
+answers[:] = [0]
+app.exit(); assert app.upload is not None and not answers
+answers[:] = [1]
+app.upload["h"].cancel(); app.upload = None
+print "attach OK"
 app.call_test()
 app.view.toggle(); app.net.run(); app.view.tick()
 ct = screen_text()

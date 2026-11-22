@@ -33,7 +33,7 @@ phone.acceptCall phone.confirmCall phone.sendSignalingData
 messages.getFullChat channels.getFullChannel account.updateNotifySettings
 channels.readHistory channels.getMessages
 updates.getState updates.getDifference updates.getChannelDifference
-upload.getFile
+upload.getFile upload.saveFilePart upload.saveBigFilePart messages.sendMedia
 """.split()
 
 LINE = re.compile(r"^([a-zA-Z0-9_.]+)#([0-9a-f]+)\s*(.*?)\s*=\s*([^;]+);")

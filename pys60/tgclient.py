@@ -9,6 +9,7 @@ import binascii
 import tgcrypto
 import tl
 import mtproto
+import fileinfo
 from mtproto import RpcError
 
 # ui object (the app) gets:
@@ -944,6 +945,14 @@ class Client:
             f["reply_to"] = {"_": "inputReplyToMessage", "reply_to_msg_id": reply_to}
         self.call(f, ok, on_err)
 
+    def send_file(self, key, path, caption, reply_to, progress, on_ok, on_err):
+        """Uploads the file at path and sends it to chat key. Returns an Upload
+        (call cancel() to stop). progress(done_bytes, total_bytes) follows every
+        acknowledged part, on_ok(None) when sent, on_err(RpcError) on failure."""
+        u = Upload(self, key, path, caption, reply_to, progress, on_ok, on_err)
+        u.start()
+        return u
+
     def edit_text(self, key, mid, text, on_ok, on_err):
         if type(text) is type(u""):
             text = text.encode("utf-8")
@@ -1482,6 +1491,207 @@ STRIPPED_HEADER = (
     "5a636465666768696a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6"
     "a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9ea"
     "f2f3f4f5f6f7f8f9faffda000c03010002110311003f00")
+
+
+PART_SIZE = 65536          # multiple of 1024, divides 512 KB
+SMALL_LIMIT = 10 * 1024 * 1024
+PHOTO_LIMIT = 10 * 1024 * 1024
+MAX_FILE = 2000 * 1024 * 1024
+MAX_PARTS = 4000
+PHOTO_FALLBACK = ("PHOTO_INVALID_DIMENSIONS", "PHOTO_SAVE_FILE_INVALID",
+                  "IMAGE_PROCESS_FAILED", "PHOTO_EXT_INVALID", "MEDIA_INVALID")
+
+
+class Upload:
+    """One file upload: parts go one at a time (each acknowledged before the
+    next is read, so only one part is ever in memory), then messages.sendMedia."""
+
+    def __init__(self, client, key, path, caption, reply_to, progress, on_ok, on_err):
+        self.c = client
+        self.key = key
+        self.path = path
+        self.caption = caption or ""
+        if type(self.caption) is type(u""):
+            self.caption = self.caption.encode("utf-8")
+        self.reply_to = reply_to
+        self.progress = progress
+        self.on_ok = on_ok
+        self.on_err = on_err
+        self.cancelled = 0
+        self.finished = 0
+        self.f = None
+        self.md5 = None
+        self.index = 0
+        self.done = 0
+        self.total = 0
+        self.fid = 0
+        self.tries = 0
+        self.data = None
+        self.name = fileinfo.base_name(path)
+        if type(self.name) is type(u""):
+            self.name = self.name.encode("utf-8")
+
+    def cancel(self):
+        self.cancelled = 1
+        self.finish_file()
+
+    def finish_file(self):
+        self.data = None
+        if self.f is not None:
+            try:
+                self.f.close()
+            except:
+                pass
+            self.f = None
+
+    def fail(self, e):
+        self.finish_file()
+        if self.cancelled or self.finished:
+            return
+        self.finished = 1
+        self.on_err(e)
+
+    def start(self):
+        import os
+        try:
+            self.total = int(os.path.getsize(self.path))
+            self.f = open(self.path, "rb")
+        except:
+            self.fail(RpcError(-4, "cannot read file"))
+            return
+        if self.total <= 0:
+            self.fail(RpcError(-4, "FILE_EMPTY"))
+            return
+        if self.total > MAX_FILE:
+            self.fail(RpcError(-4, "FILE_TOO_BIG"))
+            return
+        self.part_size = PART_SIZE
+        while (self.total + self.part_size - 1) / self.part_size > MAX_PARTS:
+            self.part_size = self.part_size * 2
+        self.parts = int((self.total + self.part_size - 1) / self.part_size)
+        self.big = self.total > SMALL_LIMIT
+        if not self.big:
+            import md5
+            self.md5 = md5.new()
+        self.fid = tgcrypto.random_long()
+        self.next_part()
+
+    def next_part(self):
+        if self.cancelled:
+            return
+        try:
+            self.data = self.f.read(self.part_size)
+        except:
+            self.fail(RpcError(-4, "cannot read file"))
+            return
+        if not self.data:
+            self.fail(RpcError(-4, "FILE_PARTS_INVALID"))
+            return
+        if self.md5 is not None:
+            self.md5.update(self.data)
+        self.tries = 0
+        self.send_part()
+
+    def send_part(self):
+        if self.big:
+            func = {"_": "upload.saveBigFilePart", "file_id": self.fid,
+                    "file_part": self.index, "file_total_parts": self.parts,
+                    "bytes": self.data}
+        else:
+            func = {"_": "upload.saveFilePart", "file_id": self.fid,
+                    "file_part": self.index, "bytes": self.data}
+        self.c.call(func, self.part_ok, self.part_err)
+
+    def part_ok(self, res):
+        if self.cancelled:
+            return
+        self.done = self.done + len(self.data)
+        self.data = None
+        self.index = self.index + 1
+        if self.progress is not None:
+            try:
+                self.progress(self.done, self.total)
+            except:
+                pass
+        if self.index < self.parts:
+            self.next_part()
+            return
+        self.finish_file()
+        self.send_media(0)
+
+    def part_err(self, e):
+        if self.cancelled:
+            return
+        if self.tries < 3 and e.code not in (401, 403):
+            self.tries = self.tries + 1
+            self.c.log("upload part %d failed (%s), retry %d" % (self.index, e.message, self.tries))
+            self.c.net.later(0.5, self.retry)
+            return
+        self.fail(e)
+
+    def retry(self):
+        if not self.cancelled:
+            self.send_part()
+
+    def input_file(self):
+        if self.big:
+            return {"_": "inputFileBig", "id": self.fid, "parts": self.parts,
+                    "name": self.name}
+        return {"_": "inputFile", "id": self.fid, "parts": self.parts,
+                "name": self.name, "md5_checksum": self.md5.hexdigest()}
+
+    def media(self, as_document):
+        f = self.input_file()
+        if not as_document and fileinfo.is_image(self.name) and self.total <= PHOTO_LIMIT:
+            return {"_": "inputMediaUploadedPhoto", "file": f}
+        attrs = []
+        m = {"_": "inputMediaUploadedDocument", "file": f,
+             "mime_type": fileinfo.mime_for(self.name)}
+        if fileinfo.is_image(self.name):
+            m["force_file"] = 1
+        elif fileinfo.is_audio(self.name) or fileinfo.is_video(self.name):
+            info = fileinfo.media_info(self.name, self.path)
+            if fileinfo.is_audio(self.name):
+                a = {"_": "documentAttributeAudio", "duration": info["duration"]}
+                if info["title"]:
+                    a["title"] = info["title"].encode("utf-8")
+                if info["performer"]:
+                    a["performer"] = info["performer"].encode("utf-8")
+                attrs.append(a)
+            elif info["duration"] and info["w"] and info["h"]:
+                attrs.append({"_": "documentAttributeVideo",
+                              "duration": float(info["duration"]),
+                              "w": info["w"], "h": info["h"]})
+        attrs.append({"_": "documentAttributeFilename", "file_name": self.name})
+        m["attributes"] = attrs
+        return m
+
+    def send_media(self, as_document):
+        f = {"_": "messages.sendMedia", "peer": self.c.input_peer(self.key),
+             "media": self.media(as_document), "message": self.caption,
+             "random_id": tgcrypto.random_long()}
+        if self.reply_to:
+            f["reply_to"] = {"_": "inputReplyToMessage", "reply_to_msg_id": self.reply_to}
+        self.c.call(f, self.sent_ok, lambda e, self=self, d=as_document: self.sent_err(e, d))
+
+    def sent_ok(self, res):
+        if self.cancelled or self.finished:
+            return
+        self.finished = 1
+        try:
+            self.c.handle_updates(res)
+        except:
+            self.c.log("update error: " + err_text())
+        self.on_ok(None)
+
+    def sent_err(self, e, as_document):
+        if self.cancelled:
+            return
+        if not as_document and e.message in PHOTO_FALLBACK and \
+                fileinfo.is_image(self.name):
+            self.send_media(1)       # not a usable photo: send it as a file
+            return
+        self.fail(e)
 
 
 def stripped_to_jpeg(s):
