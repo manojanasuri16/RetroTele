@@ -1,0 +1,18 @@
+// tgcall.pyd: live audio (record + play PCM streams) for RetroTele call tests.
+TARGET        tgcall.pyd
+TARGETTYPE    dll
+UID           0x1000008d 0xE7A3D5C5
+CAPABILITY    NetworkServices LocalServices ReadUserData WriteUserData UserEnvironment
+VENDORID      0
+
+NOSTRICTDEF
+
+
+SYSTEMINCLUDE \epoc32\include
+SYSTEMINCLUDE \epoc32\include\libc
+SYSTEMINCLUDE \epoc32\include\python
+
+SOURCEPATH    ..
+SOURCE        tgcall.cpp
+
+LIBRARY       python222.lib euser.lib mediaclientaudioinputstream.lib mediaclientaudiostream.lib

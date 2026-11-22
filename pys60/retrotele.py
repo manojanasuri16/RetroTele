@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.7.4"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.7.5"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -1726,7 +1726,8 @@ class App:
         fm = u"Fast mode: on"
         if self.cfg.get("verify", default) == "1":
             fm = u"Fast mode: off (full check)"
-        items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder", ap, fm]
+        items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder", ap, fm,
+                 u"Call test (experimental)"]
         i = appuifw.popup_menu(items, u"Settings")
         if i == 0:
             if self.setup_ap(1):
@@ -1740,6 +1741,8 @@ class App:
                 self.client.logout(lambda self=self: (self.done_wait(), self.logged_out()))
         elif i == 3:
             appuifw.note(u"Log: E:\\retrotele_log.txt, data: " + to_u(self.dir), "info")
+        elif i == 6:
+            self.call_test()
         elif i == 5:
             if self.cfg.get("verify", default) == "1":
                 self.cfg.set("verify", "0")
@@ -1762,6 +1765,22 @@ class App:
             self.cfg.save()
             self.redraw()
 
+    def call_test(self):
+        self.screen = "calltest"
+        self.set_screen("large")
+        v = tgui.CallTestView(self)
+        self.view = v
+        v.show()
+        appuifw.app.menu = [(u"Start / stop echo test", v.toggle),
+                            (u"Back", self.close_call_test)]
+        appuifw.app.exit_key_handler = self.close_call_test
+
+    def close_call_test(self):
+        v = self.view
+        if isinstance(v, tgui.CallTestView):
+            v.stop()
+        self.show_chats()
+
     def about(self):
         engine = u"Python crypto"
         if tgcrypto.NATIVE:
@@ -1775,6 +1794,8 @@ class App:
         self.hash_job = None
         if isinstance(self.view, tgui.PlayerView):
             self.view.close()
+        if isinstance(self.view, tgui.CallTestView):
+            self.view.stop()
         if self.client is not None and self.client.me is not None:
             self.save_cache()
         self.net.cancel_all()

@@ -1580,6 +1580,119 @@ class PlayerView(CanvasView):
                fill=0x8CA2B5, font=font("small"))
 
 
+# ---------------------------------------------------------------- call test
+
+class CallTestView(CanvasView):
+    """Step 1 of Telegram calls: live microphone -> earpiece loopback with a
+    delay, showing whether the phone keeps up (rates, gaps, errors)."""
+
+    def __init__(self, app):
+        CanvasView.__init__(self, app)
+        self.running = 0
+        self.stats = None
+        self.prev = None
+        self.rate_in = 0
+        self.rate_out = 0
+        self.ticks = 0
+        self.error = u""
+        self.lines = []          # extra result lines (benchmarks)
+
+    def key(self, k):
+        if k in ("select", "5"):
+            self.toggle()
+
+    def toggle(self):
+        try:
+            import tgcall
+        except:
+            self.error = u"tgcall module missing"
+            self.draw()
+            return
+        if self.running:
+            tgcall.stop()
+            self.running = 0
+            self.app.log("call test: stopped")
+        else:
+            try:
+                tgcall.start(16000, 500, 70)
+                self.running = 1
+                self.prev = None
+                self.app.log("call test: started 16 kHz, 500 ms delay")
+                self.tick()
+            except:
+                import sys
+                self.error = to_u(str(sys.exc_info()[1]))
+        self.draw()
+
+    def stop(self):
+        if self.running:
+            try:
+                import tgcall
+                tgcall.stop()
+            except:
+                pass
+            self.running = 0
+
+    def tick(self):
+        if not self.running or self.app.view is not self:
+            return
+        try:
+            import tgcall
+            st = tgcall.stats()
+        except:
+            st = None
+        if st is not None:
+            if self.prev is not None:
+                self.rate_in = st[1] - self.prev[1]
+                self.rate_out = st[2] - self.prev[2]
+            self.prev = st
+            self.stats = st
+            self.ticks = self.ticks + 1
+            self.app.log("call test: state %d rec %d play %d bufs %d gaps %d rerr %d "
+                         "werr %d last %d first_rec %dms first_play %dms fifo %d peak %d "
+                         "in %d B/s out %d B/s" % (st + (self.rate_in, self.rate_out)))
+        self.draw()
+        self.app.net.later(1, self.tick)
+
+    def paint(self, g, w, h):
+        g.clear(WHITE)
+        H = self.HEADER_H
+        g.rectangle((0, 0, w, H), fill=BLUE)
+        g.text((12, 30), u"Call test", fill=WHITE, font=font("title"))
+        y = H + 22
+        if not self.running:
+            intro = [u"Echo test: speak and you hear yourself after half a second, "
+                     u"the way a call would. It shows if the phone can record and play "
+                     u"live audio.", u"", u"Centre key: start / stop"]
+            for t in intro:
+                for l in wrap(g, t, "text", w - 24, 6):
+                    g.text((12, y), l, fill=TEXT, font=font("text"))
+                    y = y + 19
+        st = self.stats
+        if st is not None:
+            states = {0: u"opening audio...", 1: u"running", 2: u"stopped", 3: u"failed"}
+            rows = [(u"Status", states.get(st[0], u"?")),
+                    (u"Recording", u"%d B/s (want 32000)" % self.rate_in),
+                    (u"Playing", u"%d B/s" % self.rate_out),
+                    (u"Gaps", u"%d" % st[4]),
+                    (u"Errors", u"read %d, write %d, last %d" % (st[5], st[6], st[7])),
+                    (u"Start", u"mic %d ms, speaker %d ms" % (st[8], st[9]))]
+            for label, value in rows:
+                g.text((12, y), label, fill=GREY, font=font("small"))
+                g.text((90, y), value, fill=TEXT, font=font("small"))
+                y = y + 17
+            lvl = min(st[11] * (w - 24) / 32767, w - 24)
+            rrect(g, 12, y, w - 12, y + 8, 3, LINE)
+            rrect(g, 12, y, 12 + lvl, y + 8, 3, GREEN)
+            y = y + 22
+        for l in self.lines:
+            g.text((12, y), l, fill=TEXT, font=font("small"))
+            y = y + 17
+        if self.error:
+            g.text((12, h - 10), fit(g, self.error, "small", w - 24), fill=0xC0392B,
+                   font=font("small"))
+
+
 # ---------------------------------------------------------------- profile
 
 class ProfileView(CanvasView):

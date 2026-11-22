@@ -1,0 +1,5 @@
+EXPORTS
+	inittgcall @ 1 NONAME
+	_ZTI9CLoopback @ 2 NONAME DATA 40
+	_ZTV9CLoopback @ 3 NONAME DATA 84
+

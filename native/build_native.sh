@@ -26,3 +26,12 @@ OUT="$EPOCROOT/epoc32/release/gcce/urel/retrotele_rscfix.exe"
 [ -f "$OUT" ] || { echo "rscfix build failed"; exit 1; }
 cp "$OUT" "$HERE/../pys60/native/retrotele_rscfix.exe"
 ls -la "$HERE/../pys60/native/retrotele_rscfix.exe"
+
+# tgcall.pyd: live audio for the call experiments (Settings > Call test)
+cd "$HERE/tgcall/group"
+bldmake bldfiles >/dev/null 2>&1
+abld build gcce urel 2>&1 | grep -iE "error" || true
+OUT="$EPOCROOT/epoc32/release/gcce/urel/tgcall.pyd"
+[ -f "$OUT" ] || { echo "tgcall build failed"; exit 1; }
+cp "$OUT" "$HERE/../pys60/native/tgcall.pyd"
+ls -la "$HERE/../pys60/native/tgcall.pyd"

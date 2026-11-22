@@ -44,6 +44,12 @@ if [ -f native/tgnative.pyd ] && [ "$NATIVE" != 0 ]; then
   EXTRAS="--extrasdir=extras"
   echo "including native/tgnative.pyd"
 fi
+if [ -f native/tgcall.pyd ]; then
+  mkdir -p build/app/extras/sys/bin
+  cp native/tgcall.pyd build/app/extras/sys/bin/
+  EXTRAS="--extrasdir=extras"
+  echo "including native/tgcall.pyd (call test)"
+fi
 if [ -f native/retrotele_rscfix.exe ]; then
   mkdir -p build/app/extras/sys/bin build/app/extras/resource/retrotele
   cp native/retrotele_rscfix.exe build/app/extras/sys/bin/

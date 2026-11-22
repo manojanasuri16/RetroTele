@@ -357,7 +357,14 @@ assert [d["key"] for d in app2.dialogs] == [d["key"] for d in app.dialogs][:150]
 assert app2.client.peer_name("u42") == "Alice B"
 assert not errors, errors
 assert open(TMP + "/session.txt").read().find("user_id=7") >= 0
+app.call_test()
+app.view.toggle(); app.net.run(); app.view.tick()
+ct = screen_text()
+print "call test:", ct
+assert ct.find(u"32000 B/s") >= 0 and ct.find(u"running") >= 0, ct
 app.exit()
+import tgcall
+assert not tgcall._state["on"]
 assert open(TMP + "/cache.bin").read()
 print "flow OK"
 shutil.rmtree(TMP)
