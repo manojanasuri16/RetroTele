@@ -253,5 +253,25 @@ snap("10-player")
 app.close_player()
 app.view_profile(); app.net.run(); app.view.draw(); app.net.run()
 snap("9-profile")
+import filepick
+ft = os.path.join(TMP, "ft") + "/"
+os.makedirs(ft + "Images"); os.makedirs(ft + "Sounds"); os.makedirs(ft + "A very long folder name for the test")
+for nm, n in (("holiday.jpg", 2400000), ("song.mp3", 5100000), ("clip.mp4", 31000000),
+              ("backup.zip", 880000), ("notes.txt", 1200), ("RetroTele.sis", 640000), ("data.bin", 90)):
+    open(ft + nm, "wb").write("x" * 10)
+    os.utime(ft + nm, (NOW - 86400 * 3, NOW - 86400 * 3))
+filepick.SEP = "/"
+filepick.is_root = lambda p: p == ft
+filepick.drives = lambda: [u"C:", u"E:", u"Z:"]
+filepick.drive_path = lambda d: ft
+filepick.free_space = lambda: {u"C:": 123 * 1048576, u"E:": 3500 * 1048576}
+app.screen = "filepick"
+fv = filepick.FilePickView(app, u"", lambda p: None, lambda: None)
+app.view = fv; fv.show()
+fv.free = filepick.free_space()
+snap("11-filepick-drives")
+fv.key("down"); fv.key("select")
+fv.cur = 4; fv.msg = u""
+snap("12-filepick-folder")
 json.dump(screens, open(os.environ["RT_OUT"] + "/screens.json", "w"))
 shutil.rmtree(TMP)

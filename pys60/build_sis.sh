@@ -72,12 +72,64 @@ ls -la dist
 
 # Video hardware probe (E:\retrotele_videoprobe.txt). Own package, own UID; not part of RetroTele.sis.
 if [ -f native/tgvidprobe.exe ]; then
-  rm -rf build/videoprobe && mkdir -p build/videoprobe/sys/bin
-  cp native/tgvidprobe.exe build/videoprobe/sys/bin/
-  $PY $ENS simplesis --uid=0xE7A3D5E4 --version=$VERSION --drive=C \
-    --caption="RetroTele video probe" --vendor=RetroTele \
+  rm -rf build/vidprobe_app && mkdir -p build/vidprobe_app/extras/sys/bin
+  cp native/tgvidprobe.exe build/vidprobe_app/extras/sys/bin/
+  cat > build/vidprobe_app/default.py <<'PYEOF'
+# RetroTele video probe: runs tgvidprobe.exe, waits for its report file.
+import e32
+import appuifw
+import os
+
+PATHS = ["E:\\retrotele_videoprobe.txt", "C:\\Data\\retrotele_videoprobe.txt"]
+
+
+def finished():
+    for p in PATHS:
+        try:
+            f = open(p, "r")
+            t = f.read()
+            f.close()
+        except:
+            continue
+        if t.find("probe end") >= 0:
+            return p
+    return None
+
+
+def main():
+    for p in PATHS:
+        try:
+            os.remove(p)
+        except:
+            pass
+    try:
+        e32.start_exe(u"tgvidprobe.exe", u"")
+    except:
+        appuifw.note(u"Cannot start tgvidprobe.exe", "error")
+        return
+    appuifw.note(u"Video probe running, please wait...", "info")
+    done = None
+    n = 0
+    while n < 180:
+        e32.ao_sleep(1)
+        done = finished()
+        if done is not None:
+            break
+        n = n + 1
+    if done is None:
+        appuifw.note(u"Probe did not finish. Look for retrotele_videoprobe.txt", "error")
+    else:
+        appuifw.note(u"Done: " + unicode(done), "info")
+
+
+main()
+PYEOF
+  $PY $ENS py2sis --uid=0xE7A3D5E5 --appname="RetroTele video probe" --version=$VERSION \
+    --caption="RetroTele video probe" --shortcaption="Video probe" --vendor=RetroTele \
+    --caps=NetworkServices+LocalServices+ReadUserData+WriteUserData+UserEnvironment \
+    --drive=C --extrasdir=extras \
     --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
-    build/videoprobe dist/RetroTele-videoprobe.sis </dev/null >>build/simplesis.log
+    build/vidprobe_app dist/RetroTele-videoprobe.sis </dev/null >build/vidprobe.log
   echo "built dist/RetroTele-videoprobe.sis"
 fi
 

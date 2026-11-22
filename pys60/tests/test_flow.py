@@ -271,7 +271,7 @@ def screen_text():
 
 errors = []
 app = retrotele.App()
-app.log = lambda m: (errors.append(m) if (str(m).startswith("paint") or str(m).startswith("error")) else None)
+app.log = lambda m: (errors.append(m) if (str(m).startswith("paint") or str(m).startswith("error")) else (sys.stderr.write(str(m) + "\n") if "File" in str(m) else None))
 app.net = FakeNet()
 app.dir = TMP + os.sep
 app.avatars = retrotele.tgui.Avatars(app, TMP + "/av.jpg")
@@ -736,36 +736,43 @@ for nm, n in (("b.txt", 5), ("A.zip", 2048), ("c.sis", 3 * 1024 * 1024)):
     open(os.path.join(pk, nm), "wb").write("x" * n)
 filepick.SEP = "/"
 root = pk + "/"
-filepick.is_root = lambda path: path == root
-filepick.drives = lambda: [pk]
+filepick.is_root = lambda path: path == root or path == TMP + "/pickC/"
+filepick.drives = lambda: [u"C:", u"E:", u"Z:"]
+filepick.drive_path = lambda d: {u"C:": TMP + "/pickC/", u"E:": root}[d]
 dd, ff = filepick.list_dir(root)
 assert dd == ["alpha", "Zed"] and ff == [("A.zip", 2048), ("b.txt", 5), ("c.sis", 3145728)], (dd, ff)
 assert filepick.parent(root) == u"" and filepick.parent(pk + "/alpha/in") == pk + "/alpha/"
 assert filepick.parent(pk + "/alpha") == root
+os.makedirs(TMP + "/pickC")
 app.cfg.set("last_dir", None)
 app.back_to_chat()
 app.attach_file()
 pkr = app.picker
 assert app.screen == "filepick" and pkr.path == u"", pkr.path
-assert pkr.box.rows[0][0].startswith(u"Drive"), pkr.box.rows
-pkr.box.cur = 0; pkr.opened()
-assert pkr.path == root and pkr.rows[0][0] == "up" and [r[1] for r in pkr.rows if r[0] == "dir"] == ["alpha", "Zed"]
-assert [r[0] for r in pkr.box.rows] == [u"..", "alpha", "Zed", "A.zip", "b.txt", "c.sis"], pkr.box.rows
-assert pkr.box.rows[5][1] == u"3.0 MB" and pkr.box.rows[3][1] == u"2 KB" and pkr.box.rows[4][1] == u"5 B"
-assert "sys" not in [r[0] for r in pkr.box.rows] or 1
-pkr.box.cur = 1; pkr.opened()
-assert pkr.path == pk + "/alpha"
-assert app.cfg.get("last_dir") == pk + "/alpha"
-pkr.back(); assert pkr.path == root
-pkr.back(); assert pkr.path == u""
-pkr.back(); assert app.picker is None and app.screen == "chat"
+assert [e[1] for e in pkr.entries] == [u"C:", u"E:"], pkr.entries
+pkr.draw()
+pkr.key("down"); pkr.key("down"); assert pkr.cur == 0   # wraps
+pkr.key("down"); pkr.key("select")
+assert pkr.path == root and [e[1] for e in pkr.entries] == ["alpha", "Zed", "A.zip", "b.txt", "c.sis"], pkr.entries
+pkr.draw()
+assert pkr.stat(pk + "/c.sis")[0] == 3 * 1024 * 1024
+pkr.key("5")   # alpha
+assert pkr.path == pk + "/alpha/" and app.cfg.get("last_dir") == pk + "/alpha/"
+pkr.key("left"); assert pkr.path == root and pkr.entries[pkr.cur][1] == "alpha"
+pkr.cycle_sort(); assert pkr.sort == 1 and [e[1] for e in pkr.entries][2:] == ["c.sis", "A.zip", "b.txt"], pkr.entries
+pkr.cycle_sort(); pkr.cycle_sort(); assert pkr.sort == 0
+pkr.goto([pk + "/nonexistent/"]); assert pkr.msg and pkr.path == root
+pkr.key("6"); assert pkr.path == pk + "/alpha/"
+pkr.key("left"); assert pkr.path == root
+pkr.key("left"); assert pkr.path == u"" and app.picker is not None
+pkr.key("left"); assert app.picker is None and app.screen == "chat"
 # restart in the remembered folder, then pick a file through the whole flow
 app.attach_file(); pkr = app.picker
 assert pkr.path == root, pkr.path
-pkr.box.cur = 4; reset_up()
+pkr.cur = 3; reset_up()
 answers[:] = [u"", 1]
-pkr.opened(); app.net.run()
-assert pkr.path == root and app.picker is None and len(up["media"]) == 1
+pkr.key("select"); app.net.run()
+assert app.picker is None and len(up["media"]) == 1
 assert up["media"][0]["media"]["file"]["name"] == "b.txt" and up["media"][0]["media"]["mime_type"] == "text/plain"
 assert app.screen == "chat" and not errors, errors
 # exit while uploading asks first

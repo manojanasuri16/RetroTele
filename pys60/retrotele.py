@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.13.0"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.13.1"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -1571,8 +1571,9 @@ class App:
             start = u""
         self.screen = "filepick"
         self.set_screen("normal")
-        self.picker = filepick.FilePicker(start, self.file_picked, self.pick_cancelled,
-                                          self.remember_dir)
+        self.picker = filepick.FilePickView(self, start, self.file_picked,
+                                            self.pick_cancelled, self.remember_dir)
+        self.view = self.picker
         self.picker.show()
 
     def remember_dir(self, path):
