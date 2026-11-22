@@ -69,3 +69,14 @@ $PY tools/py2sis_rscfix.py "$(dirname $ENS)" $OPTS --drive=any build/app dist/Re
 grep "rscfix" build/py2sis.log || true
 echo "built dist/RetroTele.sis"
 ls -la dist
+
+# LOCAL-ONLY bundle: embeds Nokia's VoIP Audio Services (VoIPAudioSrvc SISX) so
+# one file installs everything. Nokia's licence forbids distributing that file,
+# so this package is NOT published (dist/ is git-ignored and never uploaded).
+# Set VOIP_SIS=/path/to/VoIPAudioSrvc_3132_0x10207b9e.SISX to enable.
+VOIP_SIS=${VOIP_SIS:-$(cd .. && pwd)/../symbian-sdk/apipack/x/voip/InstallToDevice/VoIPAudioSrvc_3132_0x10207b9e.SISX}
+if [ -f "$VOIP_SIS" ]; then
+  $PY $ENS mergesis --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
+    dist/RetroTele.sis "$VOIP_SIS" dist/RetroTele-full.sis </dev/null >build/mergesis.log 2>&1
+  echo "built dist/RetroTele-full.sis (local only: contains Nokia's VoIP service)"
+fi
