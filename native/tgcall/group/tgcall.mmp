@@ -18,4 +18,4 @@ SOURCEPATH    ..
 SOURCE        tgcall.cpp loopback.cpp
 
 STATICLIBRARY tgopus.lib
-LIBRARY       python222.lib euser.lib estlib.lib mediaclientaudioinputstream.lib mediaclientaudiostream.lib
+LIBRARY       python222.lib euser.lib estlib.lib mediaclientaudioinputstream.lib mediaclientaudiostream.lib audiooutputrouting.lib

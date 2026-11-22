@@ -126,10 +126,14 @@ static PyObject* tg_stats(PyObject* /*self*/, PyObject* /*args*/)
         Py_INCREF(Py_None);
         return Py_None;
     }
-    return Py_BuildValue("(iiiiiiiiiiii)", e->iState, e->iRecorded, e->iPlayed,
+    PyObject* r = Py_BuildValue("(iiiiiiiiiiiiiii)", e->iState, e->iRecorded, e->iPlayed,
                          e->iRecordBuffers, e->iSilence, e->iReadErrors,
                          e->iWriteErrors, e->iLastError, e->iFirstRecordMs,
-                         e->iFirstPlayMs, e->FifoBytes(), e->iMaxLevel);
+                         e->iFirstPlayMs, e->FifoBytes(), e->iMaxLevel,
+                         e->iPeakIn, e->iPeakOut, e->iRouted);
+    e->iPeakIn = 0;                  /* per-call (per-second) peaks */
+    e->iPeakOut = 0;
+    return r;
 }
 
 /* opus_bench(rate, complexity, bitrate, frames) ->

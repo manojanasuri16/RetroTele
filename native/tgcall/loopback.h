@@ -7,6 +7,7 @@
 #include <mdaaudioinputstream.h>
 #include <mdaaudiooutputstream.h>
 #include <mda/common/audio.h>
+#include <audiooutput.h>
 
 const TInt KFrameMs = 20;
 const TInt KMaxFifo = 64000;        /* bytes: 2 s at 16 kHz mono */
@@ -32,6 +33,9 @@ public:
     TInt iFirstRecordMs;
     TInt iFirstPlayMs;
     TInt iMaxLevel;
+    TInt iPeakIn;            /* loudest sample since the last stats read */
+    TInt iPeakOut;
+    TInt iRouted;            /* 1 loudspeaker forced, <0 error */
 
     /* MMdaAudioInputStreamCallback */
     void MaiscOpenComplete(TInt aError);
@@ -68,6 +72,9 @@ private:
     TBool iPlaying;          /* delay reached once */
     TBool iStopping;
     TBool iInOpened;
+    TInt iBeepLeft;          /* beep samples still to play at start */
+    TInt iBeepPos;
+    CAudioOutput* iRoute;
     TTime iStart;
 };
 

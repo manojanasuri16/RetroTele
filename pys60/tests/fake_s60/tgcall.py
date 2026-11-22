@@ -15,7 +15,7 @@ def stats():
         return None
     _state["n"] = _state["n"] + 1
     n = _state["n"]
-    return (1, 32000 * n, 31000 * n, 50 * n, 0, 0, 0, 0, 120, 640, 16000, 9000)
+    return (1, 32000 * n, 31000 * n, 50 * n, 0, 0, 0, 0, 120, 640, 16000, 9000, 5000, 4800, 1)
 
 
 def opus_selftest():

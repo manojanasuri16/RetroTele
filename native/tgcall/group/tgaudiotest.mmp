@@ -12,4 +12,4 @@ USERINCLUDE   ..
 SOURCEPATH    ..
 SOURCE        audiotest.cpp loopback.cpp
 
-LIBRARY       euser.lib efsrv.lib mediaclientaudioinputstream.lib mediaclientaudiostream.lib
+LIBRARY       euser.lib efsrv.lib mediaclientaudioinputstream.lib mediaclientaudiostream.lib audiooutputrouting.lib

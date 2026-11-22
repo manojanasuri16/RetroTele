@@ -47,10 +47,13 @@ public:
         CLoopback* e = iLoop;
         TBuf8<256> line;
         line.Format(_L8("t %d state %d rec %d play %d bufs %d gaps %d rerr %d werr %d last %d "
-                        "first_rec %d first_play %d fifo %d peak %d\n"),
+                        "first_rec %d first_play %d fifo %d peak %d in %d out %d route %d\n"),
                     iTicks, e->iState, e->iRecorded, e->iPlayed, e->iRecordBuffers,
                     e->iSilence, e->iReadErrors, e->iWriteErrors, e->iLastError,
-                    e->iFirstRecordMs, e->iFirstPlayMs, e->FifoBytes(), e->iMaxLevel);
+                    e->iFirstRecordMs, e->iFirstPlayMs, e->FifoBytes(), e->iMaxLevel,
+                    e->iPeakIn, e->iPeakOut, e->iRouted);
+        e->iPeakIn = 0;
+        e->iPeakOut = 0;
         Write(line);
         if (iTicks >= iSeconds) {
             iTimer->Cancel();

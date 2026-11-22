@@ -1679,6 +1679,8 @@ class CallTestView(CanvasView):
             out.append(u"Recorded %s B, played %s B" % (d.get("rec", "?"), d.get("play", "?")))
             out.append(u"Gaps %s, write errors %s, last %s" % (d.get("gaps", "?"),
                        d.get("werr", "?"), d.get("last", "?")))
+            out.append(u"Levels: mic %s, speaker %s; route %s" % (d.get("in", "?"),
+                       d.get("out", "?"), d.get("route", "?")))
         self.lines = out
         self.draw()
         if text.find("tgaudiotest end") < 0 and self.helper_ticks < 40:
@@ -1753,7 +1755,8 @@ class CallTestView(CanvasView):
             self.ticks = self.ticks + 1
             self.app.log("call test: state %d rec %d play %d bufs %d gaps %d rerr %d "
                          "werr %d last %d first_rec %dms first_play %dms fifo %d peak %d "
-                         "in %d B/s out %d B/s" % (st + (self.rate_in, self.rate_out)))
+                         "mic %d spk %d route %d in %d B/s out %d B/s" %
+                         (tuple(st[:15]) + (self.rate_in, self.rate_out)))
         self.draw()
         self.app.net.later(1, self.tick)
 
@@ -1764,9 +1767,9 @@ class CallTestView(CanvasView):
         g.text((12, 30), u"Call test", fill=WHITE, font=font("title"))
         y = H + 22
         if not self.running and self.stats is None and not self.lines:
-            intro = [u"Echo test: speak and you hear yourself after half a second, "
-                     u"the way a call would. It shows if the phone can record and play "
-                     u"live audio.", u"Centre key: start / stop. Options: Opus speed test."]
+            intro = [u"Echo test: first a short beep, then you hear yourself half a "
+                     u"second later, the way a call would.",
+                     u"Centre key: start / stop. Options: Opus speed test, helper test."]
             for t in intro:
                 for l in wrap(g, t, "text", w - 24, 6):
                     g.text((12, y), l, fill=TEXT, font=font("text"))
@@ -1780,11 +1783,20 @@ class CallTestView(CanvasView):
                     (u"Gaps", u"%d" % st[4]),
                     (u"Errors", u"read %d, write %d, last %d" % (st[5], st[6], st[7])),
                     (u"Start", u"mic %d ms, speaker %d ms" % (st[8], st[9]))]
+            if len(st) >= 15:
+                route = u"loudspeaker"
+                if st[14] != 1:
+                    route = u"default (%d)" % st[14]
+                rows.append((u"Levels", u"mic %d, speaker %d" % (st[12], st[13])))
+                rows.append((u"Output", route))
             for label, value in rows:
                 g.text((12, y), label, fill=GREY, font=font("small"))
                 g.text((90, y), value, fill=TEXT, font=font("small"))
                 y = y + 17
-            lvl = min(st[11] * (w - 24) / 32767, w - 24)
+            peak = st[11]
+            if len(st) >= 15:
+                peak = st[12]
+            lvl = min(peak * (w - 24) / 32767, w - 24)
             rrect(g, 12, y, w - 12, y + 8, 3, LINE)
             rrect(g, 12, y, 12 + lvl, y + 8, 3, GREEN)
             y = y + 22

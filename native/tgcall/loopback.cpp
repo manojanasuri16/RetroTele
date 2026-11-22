@@ -1,6 +1,9 @@
 /* loopback.cpp: the echo engine (see loopback.h). */
 #include "loopback.h"
 
+/* one period of a 500 Hz tone at 16 kHz (32 samples), for the start beep */
+static const TInt16 KBeep[32] = {0, 1756, 3444, 5000, 6364, 7483, 8315, 8827, 9000, 8827, 8315, 7483, 6364, 5000, 3444, 1756, 0, -1756, -3444, -5000, -6364, -7483, -8315, -8827, -9000, -8827, -8315, -7483, -6364, -5000, -3444, -1756};
+
 static TInt RateCap(TInt aRate)
 {
     switch (aRate) {
@@ -37,6 +40,7 @@ CLoopback* CLoopback::NewL(TInt aRate, TInt aDelayMs, TInt aVolume)
 void CLoopback::ConstructL()
 {
     iFifo = (TUint8*)User::AllocL(KMaxFifo);
+    iBeepLeft = iRate / 2;          /* 0.5 s beep before the echo starts */
     iStart.HomeTime();
     iFirstRecordMs = -1;
     iFirstPlayMs = -1;
@@ -68,6 +72,7 @@ CLoopback::~CLoopback()
         iIn->Stop();
         delete iIn;
     }
+    delete iRoute;
     if (iOut) {
         iOut->Stop();
         delete iOut;
@@ -140,6 +145,7 @@ void CLoopback::MaiscBufferCopied(TInt aError, const TDesC8& aBuffer)
         TInt s = (TInt16)(p[i] | (p[i + 1] << 8));
         if (s < 0) s = -s;
         if (s > iMaxLevel) iMaxLevel = s;
+        if (s > iPeakIn) iPeakIn = s;
     }
     /* append to the FIFO, dropping the oldest audio if it's full */
     if (n > KMaxFifo) {
@@ -177,6 +183,20 @@ void CLoopback::WriteNext()
         iWriteBuf.Copy(iFifo, n);
         Mem::Move(iFifo, iFifo + n, iFifoLen - n);
         iFifoLen -= n;
+    } else if (!iPlaying && iBeepLeft > 0) {
+        /* a short beep first: proves the speaker is audible */
+        iWriteBuf.SetLength(n);
+        TUint8* w = (TUint8*)iWriteBuf.Ptr();
+        for (TInt i = 0; i + 1 < n; i += 2) {
+            TInt16 v = 0;
+            if (iBeepLeft > 0) {
+                v = KBeep[iBeepPos & 31];
+                iBeepPos++;
+                iBeepLeft--;
+            }
+            w[i] = (TUint8)(v & 0xff);
+            w[i + 1] = (TUint8)((v >> 8) & 0xff);
+        }
     } else {
         /* building the delay or starving: play silence so the output
            stream keeps running */
@@ -184,6 +204,14 @@ void CLoopback::WriteNext()
         iWriteBuf.FillZ();
         if (iPlaying)
             iSilence++;
+    }
+    {
+        const TUint8* q = iWriteBuf.Ptr();
+        for (TInt i = 0; i + 1 < iWriteBuf.Length(); i += 2) {
+            TInt s = (TInt16)(q[i] | (q[i + 1] << 8));
+            if (s < 0) s = -s;
+            if (s > iPeakOut) iPeakOut = s;
+        }
     }
     TRAPD(err, iOut->WriteL(iWriteBuf));
     if (err != KErrNone) {
@@ -206,6 +234,14 @@ void CLoopback::MaoscOpenComplete(TInt aError)
     if (err != KErrNone)
         iLastError = err;
     iOut->SetVolume(iOut->MaxVolume() * iVolume / 100);
+    if (!iRoute) {
+        /* play through the loudspeaker, not the earpiece */
+        TRAPD(rerr, iRoute = CAudioOutput::NewL(*iOut));
+        if (rerr == KErrNone && iRoute) {
+            TRAP(rerr, iRoute->SetAudioOutputL(CAudioOutput::EPublic));
+        }
+        iRouted = (rerr == KErrNone) ? 1 : rerr;
+    }
     iOutOpen = ETrue;
     WriteNext();
     if (!iInOpened) {
