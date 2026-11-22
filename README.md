@@ -84,6 +84,10 @@ The PyS60 networking pitfalls (main-thread sockets, never `close()`) are the sam
 
 Like this app, both are Python for S60 1.4.5 apps that install to phone memory or the memory card.
 
+## What's in RetroTele.sis
+
+One file installs everything: the app, the native crypto module, the call audio helper (Opus, full-duplex VoIP audio, Telegram call protocol 2.7.7), the memory-card fix and Nokia's *VoIP Audio Services* system component (needed by the phone for two-way call audio; (c) Nokia, from the S60 3rd Edition FP2 API Plug-In Pack, included unmodified).
+
 ## Credits
 
 Emoji images: [Twemoji](https://github.com/twitter/twemoji) by Twitter, Inc and other contributors, licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). The sprite sheets in `pys60/assets/` are built by `tools/emoji/make_emoji.py`.
