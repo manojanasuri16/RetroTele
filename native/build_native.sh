@@ -51,3 +51,10 @@ bldmake bldfiles >/dev/null 2>&1
 abld build gcce urel 2>&1 | grep -iE "error" || true
 OUT="$EPOCROOT/epoc32/release/gcce/urel/tgvprobe.exe"
 [ -f "$OUT" ] && cp "$OUT" "$HERE/../pys60/native/tgvprobe.exe"
+
+# tgvbench.exe: live H.264 benchmark (separate package, RetroTele-videobench.sis)
+cd "$HERE/vidbench/group"
+bldmake bldfiles >/dev/null 2>&1
+abld build gcce urel 2>&1 | grep -iE "error" || true
+OUT="$EPOCROOT/epoc32/release/gcce/urel/tgvbench.exe"
+[ -f "$OUT" ] && cp "$OUT" "$HERE/../pys60/native/tgvbench.exe"

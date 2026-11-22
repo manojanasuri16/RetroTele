@@ -133,6 +133,69 @@ PYEOF
   echo "built dist/RetroTele-videoprobe.sis"
 fi
 
+# Video benchmark (E:\retrotele_videobench.txt). Own package, own UID; not part of RetroTele.sis.
+if [ -f native/tgvbench.exe ]; then
+  rm -rf build/vidbench_app && mkdir -p build/vidbench_app/extras/sys/bin
+  cp native/tgvbench.exe build/vidbench_app/extras/sys/bin/
+  cat > build/vidbench_app/default.py <<'PYEOF'
+# RetroTele video bench: runs tgvbench.exe, waits for its report file.
+import e32
+import appuifw
+import os
+
+PATHS = ["E:\\retrotele_videobench.txt", "C:\\Data\\retrotele_videobench.txt"]
+
+
+def finished():
+    for p in PATHS:
+        try:
+            f = open(p, "r")
+            t = f.read()
+            f.close()
+        except:
+            continue
+        if t.find("bench end") >= 0:
+            return p
+    return None
+
+
+def main():
+    for p in PATHS:
+        try:
+            os.remove(p)
+        except:
+            pass
+    try:
+        e32.start_exe(u"tgvbench.exe", u"")
+    except:
+        appuifw.note(u"Cannot start tgvbench.exe", "error")
+        return
+    appuifw.note(u"Video bench running (about 5 min), please wait...", "info")
+    done = None
+    n = 0
+    while n < 600:
+        e32.ao_sleep(1)
+        done = finished()
+        if done is not None:
+            break
+        n = n + 1
+    if done is None:
+        appuifw.note(u"Bench did not finish. Look for retrotele_videobench.txt", "error")
+    else:
+        appuifw.note(u"Done: " + unicode(done), "info")
+
+
+main()
+PYEOF
+  $PY $ENS py2sis --uid=0xE7A3D5E8 --appname="RetroTele video bench" --version=$VERSION \
+    --caption="RetroTele video bench" --shortcaption="Video bench" --vendor=RetroTele \
+    --caps=NetworkServices+LocalServices+ReadUserData+WriteUserData+UserEnvironment \
+    --drive=C --extrasdir=extras \
+    --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
+    build/vidbench_app dist/RetroTele-videobench.sis </dev/null >build/vidbench.log
+  echo "built dist/RetroTele-videobench.sis"
+fi
+
 # LOCAL-ONLY bundle: embeds Nokia's VoIP Audio Services (VoIPAudioSrvc SISX) so
 # one file installs everything. Nokia's licence forbids distributing that file,
 # so this package is NOT published (dist/ is git-ignored and never uploaded).
