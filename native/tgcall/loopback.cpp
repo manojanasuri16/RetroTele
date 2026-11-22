@@ -120,7 +120,7 @@ void CLoopback::MaiscOpenComplete(TInt aError)
                                         TMdaAudioDataSettings::EChannelsMono));
     if (err != KErrNone)
         iLastError = err;
-    iIn->SetGain(iIn->MaxGain() * 3 / 4);
+    iIn->SetGain(iIn->MaxGain());
     iState = 1;
     Read();
 }

@@ -111,7 +111,7 @@ public:
         iDn->GetMaxVolume(mv);
         Check(_L8("SetVolume"), iDn->SetVolume(mv * 70 / 100));
         iUp->GetMaxGain(mg);
-        Check(_L8("SetGain"), iUp->SetGain(mg * 3 / 4));
+        Check(_L8("SetGain"), iUp->SetGain(mg)   /* N79 max gain is 1: 3/4 rounded to 0 = muted */);
         TInt g = -1;
         iUp->GetGain(g);
         TBuf8<64> gm;
