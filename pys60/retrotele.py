@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.10.1"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.10.2"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -1653,7 +1653,12 @@ class App:
             return
         self.call_audio = ca
         self.audio_state = "connecting"
-        ok = ca.start_relay(cs["kb"], cs["out"], cs["conns"], self.audio_changed)
+        iap = 0
+        try:
+            iap = int(self.cfg.get("apid") or 0)
+        except:
+            iap = 0
+        ok = ca.start_relay(cs["kb"], cs["out"], cs["conns"], self.audio_changed, iap)
         self.log("call audio helper %s %s" % (ok and "started" or "NOT started",
                                               to_b(getattr(ca, "last_error", u""))))
         self.call_changed()

@@ -29,6 +29,7 @@
 #include <VoIPFormatIntfc.h>
 #include <libc/stdlib.h>
 #include "opus.h"
+#include <commdbconnpref.h>
 extern "C" {
 #include "callproto.h"
 }
@@ -230,13 +231,18 @@ public:
         iTimer = CPeriodic::NewL(CActive::EPriorityStandard);
         iTimer->Start(1000000, 1000000, TCallBack(Tick, this));
         SetupOpus();
+        Write(_L8("step: opus ready\n"));
         SetupNet();
+        Write(_L8("step: local socket ready\n"));
         if (iRelayMode) {
+            Write(_L8("step: relay setup\n"));
             SetupRelay();
             iTimer20 = CPeriodic::NewL(CActive::EPriorityStandard);
             iTimer20->Start(20000, 20000, TCallBack(Tick20, this));
         }
+        Write(_L8("step: starting audio\n"));
         SetupAudio();
+        Write(_L8("step: audio requested\n"));
     }
     TBool Check(const TDesC8& aStep, TInt aErr)
     {
@@ -394,20 +400,30 @@ public:
             Write(_L8("no usable call config\n"));
             return;
         }
-        // join the connection RetroTele already has, else the default one
-        if (iConn.Open(iSs) == KErrNone) {
-            TUint n = 0;
-            TBool ok = EFalse;
-            if (iConn.EnumerateConnections(n) == KErrNone && n > 0) {
-                TConnectionInfoBuf info;
-                if (iConn.GetConnectionInfo(1, info) == KErrNone &&
-                    iConn.Attach(info, RConnection::EAttachTypeNormal) == KErrNone) ok = ETrue;
-                Write(ok ? _L8("attached to active connection\n") : _L8("attach failed\n"));
-            } else if (iConn.Start() == KErrNone) {
-                ok = ETrue;
-                Write(_L8("started default connection\n"));
+        {
+            TBuf8<64> cb;
+            cb.Format(_L8("step: config ok, %d endpoints, iap %d\n"), iNEp, iIap);
+            Write(cb);
+        }
+        // open our own connection on the access point RetroTele uses: no
+        // dialog, and it is shared when that connection is already up
+        TInt cerr = iConn.Open(iSs);
+        if (cerr == KErrNone) {
+            if (iIap > 0) {
+                TCommDbConnPref pref;
+                pref.SetIapId(iIap);
+                pref.SetDialogPreference(ECommDbDialogPrefDoNotPrompt);
+                pref.SetDirection(ECommDbConnectionDirectionOutgoing);
+                cerr = iConn.Start(pref);
+            } else {
+                cerr = iConn.Start();
             }
-            if (ok) iConnOk = ETrue; else iConn.Close();
+            if (cerr == KErrNone) iConnOk = ETrue; else iConn.Close();
+        }
+        {
+            TBuf8<64> cb;
+            cb.Format(_L8("step: connection %S (%d)\n"), iConnOk ? &_L8("up") : &_L8("none"), cerr);
+            Write(cb);
         }
         TInt e = iConnOk ? iRelaySock.Open(iSs, KAfInet, KSockDatagram, KProtocolInetUdp, iConn)
                          : iRelaySock.Open(iSs, KAfInet, KSockDatagram, KProtocolInetUdp);
@@ -460,7 +476,10 @@ public:
             while (e > s && (p[e - 1] == '\r' || p[e - 1] == ' ')) e--;
             const TUint8* l = p + s;
             TInt len = e - s;
-            if (len > 4 && l[0] == 'o' && l[1] == 'u' && l[2] == 't' && l[3] == '=') {
+            if (len > 4 && l[0] == 'i' && l[1] == 'a' && l[2] == 'p' && l[3] == '=') {
+                TInt v = 0;
+                if (ParseInt(l + 4, len - 4, v)) iIap = v;
+            } else if (len > 4 && l[0] == 'o' && l[1] == 'u' && l[2] == 't' && l[3] == '=') {
                 iOut = l[4] == '1' ? 1 : 0;
             } else if (len == 4 + 512 && l[0] == 'k' && l[1] == 'e' && l[2] == 'y' && l[3] == '=') {
                 haveKey = ParseHex(l + 4, 512, iKey);
@@ -882,6 +901,7 @@ private:
     tgcp_ctx* iCtx;
     TUint8 iKey[256];
     TInt iOut;
+    TInt iIap;
     TEp iEp[KMaxEp];
     TInt iNEp, iLocked;
     TUint32 iPingMs[KMaxEp];

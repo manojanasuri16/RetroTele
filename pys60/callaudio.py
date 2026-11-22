@@ -97,12 +97,14 @@ class CallAudio:
                 self.last_error = u"cfg: " + unicode(str(sys.exc_info()[1]), "latin-1")
         return ""
 
-    def start_relay(self, key, is_outgoing, connections, on_state):
+    def start_relay(self, key, is_outgoing, connections, on_state, iap=0):
         """Start tgcallaudio.exe in relay mode: media goes to the Telegram
         relays directly. on_state(name): connecting connected reconnecting
         failed ended."""
         self.stop()
         text, n = self.relay_config(key, is_outgoing, connections)
+        if iap:
+            text = text + "iap=%d\n" % iap
         self.on_state = on_state
         self.relay = 1
         self.state = ""

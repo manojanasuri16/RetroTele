@@ -20,4 +20,4 @@ SOURCEPATH    ..\..\callproto
 SOURCE        callproto.c callproto_crypto.c
 
 STATICLIBRARY tgopus.lib
-LIBRARY       euser.lib efsrv.lib esock.lib insock.lib estlib.lib voipaudiointfc.lib
+LIBRARY       euser.lib efsrv.lib esock.lib insock.lib estlib.lib voipaudiointfc.lib commdb.lib
