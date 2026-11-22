@@ -392,10 +392,13 @@ public:
     void SetupRelay()
     {
         iLocked = -1;
+        Write(_L8("relay: 1 clear endpoints\n"));
         Mem::FillZ(iEp, sizeof(iEp));
+        Write(_L8("relay: 2 allocate protocol context\n"));
         iCtx = (tgcp_ctx*)new TUint8[sizeof(tgcp_ctx)];
         if (!iCtx) { Check(_L8("CtxAlloc"), KErrNoMemory); return; }
         Mem::FillZ(iCtx, sizeof(tgcp_ctx));
+        Write(_L8("relay: 3 read config\n"));
         if (!ReadConfig()) {
             Write(_L8("no usable call config\n"));
             return;
@@ -452,17 +455,34 @@ public:
         TBuf8<2048> buf;
         TBool got = EFalse;
         RFile f;
-        if (f.Open(iFs, KC, EFileRead | EFileShareAny) == KErrNone) {
-            got = f.Read(buf) == KErrNone;
+        TInt oe = f.Open(iFs, KC, EFileRead | EFileShareAny);
+        {
+            TBuf8<64> lb;
+            lb.Format(_L8("cfg: open C: %d\n"), oe);
+            Write(lb);
+        }
+        if (oe == KErrNone) {
+            TInt re = f.Read(buf);
+            got = re == KErrNone;
             f.Close();
             iFs.Delete(KC);
+            TBuf8<64> lb;
+            lb.Format(_L8("cfg: read C: %d len %d\n"), re, buf.Length());
+            Write(lb);
         }
-        if (!got && f.Open(iFs, KE, EFileRead | EFileShareAny) == KErrNone) {
-            got = f.Read(buf) == KErrNone;
-            f.Close();
-            iFs.Delete(KE);
+        if (!got) {
+            oe = f.Open(iFs, KE, EFileRead | EFileShareAny);
+            TBuf8<64> lb;
+            lb.Format(_L8("cfg: open E: %d\n"), oe);
+            Write(lb);
+            if (oe == KErrNone) {
+                got = f.Read(buf) == KErrNone;
+                f.Close();
+                iFs.Delete(KE);
+            }
         }
         if (!got) return EFalse;
+        Write(_L8("cfg: parsing\n"));
         iNEp = 0;
         TBool haveKey = EFalse;
         const TUint8* p = buf.Ptr();
@@ -501,6 +521,11 @@ public:
             }
         }
         Mem::FillZ((TUint8*)buf.Ptr(), 2048);   /* do not leave the key around */
+        {
+            TBuf8<64> lb;
+            lb.Format(_L8("cfg: parsed key=%d eps=%d\n"), haveKey, iNEp);
+            Write(lb);
+        }
         return haveKey && iNEp > 0;
     }
     TInt FindEp(const TInetAddr& aFrom)
