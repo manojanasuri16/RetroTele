@@ -19,6 +19,7 @@
 #include <ecam.h>
 #include <mmf/devvideo/devvideoplay.h>
 #include <mmf/devvideo/devvideorecord.h>
+#include "clip_data.h"
 
 static RFs gFs;
 static RFile gFile;
@@ -262,6 +263,25 @@ struct TEncResult
     TInt iLatAvg, iLatMax, iDurMs, iSkipped, iProcessed;
 };
 
+// ---- encoder configuration (swept by ENCSWEEP; the winner is used by all later tests) ----
+struct TEncCfg
+{
+    TInt iUid;          // 0 = first result of FindEncodersL
+    TInt iCodec;        // 0 H.264, 1 MPEG-4, 2 H.263
+    TInt iInSel;        // -1 auto planar 4:2:0 entry, >=0 list index, -2/-3/-4 hand built variants
+    const char* iMime;  // NULL = pick from the encoder's list by level (H.264) or default mime
+    TInt iDu, iEncap;
+    TInt iBufOpt, iRand, iConst, iRealtime, iRc, iFind, iInitWaitMs;
+};
+static TEncCfg gCfg = { 0x20001c13, 0, -1, NULL, EDuCodedPicture, EDuElementaryStream, 1, 1, 1, 1, 1, 0, 10000 };
+static TBool gWinner = EFalse;
+static TPtrC8 MimeOf(TInt aCodec)
+{
+    if (aCodec == 1) return TPtrC8((const TUint8*)"video/mp4v-es");
+    if (aCodec == 2) return TPtrC8((const TUint8*)"video/H263-2000");
+    return TPtrC8((const TUint8*)"video/H264");
+}
+
 static const TInt KPool = 6;
 
 class CEncSession : public CBase, public MMMFDevVideoRecordObserver
@@ -301,20 +321,27 @@ public:
         delete[] iTmpl;
     }
 
+    TInt iNewBufCalls, iRetCalls, iUnitsOut;
+    TEncCfg iCfg;
+
     // Returns KErrNone or the leave code.
-    TInt Start(TSize aSz, TInt aFps, TInt aBitrateK)
+    TInt Start(TSize aSz, TInt aFps, TInt aBitrateK) { return StartCfg(gCfg, aSz, aFps, aBitrateK); }
+    TInt StartCfg(const TEncCfg& aCfg, TSize aSz, TInt aFps, TInt aBitrateK)
     {
+        iCfg = aCfg;
         TRAPD(err, StartL(aSz, aFps, aBitrateK));
         return err;
     }
 
     void StartL(TSize aSz, TInt aFps, TInt aBitrateK)
     {
+        const TEncCfg& c = iCfg;
         iSize = aSz;
         iFps = aFps;
         iFrameBytes = aSz.iWidth * aSz.iHeight * 3 / 2;
         Mem::FillZ(&iR, sizeof(iR));
         iFatal = 0; iInitDone = 0; iInitErr = 0; iFrameNo = 0; iLatSum = 0;
+        iNewBufCalls = iRetCalls = iUnitsOut = 0;
         for (TInt i = 0; i < KPool; i++) {
             iBuf[i] = HBufC8::NewL(iFrameBytes);
             iBuf[i]->Des().SetLength(iFrameBytes);
@@ -326,7 +353,6 @@ public:
             iPic[i]->iData.iRawData = iPtr[i];
             iBusy[i] = EFalse;
         }
-        // synthetic texture: 256 entry saw tooth plus small noise
         iTmpl = new (ELeave) TUint8[aSz.iWidth + 512];
         TInt seed = 12345;
         for (TInt i = 0; i < aSz.iWidth + 512; i++) {
@@ -336,90 +362,130 @@ public:
 
         Log(_L8("step enc: CMMFDevVideoRecord::NewL"));
         iRec = CMMFDevVideoRecord::NewL(*this);
-        Log(_L8("step enc: SelectEncoderL 0x20001c13"));
-        iDev = iRec->SelectEncoderL(TUid::Uid(0x20001c13));
+        TUid uid = TUid::Uid(c.iUid);
+        if (c.iFind == 1 || c.iUid == 0) {
+            RArray<TUid> u;
+            CleanupClosePushL(u);
+            Log(_L8("step enc: FindEncodersL %s"), c.iCodec == 1 ? "mp4v" : (c.iCodec == 2 ? "h263" : "h264"));
+            TRAPD(fe, iRec->FindEncodersL(MimeOf(c.iCodec), 0, u, EFalse));
+            Log(_L8("enc FindEncodersL err=%d count=%d first=0x%08x"), fe, u.Count(), u.Count() ? u[0].iUid : 0);
+            if (c.iUid == 0) {
+                if (!u.Count()) User::Leave(KErrNotFound);
+                uid = u[0];
+            }
+            CleanupStack::PopAndDestroy(&u);
+        } else if (c.iFind == 2) {
+            RArray<TUid> u;
+            CleanupClosePushL(u);
+            Log(_L8("step enc: GetEncoderListL"));
+            TRAPD(fe, iRec->GetEncoderListL(u));
+            Log(_L8("enc GetEncoderListL err=%d count=%d"), fe, u.Count());
+            CleanupStack::PopAndDestroy(&u);
+        }
+        Log(_L8("step enc: SelectEncoderL 0x%08x"), uid.iUid);
+        iDev = iRec->SelectEncoderL(uid);
         Log(_L8("step enc: VideoEncoderInfoLC"));
-        CVideoEncoderInfo* info = iRec->VideoEncoderInfoLC(TUid::Uid(0x20001c13));
+        CVideoEncoderInfo* info = iRec->VideoEncoderInfoLC(uid);
 
-        // input format: copy one of the encoder's own YUV420 planar formats
         TUncompressedVideoFormat fmt;
         TBool found = EFalse;
         const RArray<TUncompressedVideoFormat>& inf = info->SupportedInputFormats();
-        for (TInt i = 0; i < inf.Count() && !found; i++) {
+        if (c.iInSel >= 0 && c.iInSel < inf.Count()) { fmt = inf[c.iInSel]; found = ETrue; }
+        for (TInt i = 0; i < inf.Count() && !found && c.iInSel < 0; i++) {
             if (inf[i].iDataFormat == EYuvRawData && inf[i].iYuvFormat.iDataLayout == EYuvDataPlanar &&
                 (inf[i].iYuvFormat.iPattern & (EYuv420Chroma1 | EYuv420Chroma2 | EYuv420Chroma3))) {
                 fmt = inf[i]; found = ETrue;
             }
         }
-        if (!found) {
-            for (TInt i = 0; i < inf.Count() && !found; i++)
-                if (inf[i].iDataFormat == EYuvRawData) { fmt = inf[i]; found = ETrue; }
+        if (c.iInSel <= -2) {      // hand built: start from the first YUV entry, then override fields
+            for (TInt i = 0; i < inf.Count(); i++)
+                if (inf[i].iDataFormat == EYuvRawData) { fmt = inf[i]; found = ETrue; break; }
         }
         if (!found) {
-            Log(_L8("enc: no YUV input format in encoder list (%d entries), constructing one"), inf.Count());
             Mem::FillZ(&fmt, sizeof(fmt));
             fmt.iDataFormat = EYuvRawData;
-            fmt.iYuvFormat.iCoefficients = EYuvBt601Range0;
-            fmt.iYuvFormat.iPattern = EYuv420Chroma2;
-            fmt.iYuvFormat.iDataLayout = EYuvDataPlanar;
-            fmt.iYuvFormat.iYuv2RgbMatrix = NULL;
-            fmt.iYuvFormat.iRgb2YuvMatrix = NULL;
             fmt.iYuvFormat.iAspectRatioNum = 1;
             fmt.iYuvFormat.iAspectRatioDenom = 1;
+            fmt.iYuvFormat.iCoefficients = (TYuvCoefficients)0x01000001;
         }
-        Log(_L8("enc input fmt: coeff=%d pattern=%d layout=%d (list had %d)"), (TInt)fmt.iYuvFormat.iCoefficients,
-            (TInt)fmt.iYuvFormat.iPattern, (TInt)fmt.iYuvFormat.iDataLayout, inf.Count());
+        if (c.iInSel <= -2) {
+            fmt.iDataFormat = EYuvRawData;
+            fmt.iYuvFormat.iPattern = (c.iInSel == -3) ? EYuv420Chroma1 : EYuv420Chroma2;
+            fmt.iYuvFormat.iDataLayout = EYuvDataPlanar;
+            if (c.iInSel == -4) fmt.iYuvFormat.iCoefficients = (TYuvCoefficients)((TInt)fmt.iYuvFormat.iCoefficients + 1);
+        }
+        Log(_L8("enc input fmt: datafmt=0x%x coeff=%d pattern=%d layout=%d aspect=%u/%u (list %d, sel %d)"),
+            (TInt)fmt.iDataFormat, (TInt)fmt.iYuvFormat.iCoefficients, (TInt)fmt.iYuvFormat.iPattern,
+            (TInt)fmt.iYuvFormat.iDataLayout, fmt.iYuvFormat.iAspectRatioNum, fmt.iYuvFormat.iAspectRatioDenom,
+            inf.Count(), c.iInSel);
 
         TInt need = NeedLevel(aSz.iWidth, aSz.iHeight, aFps);
-        CCompressedVideoFormat* cf = PickFormat(info->SupportedOutputFormats(), need);
-        if (!cf) User::Leave(KErrNotSupported);
+        CCompressedVideoFormat* cf = NULL;
+        if (c.iMime) {
+            TPtrC8 mp((const TUint8*)c.iMime);
+            cf = CCompressedVideoFormat::NewL(mp);
+            CleanupStack::PushL(cf);
+        } else if (c.iCodec == 0) {
+            cf = PickFormat(info->SupportedOutputFormats(), need);
+            if (!cf) User::Leave(KErrNotSupported);
+        } else {
+            cf = CCompressedVideoFormat::NewL(MimeOf(c.iCodec));
+            CleanupStack::PushL(cf);
+        }
         TBuf8<80> mm;
         mm.Copy(cf->MimeType().Left(78));
-        Log(_L8("enc output mime=%S (need level 0x%02x)"), &mm, need);
+        Log(_L8("enc output mime=%S (need level 0x%02x) du=0x%x encap=0x%x"), &mm, need, c.iDu, c.iEncap);
 
         Log(_L8("step enc: SetInputFormatL %dx%d"), aSz.iWidth, aSz.iHeight);
         iRec->SetInputFormatL(iDev, fmt, aSz);
         Log(_L8("step enc: SetOutputFormatL"));
-        iRec->SetOutputFormatL(iDev, *cf, EDuCodedPicture, EDuElementaryStream, EFalse);
+        iRec->SetOutputFormatL(iDev, *cf, (TVideoDataUnitType)c.iDu, (TVideoDataUnitEncapsulation)c.iEncap, EFalse);
+        if (c.iMime || c.iCodec != 0) CleanupStack::PopAndDestroy(cf);
         CleanupStack::PopAndDestroy(info);
         info = NULL;
-        Log(_L8("step enc: SetSourceMemoryL %d fps"), aFps);
-        iRec->SetSourceMemoryL(iFps, ETrue, ETrue);
+        Log(_L8("step enc: SetSourceMemoryL %d fps const=%d realtime=%d"), aFps, c.iConst, c.iRealtime);
+        iRec->SetSourceMemoryL(iFps, c.iConst, c.iRealtime);
 
-        TEncoderBufferOptions bo;
-        Mem::FillZ(&bo, sizeof(bo));
-        bo.iMaxPreEncoderBufferPictures = 2;
-        bo.iHrdVbvSpec = EHrdVbvNone;
-        bo.iMaxOutputBufferSize = 0x10000;
-        bo.iMaxCodedPictureSize = 0xFFFFFFFFu;
-        bo.iMaxCodedSegmentSize = 0xFFFFFFFFu;
-        bo.iMinNumOutputBuffers = 4;
-        Log(_L8("step enc: SetBufferOptionsL"));
-        TRAPD(e1, iRec->SetBufferOptionsL(bo));
-        Log(_L8("enc SetBufferOptionsL err=%d"), e1);
-        Log(_L8("step enc: SetMinRandomAccessRate 0.5"));
-        iRec->SetMinRandomAccessRate(0.5);
+        if (c.iBufOpt) {
+            TEncoderBufferOptions bo;
+            Mem::FillZ(&bo, sizeof(bo));
+            bo.iMaxPreEncoderBufferPictures = 2;
+            bo.iHrdVbvSpec = EHrdVbvNone;
+            bo.iMaxOutputBufferSize = 0x10000;
+            bo.iMaxCodedPictureSize = 0xFFFFFFFFu;
+            bo.iMaxCodedSegmentSize = 0xFFFFFFFFu;
+            bo.iMinNumOutputBuffers = 4;
+            Log(_L8("step enc: SetBufferOptionsL"));
+            TRAPD(e1, iRec->SetBufferOptionsL(bo));
+            Log(_L8("enc SetBufferOptionsL err=%d"), e1);
+        }
+        if (c.iRand) {
+            Log(_L8("step enc: SetMinRandomAccessRate 0.5"));
+            iRec->SetMinRandomAccessRate(0.5);
+        }
 
         Log(_L8("step enc: Initialize"));
         iRec->Initialize();
-        gPump->Run(10000, &iInitDone);
-        Log(_L8("enc init done=%d err=%d fatal=%d"), (TInt)iInitDone, iInitErr, (TInt)iFatal);
+        gPump->Run(c.iInitWaitMs, &iInitDone);
+        Log(_L8("enc init done=%d err=%d fatal=%d newbuf=%d"), (TInt)iInitDone, iInitErr, (TInt)iFatal, iNewBufCalls);
         if (!iInitDone) User::Leave(KErrTimedOut);
         if (iInitErr) User::Leave(iInitErr);
 
-        TRateControlOptions ro;
-        Mem::FillZ(&ro, sizeof(ro));
-        ro.iControl = EBrControlStream;
-        ro.iBitrate = aBitrateK * 1000;
-        ro.iPictureQuality = 50;
-        ro.iPictureRate = iFps;
-        ro.iQualityTemporalTradeoff = 0.5;
-        ro.iLatencyQualityTradeoff = 0.0;
-        Log(_L8("step enc: SetRateControlOptions %d kbit/s"), aBitrateK);
-        iRec->SetRateControlOptions(0, ro);
-        Log(_L8("step enc: CommitL"));
-        TRAPD(e2, iRec->CommitL());
-        Log(_L8("enc CommitL err=%d"), e2);
+        if (c.iRc) {
+            TRateControlOptions ro;
+            Mem::FillZ(&ro, sizeof(ro));
+            ro.iControl = EBrControlStream;
+            ro.iBitrate = aBitrateK * 1000;
+            ro.iPictureQuality = 50;
+            ro.iPictureRate = iFps;
+            ro.iQualityTemporalTradeoff = 0.5;
+            ro.iLatencyQualityTradeoff = 0.0;
+            Log(_L8("step enc: SetRateControlOptions %d kbit/s"), aBitrateK);
+            iRec->SetRateControlOptions(0, ro);
+            Log(_L8("step enc: CommitL"));
+            TRAPD(e2, iRec->CommitL());
+            Log(_L8("enc CommitL err=%d"), e2);
+        }
         Log(_L8("step enc: Start"));
         iRec->Start();
         iStarted = ETrue;
@@ -512,11 +578,13 @@ public:
     // MMMFDevVideoRecordObserver
     void MdvroReturnPicture(TVideoPicture* aPic)
     {
+        iRetCalls++;
         for (TInt i = 0; i < KPool; i++) if (iPic[i] == aPic) iBusy[i] = EFalse;
     }
     void MdvroSupplementalInfoSent() {}
     void MdvroNewBuffers()
     {
+        iNewBufCalls++;
         if (!iRec) return;
         TInt n = iRec->NumDataBuffers();
         while (n-- > 0) {
@@ -528,6 +596,7 @@ public:
             TNal nal;
             ScanNal(b->iData, nal);
             iR.iBytes += b->iData.Length();
+            iUnitsOut++;
             iStream->Add(b->iData, ts, nal);
             if (nal.iVcl) {
                 iR.iPictures++;
@@ -783,10 +852,13 @@ public:
 
 // ---- tests ----
 struct TCtxS { CEncSession* iEnc; };
+static TInt gMaxOffers = 0x7fffffff;
+static TInt gRunStart = 0;
+static TBool OverBudget(TInt aSec) { return NowMs() - gRunStart > aSec * 1000; }
 static TInt SynthTick(TAny* a)
 {
     CEncSession* e = ((TCtxS*)a)->iEnc;
-    e->Offer(NULL, 0, e->TsNowUs());
+    if (e->iR.iOffered < gMaxOffers) e->Offer(NULL, 0, e->TsNowUs());
     return 0;
 }
 
@@ -836,9 +908,9 @@ static void SynthConfigL(TInt w, TInt h, TInt fps, TInt br)
             CleanupStack::PushL(t);
             TCtxS ctx = { enc };
             TInt interval = (TInt)(1000000 / fps);
-            Log(_L8("step enc: feeding synthetic frames for 8 s every %d us"), interval);
+            Log(_L8("step enc: feeding synthetic frames for 6 s every %d us"), interval);
             t->Start(interval, interval, TCallBack(SynthTick, &ctx));
-            gPump->Run(8000, NULL);
+            gPump->Run(6000, NULL);
             t->Cancel();
             TInt hr = HeadEnd(hd);
             CleanupStack::PopAndDestroy(t);
@@ -906,9 +978,9 @@ static void CamConfigL(CCamera* aCam, CCamSrc* aObs, TInt aIdx, const TCameraInf
                 HeadBegin(hd);
                 aObs->iSink = enc;
                 enc->iT0Ms = NowMs();
-                Log(_L8("step cam%d: StartVideoCapture (8 s)"), aIdx);
+                Log(_L8("step cam%d: StartVideoCapture (6 s)"), aIdx);
                 aCam->StartVideoCapture();
-                gPump->Run(8000, NULL);
+                gPump->Run(6000, NULL);
                 Log(_L8("step cam%d: StopVideoCapture"), aIdx);
                 aCam->StopVideoCapture();
                 aObs->iSink = NULL;
@@ -972,6 +1044,7 @@ static void CameraTestL(TInt aIdx, const TInt aSizes[][3], TInt aCount)
         TCameraInfo ci;
         cam->CameraInfo(ci);
         for (TInt i = 0; i < aCount; i++) {
+            if (OverBudget(230)) { Log(_L8("time budget used, skipping camera config")); break; }
             TRAPD(err, CamConfigL(cam, obs, aIdx, ci, aSizes[i][0], aSizes[i][1], aSizes[i][2]));
             Log(_L8("camera %d config %dx%d end err=%d"), aIdx, aSizes[i][0], aSizes[i][1], err);
             gAbort = 0;
@@ -981,6 +1054,284 @@ static void CameraTestL(TInt aIdx, const TInt aSizes[][3], TInt aCount)
     Log(_L8("step camera %d Release"), aIdx);
     cam->Release();
     CleanupStack::PopAndDestroy(2);
+}
+
+// ---- ENCSWEEP: find an encoder configuration whose Initialize succeeds AND yields coded data ----
+static TInt gInitOnly = 0;
+
+static void LogFmt(const TDesC8& aTag, TInt i, const TUncompressedVideoFormat& f)
+{
+    if (f.iDataFormat == EYuvRawData)
+        Log(_L8("  %S[%d] datafmt=0x%x(yuv) coeff=%d(0x%x) pattern=%d layout=%d aspect=%u/%u"), &aTag, i,
+            (TInt)f.iDataFormat, (TInt)f.iYuvFormat.iCoefficients, (TInt)f.iYuvFormat.iCoefficients,
+            (TInt)f.iYuvFormat.iPattern, (TInt)f.iYuvFormat.iDataLayout, f.iYuvFormat.iAspectRatioNum,
+            f.iYuvFormat.iAspectRatioDenom);
+    else
+        Log(_L8("  %S[%d] datafmt=0x%x(rgb) rgbformat=0x%x"), &aTag, i, (TInt)f.iDataFormat, (TInt)f.iRgbFormat);
+}
+
+static TInt gInCount = 0;
+static TUint8 gInIsYuv[32];
+static TInt gOtherUids[4];
+static TInt gOtherCount = 0;
+
+static void SweepInfoL()
+{
+    CEncSession* dummy = NULL; (void)dummy;
+    class CObs : public CBase, public MMMFDevVideoRecordObserver
+    {
+    public:
+        void MdvroReturnPicture(TVideoPicture*) {}
+        void MdvroSupplementalInfoSent() {}
+        void MdvroNewBuffers() {}
+        void MdvroFatalError(TInt) {}
+        void MdvroInitializeComplete(TInt) {}
+        void MdvroStreamEnd() {}
+    };
+    CObs* obs = new (ELeave) CObs;
+    CleanupStack::PushL(obs);
+    Log(_L8("step sweep info: NewL"));
+    CMMFDevVideoRecord* rec = CMMFDevVideoRecord::NewL(*obs);
+    CleanupStack::PushL(rec);
+    for (TInt codec = 0; codec < 3; codec++) {
+        RArray<TUid> u;
+        CleanupClosePushL(u);
+        TBuf8<40> m; m.Copy(MimeOf(codec));
+        Log(_L8("step sweep info: FindEncodersL %S"), &m);
+        TRAPD(fe, rec->FindEncodersL(MimeOf(codec), 0, u, EFalse));
+        Log(_L8("sweep advertised: encoders for %S err=%d count=%d"), &m, fe, u.Count());
+        for (TInt i = 0; i < u.Count(); i++) {
+            Log(_L8("  encoder uid 0x%08x"), u[i].iUid);
+            if (codec == 0 && u[i].iUid != 0x20001c13 && gOtherCount < 4) gOtherUids[gOtherCount++] = u[i].iUid;
+        }
+        CleanupStack::PopAndDestroy(&u);
+    }
+    Log(_L8("step sweep info: VideoEncoderInfoLC 0x20001c13"));
+    CVideoEncoderInfo* d = rec->VideoEncoderInfoLC(TUid::Uid(0x20001c13));
+    Log(_L8("sweep advertised: accelerated=%d directcapture=%d maxpic=%dx%d maxbitrate=%u layers=%u dutypes=0x%x encaps=0x%x"),
+        (TInt)d->Accelerated(), (TInt)d->SupportsDirectCapture(), d->MaxPictureSize().iWidth, d->MaxPictureSize().iHeight,
+        d->MaxBitrate(), d->MaxBitrateLayers(), (TInt)d->SupportedDataUnitTypes(), (TInt)d->SupportedDataUnitEncapsulations());
+    Log(_L8("sweep advertised: pictureoptions=0x%x uep=%u scal=%u pictureloss=%d sliceloss=%d suppl=%d"),
+        (TInt)d->SupportedPictureOptions(), d->MaxUnequalErrorProtectionLevels(), d->MaxInLayerScalabilitySteps(),
+        (TInt)d->SupportsPictureLoss(), (TInt)d->SupportsSliceLoss(), (TInt)d->SupportsSupplementalEnhancementInfo());
+    for (TInt i = 0; i < d->MaxPictureRates().Count(); i++)
+        Log(_L8("  advertised max rate %dx%d @ %d/100 fps"), d->MaxPictureRates()[i].iPictureSize.iWidth,
+            d->MaxPictureRates()[i].iPictureSize.iHeight, (TInt)(d->MaxPictureRates()[i].iPictureRate * 100));
+    gInCount = d->SupportedInputFormats().Count();
+    TBuf8<8> tg(_L8("input"));
+    for (TInt i = 0; i < gInCount; i++) {
+        LogFmt(tg, i, d->SupportedInputFormats()[i]);
+        if (i < 32) gInIsYuv[i] = d->SupportedInputFormats()[i].iDataFormat == EYuvRawData;
+    }
+    for (TInt i = 0; i < d->SupportedOutputFormats().Count(); i++) {
+        TBuf8<80> m; m.Copy(d->SupportedOutputFormats()[i]->MimeType().Left(78));
+        Log(_L8("  advertised output mime[%d]=%S"), i, &m);
+    }
+    CleanupStack::PopAndDestroy(3);
+}
+
+// 1 = init ok and at least one coded unit came out
+static TInt TryVariant(const TEncCfg& aC, const char* aName)
+{
+    TBuf8<72> n;
+    n.Copy(TPtrC8((const TUint8*)aName));
+    TInt t0 = NowMs();
+    Log(_L8("sweep %S: begin"), &n);
+    CEncSession* e = CEncSession::NewL();
+    CleanupStack::PushL(e);
+    gAbort = 0;
+    TEncCfg c = aC;
+    c.iInitWaitMs = 1500;
+    TInt err = e->StartCfg(c, TSize(176, 144), 15, 128);
+    TInt got = 0;
+    if (err == KErrNone && gInitOnly) {
+        Log(_L8("sweep %S: ok (init only, not a YUV input)"), &n);
+    } else if (err == KErrNone) {
+        CPeriodic* t = CPeriodic::NewL(CActive::EPriorityStandard);
+        CleanupStack::PushL(t);
+        TCtxS ctx = { e };
+        gMaxOffers = 10;
+        t->Start(66666, 66666, TCallBack(SynthTick, &ctx));
+        gPump->Run(1800, NULL);
+        t->Cancel();
+        gMaxOffers = 0x7fffffff;
+        CleanupStack::PopAndDestroy(t);
+        got = e->iUnitsOut;
+        Log(_L8("sweep %S: ok init; offered=%d written=%d werr=%d units=%d newbuf=%d retpic=%d fatal=%d"), &n,
+            e->iR.iOffered, e->iR.iWritten, e->iR.iErrors, got, e->iNewBufCalls, e->iRetCalls, (TInt)e->iFatal);
+        e->Finish();
+    } else {
+        Log(_L8("sweep %S: err=%d init_cb_err=%d done=%d fatal=%d newbuf=%d"), &n, err, e->iInitErr, (TInt)e->iInitDone,
+            (TInt)e->iFatal, e->iNewBufCalls);
+    }
+    CleanupStack::PopAndDestroy(e);
+    Log(_L8("sweep %S: took %d ms %s"), &n, NowMs() - t0, got ? "DATA" : "no data");
+    return got > 0;
+}
+
+static void LogCfg(const TDesC8& aTag, const TEncCfg& c)
+{
+    TBuf8<80> m;
+    if (c.iMime) m.Copy(TPtrC8((const TUint8*)c.iMime)); else m.Copy(_L8("(auto from list)"));
+    Log(_L8("sweep %S uid=0x%08x codec=%d insel=%d mime=%S du=0x%x encap=0x%x bufopts=%d randaccess=%d const=%d realtime=%d ratectl_after_init=%d find=%d"),
+        &aTag, c.iUid, c.iCodec, c.iInSel, &m, c.iDu, c.iEncap, c.iBufOpt, c.iRand, c.iConst, c.iRealtime, c.iRc, c.iFind);
+}
+
+static TBool gWon;
+static TEncCfg gWinCfg;
+static TBool Try(const TEncCfg& c, const char* aName, TInt aBudgetS = 60)
+{
+    if (gWon) return ETrue;
+    if (NowMs() - gRunStart > aBudgetS * 1000) { Log(_L8("sweep budget exhausted, skipping %s"), aName); return EFalse; }
+    TInt r = 0;
+    TRAPD(le, r = TryVariant(c, aName));
+    if (le) Log(_L8("sweep %s: leave %d"), aName, le);
+    if (r) {
+        gWon = ETrue; gWinCfg = c;
+        TBuf8<72> n; n.Copy(TPtrC8((const TUint8*)aName));
+        LogCfg(_L8("WINNER"), c);
+        Log(_L8("sweep WINNER %S"), &n);
+    }
+    return gWon;
+}
+
+static void EncSweepL()
+{
+    gWon = EFalse;
+    TRAPD(ie, SweepInfoL());
+    Log(_L8("sweep info end err=%d"), ie);
+    TEncCfg b = gCfg;
+    Try(b, "base(first yuv420 planar entry, mime from list, coded/elementary)");
+    // (1) input formats
+    for (TInt i = 0; i < gInCount && i < 32; i++) {
+        TEncCfg v = b; v.iInSel = i;
+        TBuf8<110> nm; nm.Format(_L8("input[%d]"), i); nm.ZeroTerminate();
+        gInitOnly = gInIsYuv[i] ? 0 : 1;
+        Try(v, (const char*)nm.PtrZ());
+        gInitOnly = 0;
+    }
+    { TEncCfg v = b; v.iInSel = -2; Try(v, "input hand chroma2 planar"); }
+    { TEncCfg v = b; v.iInSel = -3; Try(v, "input hand chroma1 planar"); }
+    { TEncCfg v = b; v.iInSel = -4; Try(v, "input hand coeff+1 chroma2"); }
+    // (2) mimes
+    static const char* const KM[] = { "video/H264", "video/H264; profile-level-id=42800A", "video/H264; profile-level-id=42800B",
+        "video/H264; profile-level-id=42800C", "video/H264; profile-level-id=42900B", "video/H264; profile-level-id=428014", 0 };
+    for (TInt i = 0; KM[i]; i++) { TEncCfg v = b; v.iMime = KM[i]; Try(v, KM[i]); }
+    // (3) data unit / encapsulation
+    static const TInt KDu[2] = { EDuCodedPicture, EDuVideoSegment };
+    static const TInt KEn[2] = { EDuElementaryStream, EDuGenericPayload };
+    for (TInt i = 0; i < 2; i++) for (TInt j = 0; j < 2; j++) {
+        if (i == 0 && j == 0) continue;
+        TEncCfg v = b; v.iDu = KDu[i]; v.iEncap = KEn[j];
+        TBuf8<110> nm; nm.Format(_L8("du=%d encap=%d"), i, j); nm.ZeroTerminate();
+        Try(v, (const char*)nm.PtrZ());
+    }
+    // (4) buffer options / random access / source memory flags
+    { TEncCfg v = b; v.iBufOpt = 0; Try(v, "no SetBufferOptionsL"); }
+    { TEncCfg v = b; v.iRand = 0; Try(v, "no SetMinRandomAccessRate"); }
+    { TEncCfg v = b; v.iBufOpt = 0; v.iRand = 0; Try(v, "neither bufopts nor randaccess"); }
+    for (TInt i = 0; i < 3; i++) {
+        TEncCfg v = b; v.iConst = (i == 0 || i == 2) ? 0 : 1; v.iRealtime = (i == 0 || i == 1) ? 0 : 1;
+        if (i == 2) { v.iConst = 0; v.iRealtime = 1; }
+        TBuf8<110> nm; nm.Format(_L8("source memory const=%d realtime=%d"), v.iConst, v.iRealtime); nm.ZeroTerminate();
+        Try(v, (const char*)nm.PtrZ());
+    }
+    // (5) rate control: only the documented order (after Initialize) or not at all; a call before Initialize
+    // would violate the header precondition (panic), so it is not tried.
+    { TEncCfg v = b; v.iRc = 0; Try(v, "no SetRateControlOptions"); }
+    // (6) selection variants
+    { TEncCfg v = b; v.iFind = 1; Try(v, "FindEncodersL before Select"); }
+    { TEncCfg v = b; v.iFind = 2; Try(v, "GetEncoderListL before Select"); }
+    { TEncCfg v = b; v.iUid = 0; Try(v, "uid from FindEncodersL first result"); }
+    for (TInt i = 0; i < gOtherCount; i++) {
+        TEncCfg v = b; v.iUid = gOtherUids[i]; TBuf8<110> nm; nm.Format(_L8("other H264 encoder 0x%08x"), gOtherUids[i]); nm.ZeroTerminate();
+        Try(v, (const char*)nm.PtrZ());
+    }
+    // combined minimal setups
+    TEncCfg m = b; m.iBufOpt = 0; m.iRand = 0; m.iConst = 0; m.iRealtime = 0;
+    Try(m, "minimal (no bufopts/randaccess, src const=0 rt=0)");
+    for (TInt i = 0; KM[i]; i++) { TEncCfg v = m; v.iMime = KM[i]; TBuf8<110> nm; nm.Format(_L8("minimal + %s"), KM[i]); nm.ZeroTerminate(); Try(v, (const char*)nm.PtrZ()); }
+    for (TInt i = 0; i < 2; i++) for (TInt j = 0; j < 2; j++) {
+        if (i == 0 && j == 0) continue;
+        TEncCfg v = m; v.iDu = KDu[i]; v.iEncap = KEn[j]; TBuf8<110> nm; nm.Format(_L8("minimal du=%d encap=%d"), i, j); nm.ZeroTerminate();
+        Try(v, (const char*)nm.PtrZ());
+    }
+    { TEncCfg v = m; v.iInSel = -2; Try(v, "minimal + hand chroma2"); }
+    { TEncCfg v = m; v.iInSel = -3; Try(v, "minimal + hand chroma1"); }
+    { TEncCfg v = m; v.iInSel = -4; Try(v, "minimal + hand coeff+1"); }
+    // (7) other codecs, only to learn whether ANY encoder produces data
+    if (!gWon) {
+        Log(_L8("sweep alt-codec: H.264 found nothing, trying MPEG-4 and H.263"));
+        TEncCfg a = m; a.iMime = NULL; a.iInSel = -1;
+        TEncCfg v1 = a; v1.iCodec = 1; v1.iUid = 0x101f86d5;
+        TEncCfg v2 = a; v2.iCodec = 1; v2.iUid = 0;
+        TEncCfg v3 = a; v3.iCodec = 2; v3.iUid = 0;
+        TInt base = gRunStart;
+        gRunStart = NowMs();               // give the alt-codecs their own 15 s window
+        Try(v1, "alt-codec mpeg4 uid 0x101f86d5", 15);
+        if (gWon) { gWon = EFalse; Log(_L8("sweep alt-codec mpeg4(0x101f86d5) PRODUCES DATA")); } 
+        Try(v2, "alt-codec mpeg4 via FindEncodersL", 15);
+        if (gWon) { gWon = EFalse; Log(_L8("sweep alt-codec mpeg4(find) PRODUCES DATA")); }
+        Try(v3, "alt-codec h263 via FindEncodersL", 15);
+        if (gWon) { gWon = EFalse; Log(_L8("sweep alt-codec h263 PRODUCES DATA")); }
+        gRunStart = base;
+        Log(_L8("sweep NO WINNER for H.264"));
+    } else {
+        gCfg = gWinCfg;
+        gWinner = ETrue;
+        LogCfg(_L8("WINNER used by all later tests:"), gCfg);
+    }
+}
+
+// ---- DECODER-ONLY: embedded known-good baseline clip, no encoder involved ----
+static void DecoderOnlyL()
+{
+    const TInt len = sizeof(KClip);
+    // find NAL start offsets (include a leading zero byte for 4 byte start codes)
+    RArray<TInt> st;
+    CleanupClosePushL(st);
+    for (TInt i = 0; i + 3 < len; i++) {
+        if (KClip[i] == 0 && KClip[i + 1] == 0 && KClip[i + 2] == 1) {
+            st.Append((i > 0 && KClip[i - 1] == 0) ? i - 1 : i);
+            i += 2;
+        }
+    }
+    Log(_L8("clip: %d bytes, %d NALs"), len, st.Count());
+    // access units: close a unit at each VCL NAL
+    RArray<TInt> au;   // pairs start,end
+    CleanupClosePushL(au);
+    TInt accStart = 0;
+    for (TInt k = 0; k < st.Count(); k++) {
+        TInt s0 = st[k];
+        TInt e0 = (k + 1 < st.Count()) ? st[k + 1] : len;
+        TInt p = s0; while (p < len && KClip[p] == 0) p++;
+        TInt type = KClip[p + 1] & 0x1F;       // p points at the 01 of the start code
+        if (type == 1 || type == 5) { au.Append(accStart); au.Append(e0); accStart = e0; }
+    }
+    Log(_L8("clip: %d access units"), au.Count() / 2);
+    CStream* all = CStream::NewL();
+    CleanupStack::PushL(all);
+    CStream* few = CStream::NewL();
+    CleanupStack::PushL(few);
+    TInt n = au.Count() / 2;
+    for (TInt loop = 0; loop < 100 && n > 0; loop++) {
+        for (TInt k = 0; k < n; k++) {
+            TPtrC8 u(KClip + au[2 * k], au[2 * k + 1] - au[2 * k]);
+            TNal nal; ScanNal(u, nal);
+            TInt64 ts = (TInt64)(loop * n + k) * 66666;
+            all->Add(u, ts, nal);
+            if (loop < 15) few->Add(u, ts, nal);
+        }
+    }
+    TBuf8<64> tag(_L8("decoder-only clip 176x144 flat-out"));
+    TestBegin(tag);
+    DecodeStreamL(all, 176, 144, 30, 30000, EFalse, tag);
+    TestEnd(tag);
+    TBuf8<64> tag2(_L8("decoder-only clip 176x144 paced 15fps"));
+    TestBegin(tag2);
+    DecodeStreamL(few, 176, 144, 30, 12000, ETrue, tag2);
+    TestEnd(tag2);
+    CleanupStack::PopAndDestroy(4);
 }
 
 // ---- main ----
@@ -1005,10 +1356,12 @@ static void Step(const char* aName, void (*aFn)())
 
 static void Test12L()
 {
+    if (!gWinner) { Log(_L8("test12 skipped: no working encoder configuration")); return; }
     static const TInt KCfg[4][3] = { { 176, 144, 15 }, { 320, 240, 15 }, { 352, 288, 15 }, { 176, 144, 30 } };
     static const TInt KBr[3] = { 256, 128, 384 };
     for (TInt b = 0; b < 3; b++) {
         for (TInt c = 0; c < 4; c++) {
+            if (OverBudget(215)) { Log(_L8("time budget used, skipping rest of test12")); return; }
             TRAPD(err, SynthConfigL(KCfg[c][0], KCfg[c][1], KCfg[c][2], KBr[b]));
             Log(_L8("synth config %dx%d@%d %dk end err=%d"), KCfg[c][0], KCfg[c][1], KCfg[c][2], KBr[b], err);
             gAbort = 0;
@@ -1017,6 +1370,7 @@ static void Test12L()
 }
 static void Test3L()
 {
+    if (!gWinner) { Log(_L8("test3 skipped: no working encoder configuration")); return; }
     static const TInt K0[2][3] = { { 176, 144, 128 }, { 320, 240, 256 } };
     static const TInt K1[3][3] = { { 176, 144, 128 }, { 320, 240, 256 }, { 352, 288, 384 } };
     TRAPD(e0, CameraTestL(0, K0, 2));
@@ -1052,6 +1406,9 @@ static void RunL()
     HAL::Get(HAL::ECPUSpeed, cpu);
     Log(_L8("cpu=%d kHz ram_free=%d"), cpu, RamFree());
     Step("baseline", MeasureBaselineL);
+    gRunStart = NowMs();
+    Step("encsweep", EncSweepL);
+    Step("decoder_only", DecoderOnlyL);
     Step("test12", Test12L);
     Step("test3", Test3L);
     TUint32 c0 = gIdle; TInt t0 = NowMs();
