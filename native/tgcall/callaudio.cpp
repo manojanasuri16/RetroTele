@@ -175,7 +175,7 @@ class CRunner : public CBase, public MVoIPDownlinkObserver,
                 public MVoIPUplinkObserver, public MVoIPFormatObserver
 {
 public:
-    CRunner(TInt aSeconds, TBool aRelay) : iSeconds(aSeconds), iRelayMode(aRelay) {}
+    CRunner(TInt aSeconds, TBool aRelay) : iSeconds(aSeconds), iRelayMode(aRelay), iWantRoute(1) {}
     ~CRunner()
     {
         delete iTimer;
@@ -315,7 +315,7 @@ public:
         if (!iDnOpen || !iUpOpen || iStarted) return;
         iStarted = ETrue;
         TInt mv = 0, mg = 0;
-        Check(_L8("SetAudioDevice"), iDn->SetAudioDevice(CVoIPAudioDownlinkStream::ELoudSpeaker));
+        Check(_L8("SetAudioDevice"), iDn->SetAudioDevice(RouteDev(iWantRoute)));
         iDn->GetMaxVolume(mv);
         Check(_L8("SetVolume"), iDn->SetVolume(mv * 70 / 100));
         iUp->GetMaxGain(mg);
@@ -340,6 +340,24 @@ public:
             if (n == 1 && aData[0] == 'Q') {
                 CActiveScheduler::Stop();
                 return EFalse;
+            }
+            if (n == 2 && aData[0] == 'M') {
+                iMuted = (aData[1] == '1');
+                TBuf8<48> lb;
+                lb.Format(_L8("control: mute %d\n"), iMuted ? 1 : 0);
+                Write(lb);
+                SendInfo('M', iMuted ? 1 : 0);
+                return ETrue;
+            }
+            if (n == 2 && aData[0] == 'R' && aData[1] >= '0' && aData[1] <= '2') {
+                iWantRoute = aData[1] - '0';
+                TInt rerr = KErrNone;
+                if (iStarted && iDn) rerr = iDn->SetAudioDevice(RouteDev(iWantRoute));
+                TBuf8<64> lb;
+                lb.Format(_L8("control: route %d err %d\n"), iWantRoute, rerr);
+                Write(lb);
+                if (iStarted) ReportRoute();
+                return ETrue;
             }
             if (!iRelayMode && n > 0 && n <= KMaxPkt) {
                 iRecvPkts++;
@@ -379,6 +397,36 @@ public:
         b.Append(_L8("S "));
         b.Append(aName);
         SendTo(iSock, iDest, b.Ptr(), b.Length());
+    }
+    void SendInfo(TUint8 aTag, TInt aVal)
+    {
+        if (!iNetOk) return;
+        TBuf8<8> b;
+        b.Append(aTag);
+        b.Append(' ');
+        b.AppendNum(aVal);
+        SendTo(iSock, iDest, b.Ptr(), b.Length());
+    }
+    static CVoIPAudioDownlinkStream::TVoIPOutputDevice RouteDev(TInt aRoute)
+    {
+        if (aRoute == 0) return CVoIPAudioDownlinkStream::EHandset;
+        if (aRoute == 1) return CVoIPAudioDownlinkStream::ELoudSpeaker;
+        return CVoIPAudioDownlinkStream::ENoPreference;
+    }
+    void ReportRoute()
+    {
+        if (!iDn) return;
+        CVoIPAudioDownlinkStream::TVoIPOutputDevice d = CVoIPAudioDownlinkStream::ENoPreference;
+        TInt e = iDn->GetAudioDevice(d);
+        TInt v = 2;
+        if (e == KErrNone) {
+            if (d == CVoIPAudioDownlinkStream::EHandset) v = 0;
+            else if (d == CVoIPAudioDownlinkStream::ELoudSpeaker) v = 1;
+        }
+        TBuf8<64> lb;
+        lb.Format(_L8("audio route now %d (err %d)\n"), v, e);
+        Write(lb);
+        SendInfo('D', v);
     }
     void FinalStatus()
     {
@@ -797,6 +845,8 @@ public:
             MaybeStart();
         } else if (aType == MVoIPDownlinkObserver::KDownlinkError) {
             Check(_L8("DnError"), aErr ? aErr : -1);
+        } else if (aType == MVoIPDownlinkObserver::KAudioDeviceChanged) {
+            if (iStarted) ReportRoute();
         }
     }
     // ---- MVoIPUplinkObserver
@@ -811,7 +861,7 @@ public:
             if (a > iPeakIn) iPeakIn = a;
         }
         if (iRelayMode) {
-            if (n >= KFrameBytes && iEnc && Connected()) {
+            if (n >= KFrameBytes && iEnc && Connected() && !iMuted) {
                 Mem::Copy(iUpAcc + iUpN * KFrameSamples, s, KFrameBytes);
                 iUpN++;
                 if (iUpN >= 3) {
@@ -964,6 +1014,8 @@ private:
     TInt iRingLen[KRingSize];
     TInt iRingHead, iRingCount;
     TBool iDnOpen, iUpOpen, iStarted, iNetOk;
+    TBool iMuted;
+    TInt iWantRoute;
     TBool iPlaying, iEverRecv;
     TInt iPlc;
     TInt iErrors, iLast, iFirstErrs;

@@ -2035,9 +2035,20 @@ class CallView(CanvasView):
     def __init__(self, app):
         CanvasView.__init__(self, app)
 
+    def live(self):
+        cs = self.app.client.cs
+        return (cs is not None and cs["state"] == "connected" and
+                self.app.call_audio is not None)
+
     def key(self, k):
         if k == "select" or k == "5":
             self.app.call_primary()
+        elif k == "1" and self.live():
+            self.app.call_toggle_mute()
+        elif k == "2" and self.live():
+            self.app.call_cycle_route()
+        elif k == "3" and self.live():
+            self.app.call_hangup()
 
     def elapsed(self):
         cs = self.app.client.cs
@@ -2088,6 +2099,53 @@ class CallView(CanvasView):
             y = y + 26
             g.text(((w - width(g, l, "small")) / 2, y), l, fill=GREY_LIGHT,
                    font=font("small"))
+        if self.live():
+            muted = app.call_muted()
+            r = app.call_route()
+            if muted:
+                ml = u"Mic: MUTED"
+            else:
+                ml = u"Mic: ON"
+            if r == 0:
+                rl = u"Audio: Earpiece"
+                rb = u"Earpiece"
+            elif r == 2:
+                rl = u"Audio: Auto (Bluetooth)"
+                rb = u"Auto/BT"
+            else:
+                rl = u"Audio: Speaker"
+                rb = u"Speaker"
+            for l in [ml, rl]:
+                y = y + 22
+                g.text(((w - width(g, l, "small")) / 2, y), l, fill=GREY_LIGHT,
+                       font=font("small"))
+            if muted:
+                bl = u"MUTED"
+                bw = width(g, bl, "small") + 16
+                rrect(g, (w - bw) / 2, y + 6, (w + bw) / 2, y + 26, 8, 0xD32F2F)
+                g.text(((w - width(g, bl, "small")) / 2, y + 21), bl, fill=WHITE,
+                       font=font("small"))
+            by = h - 78
+            bw = (w - 30) / 2
+            if muted:
+                b1 = u"[1] Mic off"
+            else:
+                b1 = u"[1] Mic on"
+            b2 = u"[2] " + rb
+            for i in [0, 1]:
+                x1 = 10 + i * (bw + 10)
+                if i == 0:
+                    lab = b1
+                    col = BLUE_DARK
+                    if muted:
+                        col = 0xD32F2F
+                else:
+                    lab = b2
+                    col = BLUE_DARK
+                rrect(g, x1, by, x1 + bw, by + 28, 10, col)
+                lab = fit(g, lab, "small", bw - 8)
+                g.text((x1 + (bw - width(g, lab, "small")) / 2, by + 19), lab,
+                       fill=WHITE, font=font("small"))
         if app.busy:
             b = fit(g, app.busy, "small", w - 16)
             g.text(((w - width(g, b, "small")) / 2, h - 36), b, fill=GREY_LIGHT,
@@ -2096,6 +2154,8 @@ class CallView(CanvasView):
             hint = u"OK: Accept    Back: Decline"
         elif st == "ended":
             hint = u"OK: Close"
+        elif self.live():
+            hint = u"3/OK/Back: Hang up"
         else:
             hint = u"OK or Back: Hang up"
         hint = fit(g, hint, "small", w - 10)

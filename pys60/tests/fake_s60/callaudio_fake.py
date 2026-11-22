@@ -14,6 +14,11 @@ class CallAudio:
         self.last_error = u""
         self.relay = None
         self.on_state = None
+        self.on_info = None
+        self.muted = 0
+        self.route = 1
+        self.want_mute = 0
+        self.want_route = 1
         CallAudio.instances.append(self)
 
     def start_relay(self, key, is_outgoing, connections, on_state, iap=0):
@@ -24,6 +29,20 @@ class CallAudio:
 
     def helper_state(self, name):
         self.on_state(name)
+
+    def set_mute(self, flag):
+        self.want_mute = not not flag
+        self.sent.append("M%d" % self.want_mute)
+
+    def set_route(self, n):
+        self.want_route = n
+        self.sent.append("R%d" % n)
+
+    def helper_info(self, muted, route):
+        self.muted = muted
+        self.route = route
+        if self.on_info is not None:
+            self.on_info()
 
     def start(self, on_packet, seconds=60):
         self.on_packet = on_packet

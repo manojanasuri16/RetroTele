@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.10.4"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.11.0"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -1659,6 +1659,7 @@ class App:
         except:
             iap = 0
         ok = ca.start_relay(cs["kb"], cs["out"], cs["conns"], self.audio_changed, iap)
+        ca.on_info = self.audio_info
         self.log("call audio helper %s %s" % (ok and "started" or "NOT started",
                                               to_b(getattr(ca, "last_error", u""))))
         self.call_changed()
@@ -1670,6 +1671,49 @@ class App:
         cs = self.client.cs
         if cs is not None and cs["state"] != "ended":
             self.redraw()
+
+    def audio_info(self):
+        if self.call_audio is None:
+            return
+        cs = self.client.cs
+        if cs is not None and cs["state"] != "ended" and self.screen == "call":
+            self.redraw()
+
+    def call_muted(self):
+        ca = self.call_audio
+        if ca is None:
+            return 0
+        return ca.want_mute
+
+    def call_route(self):
+        ca = self.call_audio
+        if ca is None:
+            return 1
+        return ca.want_route
+
+    def call_toggle_mute(self):
+        ca = self.call_audio
+        if ca is None:
+            return
+        ca.set_mute(not ca.want_mute)
+        self.call_menu()
+        self.redraw()
+
+    def call_set_route(self, n):
+        ca = self.call_audio
+        if ca is None:
+            return
+        ca.set_route(n)
+        self.redraw()
+
+    def call_cycle_route(self):
+        ca = self.call_audio
+        if ca is None:
+            return
+        self.call_set_route((ca.want_route + 1) % 3)
+
+    def call_add_person(self):
+        appuifw.note(u"Group calls need Telegram's newer protocol, which this phone can't run. Start a separate call or a group chat instead.", "info")
 
     def stop_call_audio(self):
         ca = self.call_audio
@@ -1728,7 +1772,18 @@ class App:
             appuifw.app.menu = [(u"Close", self.close_call)]
             appuifw.app.exit_key_handler = self.close_call
         else:
-            appuifw.app.menu = [(u"Hang up", self.call_hangup)]
+            m = []
+            if st == "connected" and self.call_audio is not None:
+                if self.call_muted():
+                    m.append((u"Unmute microphone", self.call_toggle_mute))
+                else:
+                    m.append((u"Mute microphone", self.call_toggle_mute))
+                m.append((u"Audio: Speaker", lambda self=self: self.call_set_route(1)))
+                m.append((u"Audio: Earpiece", lambda self=self: self.call_set_route(0)))
+                m.append((u"Audio: Bluetooth/auto", lambda self=self: self.call_set_route(2)))
+            m.append((u"Add person to call", self.call_add_person))
+            m.append((u"Hang up", self.call_hangup))
+            appuifw.app.menu = m
             appuifw.app.exit_key_handler = self.call_hangup
 
     def call_primary(self):

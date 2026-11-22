@@ -60,6 +60,12 @@ class CallAudio:
         self.state = ""
         self.cfg_path = ""
         self.keep = None
+        self.muted = 0
+        self.route = 1
+        self.want_mute = 0
+        self.want_route = 1
+        self.on_info = None
+        self.sent_init = 0
         self.armed = 0
 
     def relay_config(self, key, is_outgoing, connections):
@@ -108,6 +114,9 @@ class CallAudio:
         self.on_state = on_state
         self.relay = 1
         self.state = ""
+        self.sent_init = 0
+        self.want_mute = 0
+        self.want_route = 1
         self.rx = 0
         self.tx = 0
         self.errors = 0
@@ -139,6 +148,8 @@ class CallAudio:
         if name == self.state:
             return
         self.state = name
+        if name == "connected":
+            self._send_controls()
         cb = self.on_state
         if cb is not None:
             try:
@@ -193,6 +204,15 @@ class CallAudio:
             self.rx = self.rx + 1
             if data[:2] == "S ":
                 self._set_state(data[2:].strip())
+            elif data[:2] == "M ":
+                self.muted = (data[2:].strip() == "1")
+                self._info()
+            elif data[:2] == "D ":
+                try:
+                    self.route = int(data[2:].strip())
+                except:
+                    self.route = 2
+                self._info()
         else:
             self.rx = self.rx + 1
             try:
@@ -200,6 +220,33 @@ class CallAudio:
             except:
                 self.errors = self.errors + 1
                 self.last_error = u"on_packet: " + unicode(str(sys.exc_info()[1]), "latin-1")
+
+    def _info(self):
+        cb = self.on_info
+        if cb is not None:
+            try:
+                cb()
+            except:
+                self.errors = self.errors + 1
+                self.last_error = u"on_info: " + unicode(str(sys.exc_info()[1]), "latin-1")
+
+    def _send_controls(self):
+        # the helper may have started after the wishes were set: re-send
+        self._sendto("R%d" % self.want_route)
+        self._sendto("M%d" % self.want_mute)
+
+    def set_mute(self, flag):
+        if flag:
+            self.want_mute = 1
+        else:
+            self.want_mute = 0
+        self._sendto("M%d" % self.want_mute)
+
+    def set_route(self, n):
+        if n < 0 or n > 2:
+            return
+        self.want_route = n
+        self._sendto("R%d" % n)
 
     def _sendto(self, data):
         s = self.sock
@@ -224,5 +271,8 @@ class CallAudio:
         self.running = 0
         self.on_packet = None
         self.on_state = None
+        self.on_info = None
         self.relay = 0
         self.state = ""
+        self.muted = 0
+        self.route = 1

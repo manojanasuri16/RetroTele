@@ -420,6 +420,29 @@ assert screen_text().find(u"Reconnecting...") >= 0
 fa.helper_state("failed")
 assert screen_text().find(u"Audio failed") >= 0
 fa.helper_state("connected")
+# in-call controls
+t = screen_text()
+assert t.find(u"Mic: ON") >= 0 and t.find(u"Audio: Speaker") >= 0 and t.find(u"[1] Mic on") >= 0, t
+mlabels = [m[0] for m in appuifw.app.menu]
+assert u"Mute microphone" in mlabels and u"Audio: Earpiece" in mlabels and u"Add person to call" in mlabels, mlabels
+app.view.canvas.keys[ord("1")]()
+assert fa.sent[-1] == "M1" and app.call_muted()
+t = screen_text()
+assert t.find(u"Mic: MUTED") >= 0 and t.find(u"MUTED") >= 0, t
+assert u"Unmute microphone" in [m[0] for m in appuifw.app.menu]
+app.view.canvas.keys[ord("1")]()
+assert fa.sent[-1] == "M0" and screen_text().find(u"Mic: ON") >= 0
+app.view.canvas.keys[ord("2")]()
+assert fa.sent[-1] == "R2" and screen_text().find(u"Auto (Bluetooth)") >= 0
+app.view.canvas.keys[ord("2")]()
+assert fa.sent[-1] == "R0" and screen_text().find(u"Audio: Earpiece") >= 0
+app.view.canvas.keys[ord("2")]()
+assert fa.sent[-1] == "R1" and screen_text().find(u"Audio: Speaker") >= 0
+for m in appuifw.app.menu:
+    if m[0] == u"Audio: Earpiece":
+        m[1]()
+assert fa.sent[-1] == "R0"
+fa.helper_info(1, 0)
 # timer tick keeps going, then hang up with centre
 app.call_tick(); app.net.run()
 state["discard"] = None
