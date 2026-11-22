@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.11.4"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.12.0"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -357,6 +357,7 @@ class App:
         self.call_gen = 0
         self.call_timer = 0
         self.call_audio = None
+        self.pending_sig = []
         self.audio_state = ""
         self.call_return = "chats"
         self.redraw_armed = 0
@@ -1643,7 +1644,7 @@ class App:
     def call_ready(self, cs):
         """Call reached 'connected': start the relay audio helper."""
         self.stop_call_audio()
-        if self.client.call_version in ("2.7.7", "mimic"):
+        if self.client.call_version == "mimic":
             # probe mode: signalling only, the media protocol isn't built yet
             self.audio_state = "failed"
             self.log("call 2.7.7 probe: connected at the servers, no audio helper")
@@ -1660,16 +1661,43 @@ class App:
             return
         self.call_audio = ca
         self.audio_state = "connecting"
+        early = self.pending_sig
+        self.pending_sig = []
         iap = 0
         try:
             iap = int(self.cfg.get("apid") or 0)
         except:
             iap = 0
-        ok = ca.start_relay(cs["kb"], cs["out"], cs["conns"], self.audio_changed, iap)
+        if self.client.call_version == "2.7.7":
+            ok = ca.start_relay277(cs["kb"], cs["out"], cs["conns"], self.audio_changed, iap,
+                                   self.audio_signal)
+        else:
+            ok = ca.start_relay(cs["kb"], cs["out"], cs["conns"], self.audio_changed, iap)
         ca.on_info = self.audio_info
+        if self.client.call_version == "2.7.7":
+            for sid, d in early:
+                if sid == cs["id"]:
+                    ca.send_signaling(d)
         self.log("call audio helper %s %s" % (ok and "started" or "NOT started",
                                               to_b(getattr(ca, "last_error", u""))))
         self.call_changed()
+
+    def audio_signal(self, data):
+        """The 2.7.7 helper has a signalling blob for the peer."""
+        cs = self.client.cs
+        if cs is not None and cs["state"] != "ended":
+            self.client.send_signaling(cs, data)
+
+    def call_signaling(self, data):
+        """updatePhoneCallSignalingData for the current call."""
+        ca = self.call_audio
+        if ca is not None and hasattr(ca, "send_signaling"):
+            ca.send_signaling(data)
+        else:
+            # the helper isn't up yet (call not connected): keep it for call_ready
+            cs = self.client.cs
+            if cs is not None and len(self.pending_sig) < 64:
+                self.pending_sig.append((cs["id"], data))
 
     def audio_changed(self, name):
         if self.call_audio is None:
@@ -1913,7 +1941,7 @@ class App:
             fm = u"Fast mode: off (full check)"
         cv = u"Call version: 2.4.4 (old clients/modded)"
         if self.cfg.get("call_version", "2.4.4") == "2.7.7":
-            cv = u"Call version: 2.7.7 (official apps, probe)"
+            cv = u"Call version: 2.7.7 (official apps)"
         elif self.cfg.get("call_version", "2.4.4") == "mimic":
             cv = u"Call version: mimic official apps (test)"
         items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder", ap, fm,
@@ -1941,9 +1969,6 @@ class App:
                 self.cfg.set("call_version", "2.4.4")
             else:
                 self.cfg.set("call_version", "2.7.7")
-                appuifw.note(u"2.7.7 is a PROBE: the call connects at Telegram's servers and "
-                             u"the log shows if the other app accepts it, but there is no "
-                             u"audio yet.", "info")
             self.cfg.save()
             self.client.set_call_version(self.cfg.get("call_version", "2.4.4"))
         elif i == 5:

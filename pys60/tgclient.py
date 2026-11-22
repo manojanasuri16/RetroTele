@@ -1213,6 +1213,15 @@ class Client:
                    "peer": self.call_input(cs), "reason": {"_": reason}},
                   lambda r: None, lambda e: None)
 
+    def send_signaling(self, cs, data):
+        """phone.sendSignalingData: an opaque blob for the peer's call library."""
+        if cs is None or cs["id"] is None or cs["state"] == "ended":
+            return
+        def bad(e, self=self):
+            self.log("call sendSignalingData failed: %s" % str(e))
+        self.call({"_": "phone.sendSignalingData", "peer": self.call_input(cs), "data": data},
+                  lambda r: None, bad)
+
     def hang_up(self):
         """Decline (incoming, ringing), cancel or hang up."""
         cs = self.cs
@@ -1243,7 +1252,7 @@ class Client:
                 x.get("_"), x.get("ip", ""), x.get("port", ""),
                 binascii.hexlify(x.get("peer_tag", "")), x.get("id", "")))
         self.log("call server protocol: %s" % str(c.get("protocol")))
-        if self.call_version != "2.4.4":
+        if self.call_version == "mimic":
             # experiment calls only: the key lets the PC decode the peer's setup messages
             self.log("PROBE call key %s" % binascii.hexlify(cs["kb"]))
             self.log("PROBE call is_outgoing %d" % cs["out"])
@@ -1438,9 +1447,14 @@ class Client:
         elif n == "updateDeleteChannelMessages":
             self.ui.messages_deleted("h%d" % x["channel_id"], x.get("messages", []))
         elif n == "updatePhoneCallSignalingData":
-            self.log("call signaling data: %d bytes" % len(x.get("data", "")))
-            if self.call_version != "2.4.4":
-                self.log("PROBE signaling %s" % binascii.hexlify(x.get("data", "")))
+            data = x.get("data", "")
+            self.log("call signaling data: %d bytes" % len(data))
+            if self.call_version == "mimic":
+                self.log("PROBE signaling %s" % binascii.hexlify(data))
+            cs = self.cs
+            if (cs is not None and cs["id"] is not None and cs["id"] == x.get("phone_call_id")
+                    and cs["state"] != "ended"):
+                self.ui.call_signaling(data)
         elif n == "updatePhoneCall":
             self.call_update(x.get("phone_call") or {})
         elif n == "updateUserTyping" or n == "updateChatUserTyping":

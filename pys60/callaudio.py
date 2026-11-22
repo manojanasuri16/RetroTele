@@ -9,6 +9,7 @@ import types
 import socket
 import binascii
 import e32
+import tgcrypto
 
 HOST = "127.0.0.1"
 PORT_FROM_HELPER = 47001
@@ -67,6 +68,10 @@ class CallAudio:
         self.on_info = None
         self.sent_init = 0
         self.armed = 0
+        self.v277 = 0
+        self.on_signal = None
+        self.helper_ready = 0
+        self.sig_queue = []
 
     def relay_config(self, key, is_outgoing, connections):
         """Text for the helper: out=, key= (hex) and up to 4 ep=ip,port,tag
@@ -144,6 +149,107 @@ class CallAudio:
             return 0
         return 1
 
+    def relay_config277(self, key, is_outgoing, connections, rnd):
+        """Text for the v277 helper: ver=277, out=, key=, rnd= and one
+        c=<id>,<ip>,<port>,<tag hex or empty>,<tcp>,<webrtc> line per
+        phoneConnection / phoneConnectionWebrtc (up to 8). Returns (text, count)."""
+        out = "0"
+        if is_outgoing:
+            out = "1"
+        lines = ["ver=277", "out=" + out, "key=" + binascii.hexlify(key),
+                 "rnd=" + binascii.hexlify(rnd)]
+        n = 0
+        for c in connections:
+            if n >= 8:
+                break
+            kind = c.get("_")
+            if kind != "phoneConnection" and kind != "phoneConnectionWebrtc":
+                continue
+            ip = c.get("ip", "")
+            port = c.get("port", 0)
+            if not ip or port <= 0 or port > 65535:
+                continue
+            tag = c.get("peer_tag", "")
+            if len(tag) == 16:
+                tag = binascii.hexlify(tag)
+            else:
+                tag = ""
+            tcp = 0
+            if c.get("tcp"):
+                tcp = 1
+            web = 0
+            if kind == "phoneConnectionWebrtc":
+                web = 1
+            lines.append("c=%d,%s,%d,%s,%d,%d" % (c.get("id", 0), ip, port, tag, tcp, web))
+            n = n + 1
+        return "\n".join(lines) + "\n", n
+
+    def start_relay277(self, key, is_outgoing, connections, on_state, iap=0, on_signal=None):
+        """Start tgcallaudio.exe in v277 mode (calls with official apps).
+        on_state(name) as start_relay; on_signal(data) gets every signalling
+        blob the helper wants sent with phone.sendSignalingData."""
+        self.stop()
+        text, n = self.relay_config277(key, is_outgoing, connections, tgcrypto.random_bytes(56))
+        if iap:
+            text = text + "iap=%d\n" % iap
+        self.on_state = on_state
+        self.on_signal = on_signal
+        self.relay = 1
+        self.v277 = 1
+        self.helper_ready = 0
+        self.sig_queue = []
+        self.state = ""
+        self.sent_init = 0
+        self.want_mute = 0
+        self.want_route = 1
+        self.rx = 0
+        self.tx = 0
+        self.errors = 0
+        if n == 0:
+            self.last_error = u"no connection"
+            self._set_state("failed")
+            return 0
+        self.cfg_path = self.write_cfg(text)
+        if not self.cfg_path:
+            self._set_state("failed")
+            return 0
+        try:
+            self.sock = self._open()
+        except:
+            self.last_error = u"udp socket: " + unicode(str(sys.exc_info()[1]), "latin-1")
+            self._set_state("failed")
+            return 0
+        self.running = 1
+        self._arm()
+        try:
+            e32.start_exe(u"tgcallaudio.exe", u"relay 7200")
+        except:
+            self.last_error = u"start_exe: " + unicode(str(sys.exc_info()[1]), "latin-1")
+            self._set_state("failed")
+            return 0
+        return 1
+
+    def send_signaling(self, data):
+        """A signalling blob from the peer (updatePhoneCallSignalingData):
+        held back until the helper says 'S ready', then sent in order."""
+        if not self.v277 or not self.running:
+            return
+        if not self.helper_ready:
+            if len(self.sig_queue) < 64:
+                self.sig_queue.append(data)
+            return
+        self._sendto("G" + data)
+
+    def _helper_ready(self):
+        if self.helper_ready:
+            return
+        self.helper_ready = 1
+        q = self.sig_queue
+        self.sig_queue = []
+        for d in q:
+            self._sendto("G" + d)
+        self._send_controls()
+
     def _set_state(self, name):
         if name == self.state:
             return
@@ -189,7 +295,7 @@ class CallAudio:
             return
         _PENDING[0] = 1
         try:
-            _raw(self.sock).recvfrom(4096, 0, _dispatch)
+            _raw(self.sock).recvfrom(2048, 0, _dispatch)
         except:
             _PENDING[0] = 0
             self.errors = self.errors + 1
@@ -202,8 +308,19 @@ class CallAudio:
             return
         if self.relay:
             self.rx = self.rx + 1
-            if data[:2] == "S ":
-                self._set_state(data[2:].strip())
+            if data[:1] == "G" and self.v277:
+                cb = self.on_signal
+                if cb is not None and len(data) > 1:
+                    try:
+                        cb(data[1:])
+                    except:
+                        self.errors = self.errors + 1
+                        self.last_error = u"on_signal: " + unicode(str(sys.exc_info()[1]), "latin-1")
+            elif data[:2] == "S ":
+                if data[2:].strip() == "ready":
+                    self._helper_ready()
+                else:
+                    self._set_state(data[2:].strip())
             elif data[:2] == "M ":
                 self.muted = (data[2:].strip() == "1")
                 self._info()
@@ -273,6 +390,10 @@ class CallAudio:
         self.on_state = None
         self.on_info = None
         self.relay = 0
+        self.v277 = 0
+        self.on_signal = None
+        self.helper_ready = 0
+        self.sig_queue = []
         self.state = ""
         self.muted = 0
         self.route = 1

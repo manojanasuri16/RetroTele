@@ -212,6 +212,9 @@ def handle(f):
                 "protocol": f["protocol"], "start_date": 0,
                 "connections": [{"_": "phoneConnection", "id": 1, "ip": "1.2.3.4",
                                  "ipv6": "", "port": 598, "peer_tag": "\x01\x02" * 8}]}}
+    if n == "phone.sendSignalingData":
+        state.setdefault("sigs", []).append((f["peer"]["id"], f["data"]))
+        return True
     if n == "phone.receivedCall":
         state["received"] = f["peer"]["id"]
         return True
@@ -523,6 +526,79 @@ app.view.opus_test()
 ot = screen_text()
 print "opus test:", ot
 assert ot.find(u"Self-test OK") >= 0 and ot.find(u"Effort 0: 4.0 ms") >= 0 and ot.find(u"fast enough") >= 0, ot
+# ---- 2.7.7 (official apps): signalling plumbing + helper start
+saved_view, saved_screen = app.view, app.screen
+import callaudio
+sent277 = []
+started277 = []
+class FakeE32Exe:
+    pass
+callaudio._open_orig = callaudio.CallAudio._open
+callaudio.CallAudio._open = lambda self: "sock"
+callaudio.CallAudio._arm = lambda self: None
+callaudio.CallAudio._sendto = lambda self, d: (sent277.append(d), 1)[1]
+callaudio.e32.start_exe = lambda *a: started277.append(a)
+cfgs = []
+callaudio.CallAudio.write_cfg = lambda self, t: (cfgs.append(t), "C:\\x")[1]
+rca = callaudio.CallAudio()
+states277 = []
+sigs277 = []
+conns277 = [{"_": "phoneConnection", "id": -4611686018427387905, "ip": "9.8.7.6", "port": 596,
+             "peer_tag": "\xab" * 16},
+            {"_": "phoneConnection", "tcp": 1, "id": 7, "ip": "9.8.7.7", "port": 80, "peer_tag": "\x01" * 16},
+            {"_": "phoneConnectionWebrtc", "id": 8, "ip": "9.8.7.8", "port": 3478, "turn": 1}]
+assert rca.start_relay277("K" * 256, 1, conns277, states277.append, 5, sigs277.append) == 1
+assert started277 and started277[0][1] == u"relay 7200", started277
+cl = cfgs[0].split("\n")
+assert cl[0] == "ver=277" and cl[1] == "out=1" and cl[2] == "key=" + "4b" * 256, cl[:3]
+assert cl[3].startswith("rnd=") and len(cl[3]) == 4 + 112
+assert "c=-4611686018427387905,9.8.7.6,596," + "ab" * 16 + ",0,0" in cl, cl
+assert "c=7,9.8.7.7,80," + "01" * 16 + ",1,0" in cl
+assert "c=8,9.8.7.8,3478,,0,1" in cl
+assert "iap=5" in cl
+rca.send_signaling("one")
+rca.send_signaling("two")
+assert sent277 == [], sent277
+rca._handle("S ready")
+assert sent277[:2] == ["Gone", "Gtwo"], sent277
+assert states277 == [], states277
+rca.send_signaling("three")
+assert sent277[-1] == "Gthree"
+rca._handle("G\x01\x02blob")
+assert sigs277 == ["\x01\x02blob"], sigs277
+rca._handle("S connected")
+assert states277 == ["connected"]
+rca.stop()
+# client: phone.sendSignalingData and the incoming update hook
+cs277 = {"id": 4242, "hash": 77, "state": "connected", "start": 1, "kb": "K" * 256, "out": 1,
+         "conns": conns277, "fp": 1, "g_a": "x", "emoji": "", "ver": 1}
+app.client.send_signaling(cs277, "payload1")
+app.net.run()
+assert state["sigs"] == [(4242, "payload1")], state.get("sigs")
+got_sig = []
+app.call_signaling = got_sig.append
+app.client.cs = cs277
+app.client.one_update({"_": "updatePhoneCallSignalingData", "phone_call_id": 4242, "data": "d1"})
+app.client.one_update({"_": "updatePhoneCallSignalingData", "phone_call_id": 1, "data": "other"})
+assert got_sig == ["d1"], got_sig
+del app.call_signaling
+# early signalling is kept until the helper exists, then handed over in order
+import callaudio_fake
+retrotele.tgui.AUDIO_FACTORY = callaudio_fake.CallAudio
+app.call_signaling("e1")
+app.call_signaling("e2")
+app.client.set_call_version("2.7.7")
+app.call_ready(cs277)
+f277 = callaudio_fake.CallAudio.instances[-1]
+assert f277.v277 and f277.signals == ["e1", "e2"], f277.signals
+f277.on_signal("out1")
+assert state["sigs"][-1] == (4242, "out1"), state["sigs"]
+app.call_signaling("late")
+assert f277.signals[-1] == "late"
+app.client.set_call_version("2.4.4")
+app.stop_call_audio()
+app.client.cs = None
+app.view, app.screen = saved_view, saved_screen
 import callaudio_fake
 retrotele.tgui.AUDIO_FACTORY = callaudio_fake.CallAudio
 app.view.echo_call_audio()

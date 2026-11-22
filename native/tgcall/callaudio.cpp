@@ -32,21 +32,26 @@
 #include <commdbconnpref.h>
 extern "C" {
 #include "callproto.h"
+#include "c277_session.h"
 }
 
 const TInt KFrameBytes = 320;
 const TInt KFrameSamples = 160;
-const TInt KMaxPkt = 1500;
+const TInt KMaxPkt = 2048;
 const TInt KRingSize = 30;
 const TInt KPrefill = 6;       /* 120 ms: the RetroTele bridge delivers in bursts */
 const TInt KPortOut = 47001;
 const TInt KPortIn = 47002;
 const TInt KMaxEp = 4;
-const TInt KSends = 8;
+const TInt KSends = 16;
 const TInt KJbSlots = 12;
 const TInt KJbPkt = 320;
 const TInt KRelayFrame = 480;   /* 60 ms @ 8 kHz */
 const TInt KPingMax = 6;
+const TInt KMaxConn = 8;
+const TInt KDnRing = 4800;      /* v277 downlink PCM ring, samples (600 ms) */
+const TInt KDnPrefill = 960;    /* 120 ms */
+const TInt KOpusMax = 1500;
 
 static TInt NowUs()
 {
@@ -185,6 +190,8 @@ public:
         iConn.Close();
         for (TInt i = 0; i < KSends; i++) delete iSends[i];
         delete [] (TUint8*)iCtx;
+        delete [] (TUint8*)iS;
+        delete [] iDnPcm;
         if (iUp) { iUp->Stop(); iUp->Close(); }
         if (iDn) { iDn->Stop(); iDn->Close(); }
         delete iUpFmt;
@@ -341,6 +348,15 @@ public:
                 CActiveScheduler::Stop();
                 return EFalse;
             }
+            if (n > 1 && aData[0] == 'G') {
+                if (iV277 && iS && iRelayOk) {
+                    TInt e = c277_session_on_signaling(iS, aData.Ptr() + 1, (u32)(n - 1), NowMs());
+                    iSigIn++;
+                    if (e != 0) { Check(_L8("Signaling"), e); }
+                    Drain277();
+                }
+                return ETrue;
+            }
             if (n == 2 && aData[0] == 'M') {
                 iMuted = (aData[1] == '1');
                 TBuf8<48> lb;
@@ -486,6 +502,10 @@ public:
         iRelaySock.SetOpt(KSOSendBuf, KSOLSocket, 16384);
         iRelayRecv = new CRecv(*this, 1);
         if (!iRelayRecv) { Check(_L8("RelayAlloc"), KErrNoMemory); return; }
+        if (iV277) {
+            Setup277();
+            return;
+        }
         tgcp_init(iCtx, iKey, iOut, iEp[0].tag);
         tgcp_set_now(iCtx, NowMs());
         iRelayRecv->Start(iRelaySock);
@@ -496,6 +516,113 @@ public:
         b.Format(_L8("relay start out=%d endpoints=%d\n"), iOut, iNEp);
         Write(b);
     }
+    // ---- v277 (official apps) session
+    void Setup277()
+    {
+        iS = (c277_session*)new TUint8[sizeof(c277_session)];
+        iDnPcm = new TInt16[KDnRing];
+        if (!iS || !iDnPcm) { Check(_L8("SessAlloc"), KErrNoMemory); return; }
+        Mem::FillZ(iS, sizeof(c277_session));
+        TInt r = c277_session_init(iS, iKey, iOut, iConn277, (u32)iNConn, iRnd, 56);
+        Mem::FillZ(iKey, sizeof(iKey));
+        Mem::FillZ(iRnd, sizeof(iRnd));
+        {
+            TBuf8<96> b;
+            b.Format(_L8("step: v277 session init %d conns %d\n"), r, iNConn);
+            Write(b);
+        }
+        if (r != C277_SESS_OK) { Check(_L8("SessInit"), r); iStatusName.Copy(_L8("failed")); SendStatus(iStatusName); return; }
+        iRelayRecv->Start(iRelaySock);
+        iRelayOk = ETrue;
+        iStatusName.Copy(_L8("connecting"));
+        SendStatus(iStatusName);
+        SendStatus(_L8("ready"));
+        Write(_L8("relay start v277\n"));
+    }
+    void Drain277()
+    {
+        for (TInt i = 0; i < iS->out.n; i++) {
+            c277_out_item& it = iS->out.item[i];
+            if (it.kind == C277_OUT_UDP) {
+                TInetAddr to(it.ip, (TUint)it.port);
+                SendTo(iRelaySock, to, it.data, (TInt)it.len);
+                iUdpTx++;
+            } else if (it.kind == C277_OUT_SIGNAL && iNetOk) {
+                TUint8 tmp[C277_OUT_MAX + 1];
+                tmp[0] = 'G';
+                Mem::Copy(tmp + 1, it.data, it.len);
+                SendTo(iSock, iDest, tmp, (TInt)it.len + 1);
+                iSigOut++;
+            }
+        }
+        iS->out.n = 0;
+    }
+    void PollOpus277()
+    {
+        if (!iDec || !iS) return;
+        for (TInt k = 0; k < 8; k++) {
+            if (KDnRing - iDnCount < 960) break;       /* ring full: leave packets queued */
+            TUint8 pkt[KOpusMax];
+            u32 len = 0;
+            TInt r = c277_session_poll_opus(iS, pkt, sizeof(pkt), &len);
+            if (r == C277_JB_EMPTY) break;
+            TInt16 pcm[960];
+            TInt n;
+            if (r == C277_JB_PACKET) {
+                n = opus_decode(iDec, pkt, (opus_int32)len, pcm, 960, 0);
+                iRecvPkts++;
+            } else {
+                n = opus_decode(iDec, NULL, 0, pcm, 480, 0);
+                iLostPkts++;
+                iPlcFrames++;
+            }
+            if (n < 0) { Check(_L8("Decode"), n); continue; }
+            for (TInt i = 0; i < n; i++) {
+                iDnPcm[(iDnHead + iDnCount) % KDnRing] = pcm[i];
+                iDnCount++;
+            }
+            iEverRecv = ETrue;
+        }
+    }
+    void Handle277(const TDesC8& aData, const TInetAddr& aFrom)
+    {
+        if (!iS) return;
+        c277_session_on_udp(iS, aFrom.Address(), aFrom.Port(), aData.Ptr(), (u32)aData.Length(), NowMs());
+        PollOpus277();
+        Drain277();
+    }
+    void Tick277()
+    {
+        if (!iS) return;
+        c277_session_tick(iS, NowMs());
+        PollOpus277();
+        Drain277();
+        TInt ice = c277_session_ice_state(iS);
+        if (ice != iLastIce) {
+            TBuf8<48> b;
+            b.Format(_L8("event: ice %d -> %d\n"), iLastIce, ice);
+            Write(b);
+            iLastIce = ice;
+        }
+        if (!iEvCreds && iS->ice.have_creds) { iEvCreds = ETrue; Write(_L8("event: peer credentials\n")); }
+        if (!iEvCand && iS->peer_cands > 0) { iEvCand = ETrue; Write(_L8("event: peer candidate\n")); }
+        if (!iEvRefl && c277_session_refl_ready(iS)) { iEvRefl = ETrue; Write(_L8("event: reflector hello reply\n")); }
+        if (!iEvRtp && iS->n_rtp_rx > 0) { iEvRtp = ETrue; Write(_L8("event: first RTP packet\n")); }
+        TBool conn = c277_session_ice_connected(iS) && c277_session_media_flowing(iS, NowMs());
+        if (conn) iEverConn = ETrue;
+        TPtrC8 want(_L8("connecting"));
+        if (conn) want.Set(_L8("connected"));
+        else if (iEverConn) want.Set(_L8("reconnecting"));
+        else if (ice == C277_ICE_FAILED) want.Set(_L8("failed"));
+        if (iStatusName != want) {
+            TBuf8<64> b;
+            b.Format(_L8("state %S -> %S\n"), &iStatusName, &want);
+            Write(b);
+            iStatusName.Copy(want);
+            SendStatus(iStatusName);
+        }
+    }
+    TBool Media277() { return iV277 && iS && iRelayOk && c277_session_ice_connected(iS); }
     TBool ReadConfig()
     {
         _LIT(KC, "C:\\Data\\retrotele_call.cfg");
@@ -532,7 +659,8 @@ public:
         if (!got) return EFalse;
         Write(_L8("cfg: parsing\n"));
         iNEp = 0;
-        TBool haveKey = EFalse;
+        TBool haveKey = EFalse, haveRnd = EFalse;
+        iNConn = 0;
         const TUint8* p = buf.Ptr();
         TInt n = buf.Length();
         TInt pos = 0;
@@ -544,7 +672,14 @@ public:
             while (e > s && (p[e - 1] == '\r' || p[e - 1] == ' ')) e--;
             const TUint8* l = p + s;
             TInt len = e - s;
-            if (len > 4 && l[0] == 'i' && l[1] == 'a' && l[2] == 'p' && l[3] == '=') {
+            if (len == 7 && l[0] == 'v' && l[1] == 'e' && l[2] == 'r' && l[3] == '=' &&
+                l[4] == '2' && l[5] == '7' && l[6] == '7') {
+                iV277 = ETrue;
+            } else if (len == 4 + 112 && l[0] == 'r' && l[1] == 'n' && l[2] == 'd' && l[3] == '=') {
+                haveRnd = ParseHex(l + 4, 112, iRnd);
+            } else if (len > 2 && l[0] == 'c' && l[1] == '=' && iNConn < KMaxConn) {
+                ParseConn(l + 2, len - 2);
+            } else if (len > 4 && l[0] == 'i' && l[1] == 'a' && l[2] == 'p' && l[3] == '=') {
                 TInt v = 0;
                 if (ParseInt(l + 4, len - 4, v)) iIap = v;
             } else if (len > 4 && l[0] == 'o' && l[1] == 'u' && l[2] == 't' && l[3] == '=') {
@@ -570,10 +705,58 @@ public:
         Mem::FillZ((TUint8*)buf.Ptr(), 2048);   /* do not leave the key around */
         {
             TBuf8<64> lb;
-            lb.Format(_L8("cfg: parsed key=%d eps=%d\n"), haveKey, iNEp);
+            lb.Format(_L8("cfg: parsed key=%d eps=%d conns=%d rnd=%d v277=%d\n"), haveKey, iNEp, iNConn,
+                      haveRnd, iV277);
             Write(lb);
         }
+        if (iV277) return haveKey && haveRnd && iNConn > 0;
         return haveKey && iNEp > 0;
+    }
+    // c=<id64 decimal>,<ip>,<port>,<tag32hex or empty>,<tcp>,<webrtc>
+    void ParseConn(const TUint8* l, TInt len)
+    {
+        TInt cp[5], nc = 0;
+        for (TInt i = 0; i < len && nc < 5; i++) if (l[i] == ',') cp[nc++] = i;
+        if (nc != 5) return;
+        c277_sess_conn& c = iConn277[iNConn];
+        Mem::FillZ(&c, sizeof(c));
+        // signed 64-bit decimal -> hi (signed) / lo, via 32-bit limbs
+        TInt i = 0;
+        TBool neg = EFalse;
+        if (i < cp[0] && l[i] == '-') { neg = ETrue; i++; }
+        if (i >= cp[0] || cp[0] - i > 20) return;
+        TUint32 hi = 0, lo = 0;
+        for (; i < cp[0]; i++) {
+            if (l[i] < '0' || l[i] > '9') return;
+            TUint32 d = (TUint32)(l[i] - '0');
+            // (hi:lo) = (hi:lo) * 10 + d in 16-bit steps
+            TUint32 a = (lo & 0xFFFF) * 10 + d;
+            TUint32 b = (lo >> 16) * 10 + (a >> 16);
+            lo = (b << 16) | (a & 0xFFFF);
+            hi = hi * 10 + (b >> 16);
+        }
+        if (neg) {
+            lo = ~lo + 1;
+            hi = ~hi + (lo == 0 ? 1 : 0);
+        }
+        c.id.hi = (TInt)hi;
+        c.id.lo = lo;
+        TUint32 ip;
+        TInt port;
+        if (!ParseIp(l + cp[0] + 1, cp[1] - cp[0] - 1, ip)) return;
+        if (!ParseInt(l + cp[1] + 1, cp[2] - cp[1] - 1, port) || port < 0 || port > 65535) return;
+        TInt tl = cp[3] - cp[2] - 1;
+        if (tl == 32) {
+            if (!ParseHex(l + cp[2] + 1, 32, c.peer_tag)) return;
+        } else if (tl != 0) {
+            return;
+        }
+        c.ip = ip;
+        c.port = (TUint32)port;
+        if (cp[4] + 1 >= len) return;
+        c.tcp = l[cp[3] + 1] == '1';
+        c.webrtc = l[cp[4] + 1] == '1';
+        iNConn++;
     }
     TInt FindEp(const TInetAddr& aFrom)
     {
@@ -591,6 +774,7 @@ public:
     }
     void HandleRelay(const TDesC8& aData, const TInetAddr& aFrom)
     {
+        if (iV277) { if (iRelayOk) Handle277(aData, aFrom); return; }
         if (!iRelayOk || !iCtx) return;
         TInt idx = FindEp(aFrom);
         if (idx < 0) return;
@@ -769,6 +953,7 @@ public:
     {
         if (!iRelayOk) return;
         if (iRelayRecv && !iRelayRecv->IsActive()) iRelayRecv->Start(iRelaySock);
+        if (iV277) { Tick277(); return; }
         TUint32 now = NowMs();
         if (iLocked < 0 && iPingsSent < KPingMax && (!iPingsSent || (TInt)(now - iLastPing) >= 500))
             SendPings(now);
@@ -797,7 +982,20 @@ public:
         TInt samples = n / 2;
         if (samples > KFrameSamples) samples = KFrameSamples;
         Mem::FillZ(pcm, n);
-        if (iRelayMode) {
+        if (iV277) {
+            if (!iDnPlaying && iDnCount >= KDnPrefill) iDnPlaying = ETrue;
+            if (iDnPlaying) {
+                if (iDnCount >= KFrameSamples) {
+                    for (TInt i = 0; i < samples; i++) pcm[i] = iDnPcm[(iDnHead + i) % KDnRing];
+                    iDnHead = (iDnHead + KFrameSamples) % KDnRing;
+                    iDnCount -= KFrameSamples;
+                    iUnderrun = 0;
+                } else {
+                    iUnderruns++;
+                    if (++iUnderrun >= 5) iDnPlaying = EFalse;   /* rebuild the prefill */
+                }
+            }
+        } else if (iRelayMode) {
             if (Connected()) {
                 if (iPcmPos >= KRelayFrame) { NextPacket(); iPcmPos = 0; }
                 Mem::Copy(pcm, iPcm60 + iPcmPos, samples * 2);
@@ -860,7 +1058,28 @@ public:
             TInt a = s[i] < 0 ? -s[i] : s[i];
             if (a > iPeakIn) iPeakIn = a;
         }
-        if (iRelayMode) {
+        if (iV277) {
+            if (n >= KFrameBytes && iEnc && Media277() && !iMuted) {
+                Mem::Copy(iUpAcc + iUpN * KFrameSamples, s, KFrameBytes);
+                iUpN++;
+                if (iUpN >= 3) {
+                    iUpN = 0;
+                    TUint8 pkt[KJbPkt];
+                    TInt t0 = NowUs();
+                    TInt r = opus_encode(iEnc, iUpAcc, KRelayFrame, pkt, KJbPkt);
+                    iEncUs += NowUs() - t0;
+                    if (r > 0) {
+                        iEncFrames++;
+                        if (c277_session_send_opus(iS, pkt, (u32)r, NowMs()) == C277_SESS_OK) iSentPkts++;
+                        Drain277();
+                    } else {
+                        Check(_L8("Encode"), r ? r : -1);
+                    }
+                }
+            } else {
+                iUpN = 0;
+            }
+        } else if (iRelayMode) {
             if (n >= KFrameBytes && iEnc && Connected() && !iMuted) {
                 Mem::Copy(iUpAcc + iUpN * KFrameSamples, s, KFrameBytes);
                 iUpN++;
@@ -924,6 +1143,19 @@ public:
         iTicks++;
         TInt avg = iEncFrames > iLastEnc ? iEncUs / (iEncFrames - iLastEnc) : 0;
         TBuf8<320> line;
+        if (iV277 && iS) {
+            line.Format(_L8("r %d ver 277 ice %d refl %d sig_acked %d media %d sent %d recv %d lost %d "
+                            "plc %d underruns %d sigq %d errors %d last %d\n"),
+                        iTicks, c277_session_ice_state(iS), c277_session_refl_ready(iS),
+                        c277_session_signaling_acked(iS), c277_session_media_flowing(iS, NowMs()),
+                        iSentPkts, iRecvPkts, iLostPkts, iPlcFrames, iUnderruns, iSigOut,
+                        iErrors, iLast);
+            Write(line);
+            if (iNetOk && iStatusName.Length()) SendStatus(iStatusName);
+            if (iNetOk) SendStatus(_L8("ready"));
+            if (iTicks >= iSeconds) CActiveScheduler::Stop();
+            return;
+        }
         if (iRelayMode) {
             TInt rtt = iLocked >= 0 ? iRtt[iLocked] : 0;
             if (iLocked < 0) for (TInt i = 0; i < iNEp; i++) if (iPongSeen[i] && (!rtt || iRtt[i] < rtt)) rtt = iRtt[i];
@@ -1022,6 +1254,17 @@ private:
     TInt iEncFrames, iSentPkts, iDecFrames, iRecvPkts;
     TInt iPlcFrames, iUnderruns, iEncUs, iDecUs, iLastEnc;
     TInt iPeakIn, iPeakOut;
+    // v277
+    TBool iV277;
+    c277_session* iS;
+    c277_sess_conn iConn277[KMaxConn];
+    TInt iNConn;
+    TUint8 iRnd[56];
+    TInt16* iDnPcm;
+    TInt iDnHead, iDnCount, iUnderrun;
+    TBool iDnPlaying;
+    TInt iLostPkts, iUdpTx, iSigOut, iSigIn, iLastIce;
+    TBool iEvCreds, iEvCand, iEvRefl, iEvRtp, iEverConn;
 };
 
 void CRecv::RunL()

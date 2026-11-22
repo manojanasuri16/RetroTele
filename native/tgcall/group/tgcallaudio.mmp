@@ -5,19 +5,24 @@ UID           0x0 0xE7A3D5E3
 CAPABILITY    MultimediaDD ReadDeviceData WriteDeviceData UserEnvironment NetworkServices LocalServices
 VENDORID      0
 EPOCSTACKSIZE 0x10000
-EPOCHEAPSIZE  0x20000 0x100000
+EPOCHEAPSIZE  0x20000 0x400000
 
 SYSTEMINCLUDE \epoc32\include
 SYSTEMINCLUDE \epoc32\include\libc
 USERINCLUDE   ..
 USERINCLUDE   ..\..\opus\src\include
 USERINCLUDE   ..\..\callproto
+USERINCLUDE   ..\..\call277
 
 SOURCEPATH    ..
 SOURCE        callaudio.cpp
 
 SOURCEPATH    ..\..\callproto
-SOURCE        callproto.c callproto_crypto.c
+SOURCE        callproto.c
+// callproto_crypto.c is compiled as part of c277_crypto.c (#include): do not list it twice
+
+SOURCEPATH    ..\..\call277
+SOURCE        c277_crypto.c c277_msg.c c277_conn.c c277_refl.c c277_stun.c c277_ice.c c277_rtp.c c277_session.c
 
 STATICLIBRARY tgopus.lib
 LIBRARY       euser.lib efsrv.lib esock.lib insock.lib estlib.lib voipaudiointfc.lib commdb.lib

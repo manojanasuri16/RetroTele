@@ -27,6 +27,18 @@ class CallAudio:
         self.running = 1
         return 1
 
+    def start_relay277(self, key, is_outgoing, connections, on_state, iap=0, on_signal=None):
+        self.relay = (key, is_outgoing, connections)
+        self.v277 = 1
+        self.on_state = on_state
+        self.on_signal = on_signal
+        self.signals = []
+        self.running = 1
+        return 1
+
+    def send_signaling(self, data):
+        self.signals.append(data)
+
     def helper_state(self, name):
         self.on_state(name)
 
