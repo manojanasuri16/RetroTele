@@ -1236,6 +1236,10 @@ class Client:
             cs["id"] = c["id"]
             cs["hash"] = c["access_hash"]
             cs["g_a_hash"] = c.get("g_a_hash", "")
+            pr = c.get("protocol") or {}
+            self.log("call incoming protocol: udp_p2p=%s udp_reflector=%s min_layer=%s "
+                     "max_layer=%s versions=%s" % (pr.get("udp_p2p"), pr.get("udp_reflector"),
+                     pr.get("min_layer"), pr.get("max_layer"), str(pr.get("library_versions"))))
             self.call({"_": "phone.receivedCall", "peer": self.call_input(cs)},
                       lambda r: None, lambda e: None)
             self.call_state(cs, "incoming", "Incoming Telegram call")
@@ -1245,6 +1249,7 @@ class Client:
         if cs["id"] is None or c.get("id") != cs["id"]:
             return
         if n == "phoneCallDiscarded":
+            self.log("call discarded: %s" % str(c))
             r = (c.get("reason") or {}).get("_", "")
             text = "Call ended"
             if r == "phoneCallDiscardReasonBusy":
