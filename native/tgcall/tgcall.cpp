@@ -22,6 +22,8 @@
 #include <mdaaudioinputstream.h>
 #include <mdaaudiooutputstream.h>
 #include <mda/common/audio.h>
+#include <libc/sys/reent.h>
+#include "tgopus_bench.h"
 
 const TInt KFrameMs = 20;
 const TInt KMaxFifo = 64000;        /* bytes: 2 s at 16 kHz mono */
@@ -318,6 +320,57 @@ void CLoopback::MaoscPlayComplete(TInt aError)
     }
 }
 
+/* ------------------------------------------------------------------ Opus */
+/* Opus needs ~16-32 KB of stack (C99 arrays), more than the Python thread
+   may have, so the benchmark runs on its own thread with 64 KB and the
+   caller waits for it. */
+
+struct TBench {
+    TInt iSelfTest;
+    TInt iRate, iComplexity, iBitrate, iFrames;
+    TInt iEncUs, iDecUs, iRc;
+    TInt iWallMs;
+};
+
+static TInt BenchThread(TAny* aArg)
+{
+    TBench* b = (TBench*)aArg;
+    TTime t0;
+    t0.HomeTime();
+    int enc = 0, dec = 0;
+    if (b->iSelfTest)
+        b->iRc = tgopus_selftest();
+    else
+        b->iRc = tgopus_bench(b->iRate, b->iComplexity, b->iBitrate, b->iFrames, &enc, &dec);
+    b->iEncUs = enc;
+    b->iDecUs = dec;
+    TTime t1;
+    t1.HomeTime();
+    b->iWallMs = (TInt)(t1.MicroSecondsFrom(t0).Int64() / 1000);
+    CloseSTDLIB();
+    return KErrNone;
+}
+
+static TInt RunBench(TBench& aBench)
+{
+    RThread t;
+    TName name;
+    name.Format(_L("tgopus%x"), User::NTickCount());
+    TInt err = t.Create(name, BenchThread, 0x10000, NULL, &aBench);
+    if (err != KErrNone)
+        return err;
+    TRequestStatus st;
+    t.Logon(st);
+    t.Resume();
+    User::WaitForRequest(st);
+    TInt reason = t.ExitReason();
+    TExitType type = t.ExitType();
+    t.Close();
+    if (type == EExitPanic)
+        return KErrDied;
+    return reason;
+}
+
 /* ------------------------------------------------------------------ Python */
 
 static CLoopback* Engine()
@@ -376,7 +429,42 @@ static PyObject* tg_stats(PyObject* /*self*/, PyObject* /*args*/)
                          e->iFirstPlayMs, e->FifoBytes(), e->iMaxLevel);
 }
 
+/* opus_bench(rate, complexity, bitrate, frames) ->
+       (rc, enc_us_per_frame, dec_us_per_frame, wall_ms) */
+static PyObject* tg_opus_bench(PyObject* /*self*/, PyObject* args)
+{
+    TBench b;
+    Mem::FillZ(&b, sizeof(b));
+    b.iRate = 16000; b.iComplexity = 0; b.iBitrate = 16000; b.iFrames = 200;
+    if (!PyArg_ParseTuple(args, "|iiii", &b.iRate, &b.iComplexity, &b.iBitrate, &b.iFrames))
+        return NULL;
+    TInt err;
+    Py_BEGIN_ALLOW_THREADS
+    err = RunBench(b);
+    Py_END_ALLOW_THREADS
+    if (err != KErrNone)
+        b.iRc = err;
+    return Py_BuildValue("(iiii)", b.iRc, b.iEncUs, b.iDecUs, b.iWallMs);
+}
+
+/* opus_selftest() -> (rc, wall_ms): encode + decode 1 s and check the output */
+static PyObject* tg_opus_selftest(PyObject* /*self*/, PyObject* /*args*/)
+{
+    TBench b;
+    Mem::FillZ(&b, sizeof(b));
+    b.iSelfTest = 1;
+    TInt err;
+    Py_BEGIN_ALLOW_THREADS
+    err = RunBench(b);
+    Py_END_ALLOW_THREADS
+    if (err != KErrNone)
+        b.iRc = err;
+    return Py_BuildValue("(ii)", b.iRc, b.iWallMs);
+}
+
 static const PyMethodDef tgcall_methods[] = {
+    {"opus_bench", (PyCFunction)tg_opus_bench, METH_VARARGS, NULL},
+    {"opus_selftest", (PyCFunction)tg_opus_selftest, METH_VARARGS, NULL},
     {"start", (PyCFunction)tg_start, METH_VARARGS, NULL},
     {"stop", (PyCFunction)tg_stop, METH_VARARGS, NULL},
     {"stats", (PyCFunction)tg_stats, METH_VARARGS, NULL},

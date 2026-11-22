@@ -7,4 +7,5 @@ phone-installs/
 pys60/dist/
 tools/emoji/cache/
 tools/py22/
-native/opus/
+native/opus/src/
+native/opus/build.log

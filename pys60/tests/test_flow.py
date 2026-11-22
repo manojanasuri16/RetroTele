@@ -362,6 +362,10 @@ app.view.toggle(); app.net.run(); app.view.tick()
 ct = screen_text()
 print "call test:", ct
 assert ct.find(u"32000 B/s") >= 0 and ct.find(u"running") >= 0, ct
+app.view.opus_test()
+ot = screen_text()
+print "opus test:", ot
+assert ot.find(u"Self-test OK") >= 0 and ot.find(u"Effort 0: 4.0 ms") >= 0 and ot.find(u"fast enough") >= 0, ot
 app.exit()
 import tgcall
 assert not tgcall._state["on"]

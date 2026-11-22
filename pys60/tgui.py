@@ -1633,6 +1633,56 @@ class CallTestView(CanvasView):
                 pass
             self.running = 0
 
+    def opus_test(self):
+        """Can the phone compress voice fast enough? Times Opus encode+decode
+        of 20 ms frames (16 kHz mono, 16 kbit/s, VoIP mode)."""
+        try:
+            import tgcall
+        except:
+            self.error = u"tgcall module missing"
+            self.draw()
+            return
+        self.stop()
+        self.lines = [u"Opus test running (about a minute)..."]
+        self.draw()
+        try:
+            e32.ao_yield()
+        except:
+            pass
+        out = []
+        try:
+            rc, ms = tgcall.opus_selftest()
+            self.app.log("opus selftest rc %d, %d ms" % (rc, ms))
+            if rc == 0:
+                out.append(u"Self-test OK (%.1f s)" % (ms / 1000.0))
+            else:
+                out.append(u"Self-test FAILED (%d)" % rc)
+            best = None
+            for cx in (0, 2, 5):
+                rc, enc, dec, wall = tgcall.opus_bench(16000, cx, 16000, 100)
+                self.app.log("opus bench cx %d: rc %d enc %d us dec %d us wall %d ms" %
+                             (cx, rc, enc, dec, wall))
+                if rc != 0:
+                    out.append(u"Effort %d: failed (%d)" % (cx, rc))
+                    continue
+                per = (wall * 1000) / 100      # wall clock per frame (us)
+                out.append(u"Effort %d: %.1f ms per 20 ms frame" % (cx, per / 1000.0))
+                if best is None or per < best:
+                    best = per
+            if best is not None:
+                if best < 10000:
+                    out.append(u"Verdict: fast enough for calls")
+                elif best < 20000:
+                    out.append(u"Verdict: just fits, no headroom")
+                else:
+                    out.append(u"Verdict: too slow for live calls")
+        except:
+            import sys
+            out.append(u"Error: " + to_u(str(sys.exc_info()[1])))
+            self.app.log("opus test error: " + str(sys.exc_info()[1]))
+        self.lines = out
+        self.draw()
+
     def tick(self):
         if not self.running or self.app.view is not self:
             return
@@ -1660,10 +1710,10 @@ class CallTestView(CanvasView):
         g.rectangle((0, 0, w, H), fill=BLUE)
         g.text((12, 30), u"Call test", fill=WHITE, font=font("title"))
         y = H + 22
-        if not self.running:
+        if not self.running and self.stats is None and not self.lines:
             intro = [u"Echo test: speak and you hear yourself after half a second, "
                      u"the way a call would. It shows if the phone can record and play "
-                     u"live audio.", u"", u"Centre key: start / stop"]
+                     u"live audio.", u"Centre key: start / stop. Options: Opus speed test."]
             for t in intro:
                 for l in wrap(g, t, "text", w - 24, 6):
                     g.text((12, y), l, fill=TEXT, font=font("text"))

@@ -27,7 +27,10 @@ OUT="$EPOCROOT/epoc32/release/gcce/urel/retrotele_rscfix.exe"
 cp "$OUT" "$HERE/../pys60/native/retrotele_rscfix.exe"
 ls -la "$HERE/../pys60/native/retrotele_rscfix.exe"
 
-# tgcall.pyd: live audio for the call experiments (Settings > Call test)
+# tgopus.lib: the Opus codec (fixed point), linked into tgcall.pyd
+sh "$HERE/opus/build_opus.sh"
+
+# tgcall.pyd: live audio and the Opus benchmark (Settings > Call test)
 cd "$HERE/tgcall/group"
 bldmake bldfiles >/dev/null 2>&1
 abld build gcce urel 2>&1 | grep -iE "error" || true
