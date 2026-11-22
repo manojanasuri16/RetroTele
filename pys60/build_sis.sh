@@ -44,11 +44,12 @@ if [ -f native/tgnative.pyd ] && [ "$NATIVE" != 0 ]; then
   EXTRAS="--extrasdir=extras"
   echo "including native/tgnative.pyd"
 fi
-if [ -f native/tgcall.pyd ]; then
+# the call audio helper: runs the call itself (Opus, VoIP audio, relay protocol)
+if [ -f native/tgcallaudio.exe ]; then
   mkdir -p build/app/extras/sys/bin
-  cp native/tgcall.pyd build/app/extras/sys/bin/
+  cp native/tgcallaudio.exe build/app/extras/sys/bin/
   EXTRAS="--extrasdir=extras"
-  echo "including native/tgcall.pyd (call test)"
+  echo "including native/tgcallaudio.exe (calls)"
 fi
 if [ -f native/retrotele_rscfix.exe ]; then
   mkdir -p build/app/extras/sys/bin build/app/extras/resource/retrotele
@@ -68,38 +69,3 @@ $PY tools/py2sis_rscfix.py "$(dirname $ENS)" $OPTS --drive=any build/app dist/Re
 grep "rscfix" build/py2sis.log || true
 echo "built dist/RetroTele.sis"
 ls -la dist
-
-# Separate helper package for the call test on unlocked phones: tgaudiotest.exe
-# has MultimediaDD, which only installs where the Install Server patch lets
-# self-signed packages have device capabilities. Kept out of RetroTele.sis so
-# the app itself still installs everywhere.
-if [ -f native/tgaudiotest.exe ]; then
-  rm -rf build/audiotest && mkdir -p build/audiotest/sys/bin
-  cp native/tgaudiotest.exe build/audiotest/sys/bin/
-  $PY $ENS simplesis --uid=0xE7A3D5C6 --version=$VERSION --drive=C \
-    --caption="RetroTele audio test" --vendor=RetroTele \
-    --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
-    build/audiotest dist/RetroTele-audiotest.sis </dev/null >build/simplesis.log
-  echo "built dist/RetroTele-audiotest.sis"
-fi
-# VoIP echo test (needs Nokia's VoIPAudioSrvc SISX on the phone too). Own
-# package and ID range 0xE7A3D5E0-EF: RetroTorch already uses 0xE7A3D5C7.
-if [ -f native/tgvoiptest.exe ]; then
-  rm -rf build/voiptest && mkdir -p build/voiptest/sys/bin
-  cp native/tgvoiptest.exe build/voiptest/sys/bin/
-  $PY $ENS simplesis --uid=0xE7A3D5E1 --version=$VERSION --drive=C \
-    --caption="RetroTele VoIP test" --vendor=RetroTele \
-    --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
-    build/voiptest dist/RetroTele-voiptest.sis </dev/null >>build/simplesis.log
-  echo "built dist/RetroTele-voiptest.sis"
-fi
-# Telegram call audio engine (VoIP + Opus over localhost UDP), own package
-if [ -f native/tgcallaudio.exe ]; then
-  rm -rf build/callaudio && mkdir -p build/callaudio/sys/bin
-  cp native/tgcallaudio.exe build/callaudio/sys/bin/
-  $PY $ENS simplesis --uid=0xE7A3D5E3 --version=$VERSION --drive=C \
-    --caption="RetroTele call audio" --vendor=RetroTele \
-    --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
-    build/callaudio dist/RetroTele-callaudio.sis </dev/null >>build/simplesis.log
-  echo "built dist/RetroTele-callaudio.sis"
-fi

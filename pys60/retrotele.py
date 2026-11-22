@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.12.0"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.12.1"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -583,7 +583,7 @@ class App:
         if tgcrypto.NATIVE:
             default = "1"
         self.client.verify = self.cfg.get("verify", default) == "1"
-        self.client.set_call_version(self.cfg.get("call_version", "2.4.4"))
+        self.client.set_call_version("2.7.7")      # works with official apps
         boot_log("native crypto: %d, full check: %d" % (tgcrypto.NATIVE, self.client.verify))
         self.status(u"Connecting...")
         self.client.start()
@@ -1939,13 +1939,7 @@ class App:
         fm = u"Fast mode: on"
         if self.cfg.get("verify", default) == "1":
             fm = u"Fast mode: off (full check)"
-        cv = u"Call version: 2.4.4 (old clients/modded)"
-        if self.cfg.get("call_version", "2.4.4") == "2.7.7":
-            cv = u"Call version: 2.7.7 (official apps)"
-        elif self.cfg.get("call_version", "2.4.4") == "mimic":
-            cv = u"Call version: mimic official apps (test)"
-        items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder", ap, fm,
-                 u"Call test (experimental)", cv]
+        items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder", ap, fm]
         i = appuifw.popup_menu(items, u"Settings")
         if i == 0:
             if self.setup_ap(1):
@@ -1959,18 +1953,6 @@ class App:
                 self.client.logout(lambda self=self: (self.done_wait(), self.logged_out()))
         elif i == 3:
             appuifw.note(u"Log: E:\\retrotele_log.txt, data: " + to_u(self.dir), "info")
-        elif i == 6:
-            self.call_test()
-        elif i == 7:
-            cur = self.cfg.get("call_version", "2.4.4")
-            if cur == "2.7.7":
-                self.cfg.set("call_version", "mimic")
-            elif cur == "mimic":
-                self.cfg.set("call_version", "2.4.4")
-            else:
-                self.cfg.set("call_version", "2.7.7")
-            self.cfg.save()
-            self.client.set_call_version(self.cfg.get("call_version", "2.4.4"))
         elif i == 5:
             if self.cfg.get("verify", default) == "1":
                 self.cfg.set("verify", "0")
