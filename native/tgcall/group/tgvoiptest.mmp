@@ -1,7 +1,7 @@
 // tgvoiptest.exe: full-duplex echo test via VoIP Audio Services (see voiptest.cpp)
 TARGET        tgvoiptest.exe
 TARGETTYPE    exe
-UID           0x0 0xE7A3D5C7
+UID           0x0 0xE7A3D5E1
 CAPABILITY    MultimediaDD ReadDeviceData WriteDeviceData UserEnvironment
 VENDORID      0
 EPOCSTACKSIZE 0x5000

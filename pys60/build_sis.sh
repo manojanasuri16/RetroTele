@@ -76,11 +76,20 @@ ls -la dist
 if [ -f native/tgaudiotest.exe ]; then
   rm -rf build/audiotest && mkdir -p build/audiotest/sys/bin
   cp native/tgaudiotest.exe build/audiotest/sys/bin/
-  [ -f native/tgvoiptest.exe ] && cp native/tgvoiptest.exe build/audiotest/sys/bin/
   $PY $ENS simplesis --uid=0xE7A3D5C6 --version=$VERSION --drive=C \
     --caption="RetroTele audio test" --vendor=RetroTele \
     --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
     build/audiotest dist/RetroTele-audiotest.sis </dev/null >build/simplesis.log
   echo "built dist/RetroTele-audiotest.sis"
 fi
-
+# VoIP echo test (needs Nokia's VoIPAudioSrvc SISX on the phone too). Own
+# package and ID range 0xE7A3D5E0-EF: RetroTorch already uses 0xE7A3D5C7.
+if [ -f native/tgvoiptest.exe ]; then
+  rm -rf build/voiptest && mkdir -p build/voiptest/sys/bin
+  cp native/tgvoiptest.exe build/voiptest/sys/bin/
+  $PY $ENS simplesis --uid=0xE7A3D5E1 --version=$VERSION --drive=C \
+    --caption="RetroTele VoIP test" --vendor=RetroTele \
+    --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
+    build/voiptest dist/RetroTele-voiptest.sis </dev/null >>build/simplesis.log
+  echo "built dist/RetroTele-voiptest.sis"
+fi
