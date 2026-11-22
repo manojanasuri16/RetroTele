@@ -1040,10 +1040,35 @@ class Client:
     CALL_PROTOCOL_277 = {"_": "phoneCallProtocol", "udp_p2p": 0, "udp_reflector": 1,
                          "min_layer": 65, "max_layer": 92, "library_versions": ["2.7.7"]}
 
+    def protocol_for(self, cs):
+        """The phoneCallProtocol we announce for this call. In 'mimic' mode
+        (experiment) we repeat what the peer announced, or the official apps'
+        list when we are the caller."""
+        if self.call_version == "mimic":
+            pr = cs.get("peer_protocol")
+            if pr:
+                p = {"_": "phoneCallProtocol", "udp_p2p": pr.get("udp_p2p", 1),
+                     "udp_reflector": pr.get("udp_reflector", 1),
+                     "min_layer": pr.get("min_layer", 65), "max_layer": pr.get("max_layer", 92),
+                     "library_versions": list(pr.get("library_versions") or [])}
+            else:
+                p = {"_": "phoneCallProtocol", "udp_p2p": 1, "udp_reflector": 1,
+                     "min_layer": 65, "max_layer": 92,
+                     "library_versions": ["2.7.7", "5.0.0", "7.0.0", "8.0.0", "9.0.0",
+                                          "10.0.0", "11.0.0", "12.0.0", "13.0.0"]}
+        else:
+            p = self.call_protocol
+        self.log("call announces protocol: udp_p2p=%s udp_reflector=%s layers %s-%s versions=%s" % (
+            p.get("udp_p2p"), p.get("udp_reflector"), p.get("min_layer"), p.get("max_layer"),
+            str(p.get("library_versions"))))
+        return p
+
     def set_call_version(self, version):
         """'2.4.4' (legacy, works with modded/old clients) or '2.7.7' (what
         official apps accept; probe only: signalling, no audio yet)."""
-        if version == "2.7.7":
+        if version == "mimic":
+            self.call_protocol = self.CALL_PROTOCOL_277
+        elif version == "2.7.7":
             self.call_protocol = self.CALL_PROTOCOL_277
         else:
             self.call_protocol = self.CALL_PROTOCOL
@@ -1150,7 +1175,7 @@ class Client:
                        "random_id": int(tgcrypto.bytes_to_long(tgcrypto.random_bytes(4))
                                         % 2147483647),
                        "g_a_hash": tgcrypto.sha256(gab),
-                       "protocol": self.call_protocol}, sent, fail)
+                       "protocol": self.protocol_for(cs)}, sent, fail)
         self.get_dh_config(have, fail)
         return 1
 
@@ -1180,7 +1205,7 @@ class Client:
                 self.call_log(cs, "accepted, waiting for the caller's key")
             self.call({"_": "phone.acceptCall", "peer": self.call_input(cs),
                        "g_b": tgcrypto.long_to_bytes(gb, 256),
-                       "protocol": self.call_protocol}, sent, fail)
+                       "protocol": self.protocol_for(cs)}, sent, fail)
         self.get_dh_config(have, fail)
 
     def send_discard(self, cs, reason, duration):
@@ -1237,6 +1262,7 @@ class Client:
             cs["hash"] = c["access_hash"]
             cs["g_a_hash"] = c.get("g_a_hash", "")
             pr = c.get("protocol") or {}
+            cs["peer_protocol"] = pr
             self.log("call incoming protocol: udp_p2p=%s udp_reflector=%s min_layer=%s "
                      "max_layer=%s versions=%s" % (pr.get("udp_p2p"), pr.get("udp_reflector"),
                      pr.get("min_layer"), pr.get("max_layer"), str(pr.get("library_versions"))))
@@ -1283,7 +1309,7 @@ class Client:
                 self.call_fail(cs, e)
             self.call({"_": "phone.confirmCall", "peer": self.call_input(cs),
                        "g_a": cs["g_a"], "key_fingerprint": cs["fp"],
-                       "protocol": self.call_protocol}, done, fail)
+                       "protocol": self.protocol_for(cs)}, done, fail)
         elif n == "phoneCall" and not cs["out"] and cs["state"] == "keys":
             ga = c.get("g_a_or_b", "")
             if tgcrypto.sha256(ga) != cs["g_a_hash"]:

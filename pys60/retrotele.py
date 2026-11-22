@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.11.2"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.11.3"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -1643,7 +1643,7 @@ class App:
     def call_ready(self, cs):
         """Call reached 'connected': start the relay audio helper."""
         self.stop_call_audio()
-        if self.client.call_version == "2.7.7":
+        if self.client.call_version in ("2.7.7", "mimic"):
             # probe mode: signalling only, the media protocol isn't built yet
             self.audio_state = "failed"
             self.log("call 2.7.7 probe: connected at the servers, no audio helper")
@@ -1914,6 +1914,8 @@ class App:
         cv = u"Call version: 2.4.4 (old clients/modded)"
         if self.cfg.get("call_version", "2.4.4") == "2.7.7":
             cv = u"Call version: 2.7.7 (official apps, probe)"
+        elif self.cfg.get("call_version", "2.4.4") == "mimic":
+            cv = u"Call version: mimic official apps (test)"
         items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder", ap, fm,
                  u"Call test (experimental)", cv]
         i = appuifw.popup_menu(items, u"Settings")
@@ -1932,7 +1934,10 @@ class App:
         elif i == 6:
             self.call_test()
         elif i == 7:
-            if self.cfg.get("call_version", "2.4.4") == "2.7.7":
+            cur = self.cfg.get("call_version", "2.4.4")
+            if cur == "2.7.7":
+                self.cfg.set("call_version", "mimic")
+            elif cur == "mimic":
                 self.cfg.set("call_version", "2.4.4")
             else:
                 self.cfg.set("call_version", "2.7.7")
