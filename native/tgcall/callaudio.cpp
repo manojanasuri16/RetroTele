@@ -393,7 +393,7 @@ public:
     {
         iLocked = -1;
         Write(_L8("relay: 1 clear endpoints\n"));
-        Mem::FillZ(iEp, sizeof(iEp));
+        for (TInt z = 0; z < KMaxEp; z++) Mem::FillZ(iEp[z].tag, 16);   /* tags only: TInetAddr must keep its own state */
         Write(_L8("relay: 2 allocate protocol context\n"));
         iCtx = (tgcp_ctx*)new TUint8[sizeof(tgcp_ctx)];
         if (!iCtx) { Check(_L8("CtxAlloc"), KErrNoMemory); return; }
@@ -514,8 +514,7 @@ public:
                 if (c2 < len && ParseIp(l + 3, c1 - 3, ip) && ParseInt(l + c1 + 1, c2 - c1 - 1, port) &&
                     port > 0 && port < 65536 && len - c2 - 1 == 32 &&
                     ParseHex(l + c2 + 1, 32, iEp[iNEp].tag)) {
-                    iEp[iNEp].addr.SetAddress(ip);
-                    iEp[iNEp].addr.SetPort(port);
+                    iEp[iNEp].addr = TInetAddr(ip, (TUint)port);
                     iNEp++;
                 }
             }
