@@ -910,9 +910,30 @@ try:
     if (_n_ige_enc(_d, _k, _k) != _ige_fast(_d, _k, _k, 0) or
             tgnative.sha256("abc") != _sha256_fast("abc")):
         raise ImportError("tgnative self-test failed")
+    _pm = 0
+    try:
+        _pm = (tgnative.powmod("\x05", "\x75", "\x65\x2b") ==
+               long_to_bytes(pow(5, 117, 25899), 2))
+    except:
+        _pm = 0
     NATIVE = 1
 except:
     NATIVE = 0
+    _pm = 0
+
+def powmod(b, e, m):
+    """pow(b, e, m) for big numbers; native when available."""
+    if NATIVE and _pm and m > 0 and (m % 2) == 1:
+        mb = long_to_bytes(m)
+        eb = long_to_bytes(e)
+        bb = long_to_bytes(b)
+        if len(mb) <= 256 and len(eb) <= 256 and len(bb) <= 256:
+            try:
+                return bytes_to_long(tgnative.powmod(bb, eb, mb))
+            except ValueError:
+                pass
+    return pow(b, e, m)
+
 
 if NATIVE:
     def sha256(data):

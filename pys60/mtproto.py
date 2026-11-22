@@ -722,10 +722,10 @@ class DH:
         self.s.last_msg_id = 0
         self.s.events.status(u"Creating secure key (3/3)...")
         b = bytes_to_long(random_bytes(256))
-        g_b = pow(g, b, p)
+        g_b = tgcrypto.powmod(g, b, p)
         if not (low < g_b < p - low):
             raise TLError("g_b out of range")
-        self.auth_key = long_to_bytes(pow(g_a, b, p), 256)
+        self.auth_key = long_to_bytes(tgcrypto.powmod(g_a, b, p), 256)
         data = self.s.w.obj({"_": "client_DH_inner_data", "nonce": self.nonce,
                              "server_nonce": sn, "retry_id": 0,
                              "g_b": long_to_bytes(g_b)})

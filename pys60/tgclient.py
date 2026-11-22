@@ -1109,7 +1109,7 @@ class Client:
             self.call_state(cs, "calling", "Creating key...")
             self.ui.call_yield()
             a = tgcrypto.bytes_to_long(tgcrypto.random_bytes(256))
-            ga = pow(g, a, p)
+            ga = tgcrypto.powmod(g, a, p)
             if not self.dh_ok(ga, p):
                 fail(RpcError(0, "BAD_G_A"))
                 return
@@ -1155,7 +1155,7 @@ class Client:
             self.call_state(cs, "keys", "Exchanging keys...")
             self.ui.call_yield()
             b = tgcrypto.bytes_to_long(tgcrypto.random_bytes(256))
-            gb = pow(g, b, p)
+            gb = tgcrypto.powmod(g, b, p)
             if not self.dh_ok(gb, p):
                 fail(RpcError(0, "BAD_G_B"))
                 return
@@ -1250,7 +1250,7 @@ class Client:
             if not self.dh_ok(gb, p):
                 self.fail_call_now(cs, "BAD_G_B")
                 return
-            kb = tgcrypto.long_to_bytes(pow(gb, cs["a"], p), 256)
+            kb = tgcrypto.long_to_bytes(tgcrypto.powmod(gb, cs["a"], p), 256)
             cs["kb"] = kb
             cs["fp"] = self.fingerprint(kb)
 
@@ -1275,7 +1275,7 @@ class Client:
                 self.fail_call_now(cs, "BAD_G_A")
                 return
             self.ui.call_yield()
-            kb = tgcrypto.long_to_bytes(pow(gan, cs["a"], p), 256)
+            kb = tgcrypto.long_to_bytes(tgcrypto.powmod(gan, cs["a"], p), 256)
             fp = self.fingerprint(kb)
             if fp != c.get("key_fingerprint"):
                 self.fail_call_now(cs, "KEY_FINGERPRINT_MISMATCH")
@@ -1442,15 +1442,15 @@ def srp_answer(pw, x_hash):
     k = tgcrypto.bytes_to_long(sha256(p_bytes + pad(g)))
     while 1:
         a = tgcrypto.bytes_to_long(tgcrypto.random_bytes(256))
-        ga = pow(g, a, p)
+        ga = tgcrypto.powmod(g, a, p)
         if ga > 0 and ga < p:
             break
     g_a = pad(ga)
     u = tgcrypto.bytes_to_long(sha256(g_a + pad(gb)))
-    gx = pow(g, x, p)
+    gx = tgcrypto.powmod(g, x, p)
     kgx = (k * gx) % p
     t = (gb - kgx) % p
-    sa = pow(t, a + u * x, p)
+    sa = tgcrypto.powmod(t, a + u * x, p)
     k_a = sha256(pad(sa))
     hp = sha256(p_bytes)
     hg = sha256(pad(g))

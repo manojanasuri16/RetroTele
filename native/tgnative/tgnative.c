@@ -6,6 +6,7 @@
  *   sha1(data) -> 20 bytes
  *   sha256(data) -> 32 bytes
  *   pbkdf2_sha512(password, salt, iterations) -> 64 bytes
+ *   powmod(base, exp, mod) -> big-endian bytes, len(mod) (odd mod <= 2048 bit)
  *
  * Plain C with only constant tables (Symbian DLLs should have no writable
  * static data). The same file builds as a desktop Python 2.7 extension for
@@ -448,12 +449,169 @@ static PyObject *tg_pbkdf2_sha512(PyObject *self, PyObject *args)
     return PyString_FromStringAndSize((const char *)out, 64);
 }
 
+
+/* ------------------------------------------------------- modular power */
+
+#define MP_MAX 64   /* 2048 bits */
+
+static void mp_from_be(u32 *r, int n, const u8 *b, int len)
+{
+    int i;
+    for (i = 0; i < n; i++) r[i] = 0;
+    for (i = 0; i < len; i++)
+        r[i >> 2] |= (u32)b[len - 1 - i] << (8 * (i & 3));
+}
+
+/* a >= m ? (n limbs) */
+static int mp_ge(const u32 *a, const u32 *m, int n)
+{
+    int i;
+    for (i = n - 1; i >= 0; i--) {
+        if (a[i] != m[i]) return a[i] > m[i];
+    }
+    return 1;
+}
+
+static void mp_sub(u32 *a, const u32 *m, int n)
+{
+    u64 b = 0, d;
+    int i;
+    for (i = 0; i < n; i++) {
+        d = (u64)a[i] - m[i] - b;
+        a[i] = (u32)d;
+        b = (d >> 32) & 1;
+    }
+}
+
+/* r = a*2 + bit mod m (a < m) */
+static void mp_dbl(u32 *a, const u32 *m, int n, u32 bit)
+{
+    u32 c = bit, t;
+    int i;
+    for (i = 0; i < n; i++) {
+        t = a[i] >> 31;
+        a[i] = (a[i] << 1) | c;
+        c = t;
+    }
+    if (c || mp_ge(a, m, n)) mp_sub(a, m, n);
+}
+
+/* r = a*b*R^-1 mod m (CIOS). r may alias a or b. */
+static void mont_mul(u32 *r, const u32 *a, const u32 *b, const u32 *m,
+                     int n, u32 n0)
+{
+    u32 t[MP_MAX + 2];
+    u64 c, x;
+    u32 q;
+    int i, j;
+    for (i = 0; i < n + 2; i++) t[i] = 0;
+    for (i = 0; i < n; i++) {
+        c = 0;
+        for (j = 0; j < n; j++) {
+            x = (u64)a[j] * b[i] + t[j] + c;
+            t[j] = (u32)x;
+            c = x >> 32;
+        }
+        x = (u64)t[n] + c;
+        t[n] = (u32)x;
+        t[n + 1] = (u32)(x >> 32);
+        q = t[0] * n0;
+        x = (u64)q * m[0] + t[0];
+        c = x >> 32;
+        for (j = 1; j < n; j++) {
+            x = (u64)q * m[j] + t[j] + c;
+            t[j - 1] = (u32)x;
+            c = x >> 32;
+        }
+        x = (u64)t[n] + c;
+        t[n - 1] = (u32)x;
+        t[n] = t[n + 1] + (u32)(x >> 32);
+    }
+    if (t[n] || mp_ge(t, m, n)) mp_sub(t, m, n);
+    for (i = 0; i < n; i++) r[i] = t[i];
+}
+
+static PyObject *tg_powmod(PyObject *self, PyObject *args)
+{
+    const u8 *bb, *eb, *mb;
+    int bn, en, mn, n, i, j, started, nib;
+    u32 m[MP_MAX], base[MP_MAX], r2[MP_MAX], one[MP_MAX], acc[MP_MAX];
+    u32 tab[16][MP_MAX];
+    u32 n0, inv, v;
+    u8 out[MP_MAX * 4];
+    if (!PyArg_ParseTuple(args, "s#s#s#", &bb, &bn, &eb, &en, &mb, &mn))
+        return NULL;
+    if (mn < 1 || mn > 256 || bn > 256 || en > 256) {
+        PyErr_SetString(PyExc_ValueError, "powmod: bad length");
+        return NULL;
+    }
+    n = (mn + 3) >> 2;
+    mp_from_be(m, n, mb, mn);
+    while (n > 0 && m[n - 1] == 0) n--;
+    if (n == 0 || !(m[0] & 1)) {
+        PyErr_SetString(PyExc_ValueError, "powmod: modulus must be odd");
+        return NULL;
+    }
+    /* output is padded to len(mod) */
+    mp_from_be(base, MP_MAX, bb, bn);
+    if (n == 1 && m[0] == 1) {
+        for (i = 0; i < mn; i++) out[i] = 0;
+        return PyString_FromStringAndSize((const char *)out, mn);
+    }
+    /* reduce base if needed */
+    {
+        int bl = (bn + 3) >> 2, need = 0;
+        for (i = bl - 1; i >= n; i--) if (base[i]) need = 1;
+        if (!need && mp_ge(base, m, n)) need = 1;
+        if (need) {
+            u32 red[MP_MAX];
+            for (i = 0; i < n; i++) red[i] = 0;
+            for (i = bn * 8 - 1; i >= 0; i--)
+                mp_dbl(red, m, n, (base[i >> 5] >> (i & 31)) & 1);
+            for (i = 0; i < n; i++) base[i] = red[i];
+        }
+    }
+    /* n0 = -m^-1 mod 2^32 (Newton) */
+    inv = m[0];
+    for (i = 0; i < 5; i++) inv *= 2 - m[0] * inv;
+    n0 = 0 - inv;
+    /* R^2 mod m: start at 1, double 64*n times */
+    for (i = 0; i < n; i++) r2[i] = 0;
+    r2[0] = 1;
+    for (i = 0; i < 64 * n; i++) mp_dbl(r2, m, n, 0);
+    for (i = 0; i < n; i++) one[i] = 0;
+    one[0] = 1;
+    mont_mul(tab[1], base, r2, m, n, n0);
+    /* tab[0] = R mod m (mont form of 1) */
+    mont_mul(tab[0], one, r2, m, n, n0);
+    for (i = 2; i < 16; i++)
+        mont_mul(tab[i], tab[i - 1], tab[1], m, n, n0);
+    for (i = 0; i < n; i++) acc[i] = tab[0][i];
+    started = 0;
+    for (i = 0; i < en * 2; i++) {
+        v = eb[i >> 1];
+        nib = (i & 1) ? (int)(v & 15) : (int)(v >> 4);
+        if (started) {
+            for (j = 0; j < 4; j++) mont_mul(acc, acc, acc, m, n, n0);
+        }
+        if (nib || started) {
+            mont_mul(acc, acc, tab[nib], m, n, n0);
+            started = 1;
+        }
+    }
+    mont_mul(acc, acc, one, m, n, n0);
+    for (i = 0; i < mn; i++)
+        out[mn - 1 - i] = (u8)(acc[i >> 2] >> (8 * (i & 3)));
+    return PyString_FromStringAndSize((const char *)out, mn);
+}
+
 static const PyMethodDef tg_methods[] = {
     {"ige_encrypt", (PyCFunction)tg_ige_encrypt, METH_VARARGS, NULL},
     {"ige_decrypt", (PyCFunction)tg_ige_decrypt, METH_VARARGS, NULL},
     {"sha256", (PyCFunction)tg_sha256, METH_VARARGS, NULL},
     {"sha1", (PyCFunction)tg_sha1, METH_VARARGS, NULL},
     {"pbkdf2_sha512", (PyCFunction)tg_pbkdf2_sha512, METH_VARARGS, NULL},
+    {"powmod", (PyCFunction)tg_powmod, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}
 };
 
