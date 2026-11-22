@@ -26,8 +26,8 @@ if [ ! -f cert/retrotele_key.pem ]; then
 fi
 
 MODULES="tgcrypto.py tl.py mtproto.py fileinfo.py tgclient.py tgsrp.py tgui.py callaudio.py filepick.py"
-for f in retrotele.py launcher.py $MODULES; do python3 tools/check_py22.py "$f" >/dev/null; done
-python3 tools/check_ints.py retrotele.py launcher.py $MODULES
+for f in retrotele.py launcher.py videomirror.py $MODULES; do python3 tools/check_py22.py "$f" >/dev/null; done
+python3 tools/check_ints.py retrotele.py launcher.py videomirror.py $MODULES
 
 # The installed app is split into modules (the phone compiles each one
 # separately), plus the TL schema. Files go to \private\e7a3d5c2\.
@@ -170,7 +170,7 @@ def main():
     except:
         appuifw.note(u"Cannot start tgvbench.exe", "error")
         return
-    appuifw.note(u"Video bench running (about 5 min), please wait...", "info")
+    appuifw.note(u"Video bench running (about 4 min), please wait...", "info")
     done = None
     n = 0
     while n < 600:
@@ -194,6 +194,22 @@ PYEOF
     --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
     build/vidbench_app dist/RetroTele-videobench.sis </dev/null >build/vidbench.log
   echo "built dist/RetroTele-videobench.sis"
+fi
+
+# Video mirror, STAGE 1 of video calls: camera -> H.264 encode -> decode -> screen on this phone
+# (E:\retrotele_videomirror.txt). Own package, own UID; not part of RetroTele.sis.
+# tgvideo.exe (MultimediaDD) does the codecs, tgvdisp.pyd draws its frames into graphics.Image.
+if [ -f native/tgvideo.exe ] && [ -f native/tgvdisp.pyd ]; then
+  rm -rf build/vidmirror_app && mkdir -p build/vidmirror_app/extras/sys/bin
+  cp native/tgvideo.exe native/tgvdisp.pyd build/vidmirror_app/extras/sys/bin/
+  cp videomirror.py build/vidmirror_app/default.py
+  $PY $ENS py2sis --uid=0xE7A3D5EB --appname="RetroTele video mirror" --version=$VERSION \
+    --caption="RetroTele video mirror" --shortcaption="Video mirror" --vendor=RetroTele \
+    --caps=NetworkServices+LocalServices+ReadUserData+WriteUserData+UserEnvironment \
+    --drive=C --extrasdir=extras \
+    --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
+    build/vidmirror_app dist/RetroTele-videomirror.sis </dev/null >build/vidmirror.log
+  echo "built dist/RetroTele-videomirror.sis"
 fi
 
 # LOCAL-ONLY bundle: embeds Nokia's VoIP Audio Services (VoIPAudioSrvc SISX) so

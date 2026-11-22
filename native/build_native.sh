@@ -58,3 +58,16 @@ bldmake bldfiles >/dev/null 2>&1
 abld build gcce urel 2>&1 | grep -iE "error" || true
 OUT="$EPOCROOT/epoc32/release/gcce/urel/tgvbench.exe"
 [ -f "$OUT" ] && cp "$OUT" "$HERE/../pys60/native/tgvbench.exe"
+
+# tgvideo.exe: video helper (camera -> H.264 encode -> decode -> shared chunk) and
+# tgvdisp.pyd: draws its frames into a PyS60 graphics.Image (RetroTele-videomirror.sis)
+cd "$HERE/tgvideo/group"
+bldmake bldfiles >/dev/null 2>&1
+abld build gcce urel 2>&1 | grep -iE "error" || true
+OUT="$EPOCROOT/epoc32/release/gcce/urel/tgvideo.exe"
+[ -f "$OUT" ] && cp "$OUT" "$HERE/../pys60/native/tgvideo.exe"
+cd "$HERE/tgvdisp/group"
+bldmake bldfiles >/dev/null 2>&1
+abld build gcce urel 2>&1 | grep -iE "error" || true
+OUT="$EPOCROOT/epoc32/release/gcce/urel/tgvdisp.pyd"
+[ -f "$OUT" ] && cp "$OUT" "$HERE/../pys60/native/tgvdisp.pyd"
