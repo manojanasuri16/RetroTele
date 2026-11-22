@@ -76,6 +76,7 @@ ls -la dist
 if [ -f native/tgaudiotest.exe ]; then
   rm -rf build/audiotest && mkdir -p build/audiotest/sys/bin
   cp native/tgaudiotest.exe build/audiotest/sys/bin/
+  [ -f native/tgvoiptest.exe ] && cp native/tgvoiptest.exe build/audiotest/sys/bin/
   $PY $ENS simplesis --uid=0xE7A3D5C6 --version=$VERSION --drive=C \
     --caption="RetroTele audio test" --vendor=RetroTele \
     --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \

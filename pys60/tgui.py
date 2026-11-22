@@ -3,6 +3,7 @@
 # the tiny photo thumbnail Telegram sends with every chat).
 # Python 2.2 compatible: no conditional expressions, no sorted/enumerate.
 
+import os
 import appuifw
 import e32
 import graphics
@@ -1633,19 +1634,30 @@ class CallTestView(CanvasView):
                 pass
             self.running = 0
 
-    def helper_test(self):
+    def voip_test(self):
+        self.helper_test(u"tgvoiptest.exe", "retrotele_audiotest_voip.txt", u"VoIP")
+
+    def helper_test(self, exe=u"tgaudiotest.exe", fname="retrotele_audiotest.txt",
+                    label=u"Helper"):
         """The same echo test run by tgaudiotest.exe, which has MultimediaDD
         (RetroTele-audiotest.sis, unlocked phones). Its numbers are read
         from the file it writes."""
         self.stop()
         try:
-            e32.start_exe(u"tgaudiotest.exe", u"20")
+            self.helper_file = fname
+            self.helper_label = label
+            for d in ["E:\\", "C:\\Data\\"]:
+                try:
+                    os.remove(d + fname)
+                except:
+                    pass
+            e32.start_exe(exe, u"20")
         except:
             import sys
             self.error = u"Helper not installed: " + to_u(str(sys.exc_info()[1]))
             self.draw()
             return
-        self.lines = [u"Helper echo test: speak for 20 s..."]
+        self.lines = [label + u" echo test: speak for 20 s..."]
         self.helper_ticks = 0
         self.draw()
         self.app.net.later(1, self.helper_tick)
@@ -1655,7 +1667,7 @@ class CallTestView(CanvasView):
             return
         self.helper_ticks = self.helper_ticks + 1
         text = ""
-        for p in ["E:\\retrotele_audiotest.txt", "C:\\Data\\retrotele_audiotest.txt"]:
+        for p in ["E:\\" + self.helper_file, "C:\\Data\\" + self.helper_file]:
             try:
                 f = open(p, "rb")
                 text = f.read()
@@ -1668,7 +1680,7 @@ class CallTestView(CanvasView):
         for r in rows:
             if r[:2] == "t ":
                 last = r
-        out = [u"Helper echo test (%d s)" % self.helper_ticks]
+        out = [self.helper_label + u" echo test (%d s)" % self.helper_ticks]
         if last:
             parts = last.split(" ")
             d = {}
@@ -1676,14 +1688,15 @@ class CallTestView(CanvasView):
             while i + 1 < len(parts):
                 d[parts[i]] = parts[i + 1]
                 i = i + 2
-            out.append(u"Recorded %s B, played %s B" % (d.get("rec", "?"), d.get("play", "?")))
+            out.append(u"Recorded %s B, played %s B" % (d.get("rec", d.get("up_bytes", "?")),
+                       d.get("play", d.get("down_bytes", "?"))))
             out.append(u"Gaps %s, write errors %s, last %s" % (d.get("gaps", "?"),
                        d.get("werr", "?"), d.get("last", "?")))
             out.append(u"Levels: mic %s, speaker %s; route %s" % (d.get("in", "?"),
                        d.get("out", "?"), d.get("route", "?")))
         self.lines = out
         self.draw()
-        if text.find("tgaudiotest end") < 0 and self.helper_ticks < 40:
+        if text.find(" end") < 0 and self.helper_ticks < 40:
             self.app.net.later(1, self.helper_tick)
         else:
             self.app.log("helper echo test result:\n" + text)
