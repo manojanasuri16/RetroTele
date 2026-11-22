@@ -54,7 +54,7 @@ def _fail(where):
 
 _ok = 1
 # load the helper modules one by one, so the log shows which one fails
-for _m in ["tgcrypto", "tl", "mtproto", "tgclient", "tgsrp", "tgui"]:
+for _m in ["tgcrypto", "tl", "mtproto", "tgclient", "tgsrp", "tgui", "callaudio"]:
     if _ok:
         _log("starter: loading " + _m)
         try:

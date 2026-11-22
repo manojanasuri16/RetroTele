@@ -1584,6 +1584,9 @@ class PlayerView(CanvasView):
 
 # ---------------------------------------------------------------- call test
 
+AUDIO_FACTORY = None     # tests put a fake CallAudio class here
+
+
 class CallTestView(CanvasView):
     """Step 1 of Telegram calls: live microphone -> earpiece loopback with a
     delay, showing whether the phone keeps up (rates, gaps, errors)."""
@@ -1598,6 +1601,7 @@ class CallTestView(CanvasView):
         self.ticks = 0
         self.error = u""
         self.lines = []          # extra result lines (benchmarks)
+        self.ca = None
 
     def key(self, k):
         if k in ("select", "5"):
@@ -1627,6 +1631,12 @@ class CallTestView(CanvasView):
         self.draw()
 
     def stop(self):
+        if self.ca is not None:
+            try:
+                self.ca.stop()
+            except:
+                pass
+            self.ca = None
         if self.running:
             try:
                 import tgcall
@@ -1637,6 +1647,79 @@ class CallTestView(CanvasView):
 
     def voip_test(self):
         self.helper_test(u"tgvoiptest.exe", "retrotele_audiotest_voip.txt", u"VoIP")
+
+    def echo_call_audio(self):
+        """tgcallaudio.exe (VoIP + Opus) with every packet it sends sent
+        straight back to it, for 20 s."""
+        self.stop()
+        try:
+            if AUDIO_FACTORY is not None:
+                ca = AUDIO_FACTORY()
+            else:
+                import callaudio
+                ca = callaudio.CallAudio()
+            self.ca = ca
+            self.ca_echoed = 0
+            self.ca_ticks = 0
+            self.ca_last = 0
+            for d in ["E:\\", "C:\\Data\\"]:
+                try:
+                    os.remove(d + "retrotele_callaudio.txt")
+                except:
+                    pass
+            ca.start(self.echo_packet, 25)
+        except:
+            import sys
+            self.error = u"Call audio failed: " + to_u(str(sys.exc_info()[1]))
+            self.ca = None
+            self.draw()
+            return
+        self.lines = [u"Call audio echo: speak for 20 s..."]
+        self.draw()
+        self.app.net.later(1, self.echo_tick)
+
+    def echo_packet(self, data):
+        ca = self.ca
+        if ca is not None:
+            ca.send(data)
+            self.ca_echoed = self.ca_echoed + 1
+
+    def echo_tick(self):
+        ca = self.ca
+        if ca is None or self.app.view is not self:
+            return
+        self.ca_ticks = self.ca_ticks + 1
+        out = [u"Call audio echo (%d s)" % self.ca_ticks]
+        out.append(u"Helper packets %d (%d/s), echoed %d" % (ca.rx, ca.rx - self.ca_last,
+                   self.ca_echoed))
+        self.ca_last = ca.rx
+        if ca.errors:
+            out.append(u"Errors %d: %s" % (ca.errors, ca.last_error))
+        text = ""
+        for p in ["E:\\retrotele_callaudio.txt", "C:\\Data\\retrotele_callaudio.txt"]:
+            try:
+                f = open(p, "rb")
+                text = f.read()
+                f.close()
+                break
+            except:
+                pass
+        last = ""
+        for r in text.strip().split("\n"):
+            if r[:2] == "t ":
+                last = r
+        if last:
+            out.append(to_u(last[:200]))
+        self.lines = out
+        self.draw()
+        if self.ca_ticks < 20:
+            self.app.net.later(1, self.echo_tick)
+        else:
+            ca.stop()
+            self.ca = None
+            self.lines = out + [u"Done."]
+            self.draw()
+            self.app.log("call audio echo result:\n" + text)
 
     def helper_test(self, exe=u"tgaudiotest.exe", fname="retrotele_audiotest.txt",
                     label=u"Helper"):

@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.8.1"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.9.0"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -1850,6 +1850,7 @@ class App:
                             (u"Opus speed test", v.opus_test),
                             (u"Echo test via helper (unlocked phones)", v.helper_test),
                             (u"Echo test via VoIP (unlocked phones)", v.voip_test),
+                            (u"Echo via call audio", v.echo_call_audio),
                             (u"Back", self.close_call_test)]
         appuifw.app.exit_key_handler = self.close_call_test
 

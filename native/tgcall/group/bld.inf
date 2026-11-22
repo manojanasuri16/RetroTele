@@ -5,3 +5,4 @@ PRJ_MMPFILES
 tgcall.mmp
 tgaudiotest.mmp
 tgvoiptest.mmp
+tgcallaudio.mmp

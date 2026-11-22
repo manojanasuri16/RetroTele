@@ -1,0 +1,19 @@
+// tgcallaudio.exe: VoIP audio + Opus engine for Telegram calls (see callaudio.cpp)
+TARGET        tgcallaudio.exe
+TARGETTYPE    exe
+UID           0x0 0xE7A3D5E3
+CAPABILITY    MultimediaDD ReadDeviceData WriteDeviceData UserEnvironment NetworkServices LocalServices
+VENDORID      0
+EPOCSTACKSIZE 0x10000
+EPOCHEAPSIZE  0x20000 0x100000
+
+SYSTEMINCLUDE \epoc32\include
+SYSTEMINCLUDE \epoc32\include\libc
+USERINCLUDE   ..
+USERINCLUDE   ..\..\opus\src\include
+
+SOURCEPATH    ..
+SOURCE        callaudio.cpp
+
+STATICLIBRARY tgopus.lib
+LIBRARY       euser.lib efsrv.lib esock.lib insock.lib estlib.lib voipaudiointfc.lib

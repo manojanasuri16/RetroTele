@@ -484,6 +484,16 @@ app.view.opus_test()
 ot = screen_text()
 print "opus test:", ot
 assert ot.find(u"Self-test OK") >= 0 and ot.find(u"Effort 0: 4.0 ms") >= 0 and ot.find(u"fast enough") >= 0, ot
+import callaudio_fake
+retrotele.tgui.AUDIO_FACTORY = callaudio_fake.CallAudio
+app.view.echo_call_audio()
+fa = callaudio_fake.CallAudio.instances[-1]
+fa.deliver("opus1")
+assert fa.sent == ["opus1"], fa.sent
+app.view.echo_tick()
+assert screen_text().find(u"Helper packets 1") >= 0
+app.view.stop()
+assert fa.sent[-1] == "Q" and not fa.running
 app.exit()
 import tgcall
 assert not tgcall._state["on"]
