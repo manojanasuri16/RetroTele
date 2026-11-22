@@ -112,6 +112,11 @@ public:
         Check(_L8("SetVolume"), iDn->SetVolume(mv * 70 / 100));
         iUp->GetMaxGain(mg);
         Check(_L8("SetGain"), iUp->SetGain(mg * 3 / 4));
+        TInt g = -1;
+        iUp->GetGain(g);
+        TBuf8<64> gm;
+        gm.Format(_L8("maxgain %d gain %d maxvol %d\n"), mg, g, mv);
+        Write(gm);
         iBeepLeft = KBeepBytes;
         if (!Check(_L8("DnStart"), iDn->Start())) return;
         if (!Check(_L8("UpStart"), iUp->Start())) return;
@@ -122,7 +127,12 @@ public:
     {
         TPtr8 p(NULL, 0);
         aBuffer->GetPayloadPtr(p);
-        TInt n = p.MaxLength() & ~1;
+        if (iDownBufs == 0) {
+            TBuf8<64> m;
+            m.Format(_L8("down_maxlen %d len %d\n"), p.MaxLength(), p.Length());
+            Write(m);
+        }
+        TInt n = p.MaxLength() < 320 ? (p.MaxLength() & ~1) : 320; // one 20 ms frame
         p.SetLength(n);
         TUint8* d = (TUint8*)p.Ptr();
         for (TInt i = 0; i < n; i += 2) {
@@ -146,10 +156,11 @@ public:
             TInt a = s < 0 ? -s : s;
             if (a > iPeakOut) iPeakOut = a;
         }
-        aBuffer->SetPayloadPtr(p);
+        iPlayBuf->SetPayloadPtr(p);
         iDownBytes += n;
         iDownBufs++;
-        TInt err = iDn->BufferFilled(aBuffer);
+        iDownTick++;
+        TInt err = iDn->BufferFilled(iPlayBuf);
         if (err != KErrNone) { iErrors++; iLast = err; }
     }
     void Event(const CVoIPAudioDownlinkStream&, TInt aType, TInt aErr)
@@ -181,6 +192,13 @@ public:
         }
         iUpBytes += n;
         iUpBufs++;
+        if (iUpBufs == 10) {
+            TBuf8<128> m;
+            m.Format(_L8("up10 len %d max %d hex"), p.Length(), p.MaxLength());
+            for (TInt k = 0; k < 16 && k < p.Length(); k++) m.AppendFormat(_L8(" %02x"), s[k]);
+            m.Append(_L8("\n"));
+            Write(m);
+        }
         TInt err = iUp->BufferEmptied(aBuffer);
         if (err != KErrNone) { iErrors++; iLast = err; }
     }
@@ -207,10 +225,11 @@ public:
         TBuf8<256> line;
         line.Format(_L8("t %d state %d up_bytes %d down_bytes %d up_bufs %d down_bufs %d "
                         "errors %d last %d in %d out %d fmt %d\n"),
-                    iTicks, iState, iUpBytes, iDownBytes, iUpBufs, iDownBufs,
+                    iTicks, iState, iUpBytes, iDownBytes, iUpBufs, iDownTick,
                     iErrors, iLast, iPeakIn, iPeakOut, (TInt)EPCM16);
         iPeakIn = 0;
         iPeakOut = 0;
+        iDownTick = 0;
         Write(line);
         if (iTicks >= iSeconds) {
             iTimer->Cancel();
@@ -240,6 +259,7 @@ private:
     TInt iState, iErrors, iLast, iFirstErr;
     TInt iUpBytes, iDownBytes, iUpBufs, iDownBufs;
     TInt iPeakIn, iPeakOut;
+    TInt iDownTick;
     TInt iBeepLeft, iBeepPos;
     TUint8 iFifo[KFifoSize];
     TInt iRd, iWr, iFifoLen;
