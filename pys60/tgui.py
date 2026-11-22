@@ -2069,7 +2069,15 @@ class CallView(CanvasView):
         st = cs["state"]
         lines = [to_u(cs["text"])]
         if st == "connected":
-            lines = [u"Connected " + self.elapsed(), u"(audio coming soon)"]
+            a = app.audio_state
+            if a == "connected":
+                lines = [u"Connected " + self.elapsed()]
+            elif a == "reconnecting":
+                lines = [u"Reconnecting..."]
+            elif a == "failed" or a == "ended":
+                lines = [u"Audio failed"]
+            else:
+                lines = [u"Connecting audio..."]
         for l in lines:
             y = y + 26
             l = fit(g, l, "text", w - 16)

@@ -391,6 +391,8 @@ assert screen_text().find(u"Call ended") >= 0
 app.close_call()
 assert app.screen == "chat"
 
+import callaudio_fake
+retrotele.tgui.AUDIO_FACTORY = callaudio_fake.CallAudio
 # incoming call accepted: caller (simulated) sends g_a_or_b after our g_b
 ca = 98765432123456789987654321
 ga = pow(G, ca, P)
@@ -406,13 +408,24 @@ upd({"_": "phoneCall", "id": 555, "access_hash": 1, "date": 0, "admin_id": 42,
                       "port": 599, "peer_tag": "\x09" * 16}]})
 t = screen_text(); print "call:", t
 assert app.client.cs["state"] == "connected", app.client.cs
-assert t.find(u"Connected 00:") >= 0 and t.find(u"audio coming soon") >= 0 and t.find(u"Key: ") >= 0, t
+assert t.find(u"Connecting audio...") >= 0 and t.find(u"Key: ") >= 0, t
 assert app.client.cs["kb"] == kb
+fa = callaudio_fake.CallAudio.instances[-1]
+assert fa.running and fa.relay[0] == kb and len(fa.relay[0]) == 256 and fa.relay[1] == 0, fa.relay
+assert len(fa.relay[2]) == 1 and fa.relay[2][0]["ip"] == "5.6.7.8" and fa.relay[2][0]["peer_tag"] == "\x09" * 16
+fa.helper_state("connected")
+assert screen_text().find(u"Connected 00:") >= 0
+fa.helper_state("reconnecting")
+assert screen_text().find(u"Reconnecting...") >= 0
+fa.helper_state("failed")
+assert screen_text().find(u"Audio failed") >= 0
+fa.helper_state("connected")
 # timer tick keeps going, then hang up with centre
 app.call_tick(); app.net.run()
 state["discard"] = None
 press("select")
 assert state["discard"][:2] == (555, "phoneCallDiscardReasonHangup"), state["discard"]
+assert not fa.running and "Q" in fa.sent, "hang-up must stop the audio helper"
 app.close_call()
 
 # a wrong fingerprint is refused
@@ -447,10 +460,13 @@ kb = i2b(pow(ga_n, cb, P))
 assert conf["key_fingerprint"] == fp_of(kb), "fingerprint"
 assert app.client.cs["state"] == "connected" and app.client.cs["kb"] == kb
 t = screen_text(); print "call:", t
-assert t.find(u"Connected 00:") >= 0, t
+assert t.find(u"Connecting audio...") >= 0, t
+fo = callaudio_fake.CallAudio.instances[-1]
+assert fo is not fa and fo.running and fo.relay[1] == 1 and fo.relay[0] == kb, fo.relay
 # remote discard
 upd({"_": "phoneCallDiscarded", "id": 777, "reason": {"_": "phoneCallDiscardReasonHangup"}})
 assert screen_text().find(u"Call ended") >= 0 and app.client.cs["state"] == "ended"
+assert not fo.running, "remote discard must stop the audio helper"
 app.close_call()
 assert app.screen == "chat"
 # remote discard while ringing (incoming), then outgoing cancelled by us

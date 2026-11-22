@@ -12,7 +12,18 @@ class CallAudio:
         self.tx = 0
         self.errors = 0
         self.last_error = u""
+        self.relay = None
+        self.on_state = None
         CallAudio.instances.append(self)
+
+    def start_relay(self, key, is_outgoing, connections, on_state):
+        self.relay = (key, is_outgoing, connections)
+        self.on_state = on_state
+        self.running = 1
+        return 1
+
+    def helper_state(self, name):
+        self.on_state(name)
 
     def start(self, on_packet, seconds=60):
         self.on_packet = on_packet
@@ -29,4 +40,5 @@ class CallAudio:
 
     def stop(self):
         self.running = 0
+        self.on_state = None
         self.sent.append("Q")

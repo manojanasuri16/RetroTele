@@ -1029,7 +1029,8 @@ class Client:
     # ---------------------------------------------------------- Telegram calls
     # Signalling only (DH key exchange); the call state lives in self.cs:
     # {"key", "id", "hash", "out", "state", "text", "a", "g_a", "g_a_hash",
-    #  "start", "conns", "fp", "kb", "emoji"}.
+    #  "start", "conns", "fp", "kb", "emoji"}; "kb" (256-byte key) and "conns"
+    # (phoneConnection dicts) are what the media layer needs once connected.
     # states: calling ringing incoming keys connected ended
 
     CALL_PROTOCOL = {"_": "phoneCallProtocol", "udp_p2p": 1, "udp_reflector": 1,
@@ -1208,6 +1209,7 @@ class Client:
         h = binascii.hexlify(tgcrypto.sha256(cs["kb"] + cs["g_a"]))
         cs["emoji"] = "%s %s %s %s" % (h[0:4], h[4:8], h[8:12], h[12:16])
         self.call_state(cs, "connected", "Connected")
+        self.ui.call_ready(cs)
 
     def call_update(self, c):
         n = c.get("_")

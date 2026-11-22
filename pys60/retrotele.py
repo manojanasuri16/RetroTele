@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.9.1"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.10.0"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -356,6 +356,8 @@ class App:
         self.toast_gen = 0
         self.call_gen = 0
         self.call_timer = 0
+        self.call_audio = None
+        self.audio_state = ""
         self.call_return = "chats"
         self.redraw_armed = 0
         self.cache_armed = 0
@@ -1637,10 +1639,47 @@ class App:
         except:
             pass
 
+    def call_ready(self, cs):
+        """Call reached 'connected': start the relay audio helper."""
+        self.stop_call_audio()
+        try:
+            if tgui.AUDIO_FACTORY is not None:
+                ca = tgui.AUDIO_FACTORY()
+            else:
+                import callaudio
+                ca = callaudio.CallAudio()
+        except:
+            self.audio_state = "failed"
+            return
+        self.call_audio = ca
+        self.audio_state = "connecting"
+        ca.start_relay(cs["kb"], cs["out"], cs["conns"], self.audio_changed)
+        self.call_changed()
+
+    def audio_changed(self, name):
+        if self.call_audio is None:
+            return
+        self.audio_state = name
+        cs = self.client.cs
+        if cs is not None and cs["state"] != "ended":
+            self.redraw()
+
+    def stop_call_audio(self):
+        ca = self.call_audio
+        self.call_audio = None
+        self.audio_state = ""
+        if ca is not None:
+            try:
+                ca.stop()
+            except:
+                pass
+
     def call_changed(self):
         cs = self.client.cs
         if cs is None:
             return
+        if cs["state"] == "ended":
+            self.stop_call_audio()
         if self.screen != "call":
             if isinstance(self.view, tgui.PlayerView):
                 self.view.close()
@@ -1708,6 +1747,8 @@ class App:
 
     def close_call(self):
         self.call_gen = self.call_gen + 1
+        if self.client.cs is not None and self.client.cs["state"] == "ended":
+            self.stop_call_audio()
         if self.screen != "call":
             return
         self.call_timer = 0
@@ -1877,6 +1918,7 @@ class App:
             self.view.stop()
         if self.client is not None and self.client.call_busy():
             self.client.hang_up()
+        self.stop_call_audio()
         if self.client is not None and self.client.me is not None:
             self.save_cache()
         self.net.cancel_all()

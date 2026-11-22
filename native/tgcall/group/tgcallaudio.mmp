@@ -11,9 +11,13 @@ SYSTEMINCLUDE \epoc32\include
 SYSTEMINCLUDE \epoc32\include\libc
 USERINCLUDE   ..
 USERINCLUDE   ..\..\opus\src\include
+USERINCLUDE   ..\..\callproto
 
 SOURCEPATH    ..
 SOURCE        callaudio.cpp
+
+SOURCEPATH    ..\..\callproto
+SOURCE        callproto.c callproto_crypto.c
 
 STATICLIBRARY tgopus.lib
 LIBRARY       euser.lib efsrv.lib esock.lib insock.lib estlib.lib voipaudiointfc.lib
