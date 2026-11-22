@@ -24,6 +24,28 @@ def _is_err(res):
             type(res[0]) in (types.ClassType, types.TypeType))
 
 
+_SHARED = [None]        # the one UDP socket on 127.0.0.1:47001
+_CURRENT = [None]       # the CallAudio receiving the helper's datagrams
+_PENDING = [0]          # a recvfrom is outstanding
+
+
+def _dispatch(res):
+    _PENDING[0] = 0
+    ca = _CURRENT[0]
+    if ca is None or not ca.running:
+        return
+    data = None
+    if _is_err(res):
+        ca.errors = ca.errors + 1
+    elif type(res) is types.TupleType and len(res) == 2:
+        data = res[0]
+    elif type(res) is types.StringType:
+        data = res
+    ca._arm()
+    if data:
+        ca._handle(data)
+
+
 class CallAudio:
     def __init__(self):
         self.sock = None
@@ -95,7 +117,12 @@ class CallAudio:
         if not self.cfg_path:
             self._set_state("failed")
             return 0
-        self.sock = self._open()
+        try:
+            self.sock = self._open()
+        except:
+            self.last_error = u"udp socket: " + unicode(str(sys.exc_info()[1]), "latin-1")
+            self._set_state("failed")
+            return 0
         self.running = 1
         self._arm()
         try:
@@ -131,43 +158,40 @@ class CallAudio:
         e32.start_exe(u"tgcallaudio.exe", u"%d" % seconds)
 
     def _open(self):
-        # sockets are never closed (e32socket): one socket serves every call
-        if self.keep is None:
+        # sockets are never closed (e32socket): ONE socket for the whole app
+        # run, shared by every CallAudio (a second bind on the port is
+        # refused with "Permission denied")
+        s = _SHARED[0]
+        if s is None:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.bind((HOST, PORT_FROM_HELPER))
-            self.keep = s
-        return self.keep
+            _SHARED[0] = s
+        return s
 
     def _arm(self):
-        s = self.sock
-        if s is None or not self.running or self.armed:
+        """Make sure the shared receive loop is running (one pending
+        recvfrom for the whole app, forwarding to the current instance)."""
+        _CURRENT[0] = self
+        if self.sock is None or not self.running or _PENDING[0]:
             return
-        self.armed = 1
+        _PENDING[0] = 1
         try:
-            _raw(s).recvfrom(4096, 0, self._cb)
+            _raw(self.sock).recvfrom(4096, 0, _dispatch)
         except:
+            _PENDING[0] = 0
             self.errors = self.errors + 1
-            self.armed = 0
             self.last_error = u"recvfrom: " + unicode(str(sys.exc_info()[1]), "latin-1")
             self.running = 0
 
-    def _cb(self, res):
-        self.armed = 0
+    def _handle(self, data):
+        """A datagram from the helper."""
         if not self.running:
             return
-        data = None
-        if _is_err(res):
-            self.errors = self.errors + 1
-        elif type(res) is types.TupleType and len(res) == 2:
-            data = res[0]
-        elif type(res) is types.StringType:
-            data = res
-        self._arm()
-        if data and self.relay:
+        if self.relay:
             self.rx = self.rx + 1
             if data[:2] == "S ":
                 self._set_state(data[2:].strip())
-        elif data:
+        else:
             self.rx = self.rx + 1
             try:
                 self.on_packet(data)
