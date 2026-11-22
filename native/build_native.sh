@@ -44,3 +44,10 @@ OUT="$EPOCROOT/epoc32/release/gcce/urel/tgvoiptest.exe"
 [ -f "$OUT" ] && cp "$OUT" "$HERE/../pys60/native/tgvoiptest.exe"
 OUT="$EPOCROOT/epoc32/release/gcce/urel/tgcallaudio.exe"
 [ -f "$OUT" ] && cp "$OUT" "$HERE/../pys60/native/tgcallaudio.exe"
+
+# tgvidprobe.exe: video hardware/codec/camera probe (separate package)
+cd "$HERE/vidprobe/group"
+bldmake bldfiles >/dev/null 2>&1
+abld build gcce urel 2>&1 | grep -iE "error" || true
+OUT="$EPOCROOT/epoc32/release/gcce/urel/tgvidprobe.exe"
+[ -f "$OUT" ] && cp "$OUT" "$HERE/../pys60/native/tgvidprobe.exe"

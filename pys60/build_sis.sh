@@ -70,6 +70,17 @@ grep "rscfix" build/py2sis.log || true
 echo "built dist/RetroTele.sis"
 ls -la dist
 
+# Video hardware probe (E:\retrotele_videoprobe.txt). Own package, own UID; not part of RetroTele.sis.
+if [ -f native/tgvidprobe.exe ]; then
+  rm -rf build/videoprobe && mkdir -p build/videoprobe/sys/bin
+  cp native/tgvidprobe.exe build/videoprobe/sys/bin/
+  $PY $ENS simplesis --uid=0xE7A3D5E4 --version=$VERSION --drive=C \
+    --caption="RetroTele video probe" --vendor=RetroTele \
+    --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
+    build/videoprobe dist/RetroTele-videoprobe.sis </dev/null >>build/simplesis.log
+  echo "built dist/RetroTele-videoprobe.sis"
+fi
+
 # LOCAL-ONLY bundle: embeds Nokia's VoIP Audio Services (VoIPAudioSrvc SISX) so
 # one file installs everything. Nokia's licence forbids distributing that file,
 # so this package is NOT published (dist/ is git-ignored and never uploaded).
