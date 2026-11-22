@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.7.12"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.8.0"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -354,6 +354,9 @@ class App:
         self.hash_job = None
         self.toast_text = None
         self.toast_gen = 0
+        self.call_gen = 0
+        self.call_timer = 0
+        self.call_return = "chats"
         self.redraw_armed = 0
         self.cache_armed = 0
         self.avatars = tgui.Avatars(self, self.dir + "avatar.jpg")
@@ -1116,6 +1119,8 @@ class App:
             m.append((u"Write message", self.compose))
         m.append((u"Reply to selected", self.reply_selected))
         m.append((u"Read selected message", self.read_selected))
+        if key[0] == "u" and self.client.peer(key)["kind"] == "user":
+            m.append((u"Telegram call", lambda self=self, k=key: self.telegram_call(k)))
         if key[0] == "u" and self.client.peer(key).get("phone"):
             m.append((u"Call " + one_line(self.client.short_name(key), 20),
                       lambda self=self, k=key: self.call_peer(k)))
@@ -1365,6 +1370,8 @@ class App:
         self.view = v
         v.show()
         menu = [(u"Send message", self.back_to_chat)]
+        if key[0] == "u" and self.client.peer(key)["kind"] == "user":
+            menu.append((u"Telegram call", lambda self=self, k=key: self.telegram_call(k)))
         if key[0] == "u" and self.client.peer(key).get("phone"):
             menu.append((u"Call " + one_line(self.client.short_name(key), 20),
                          lambda self=self, k=key: self.call_peer(k)))
@@ -1614,35 +1621,103 @@ class App:
         if changed:
             self.redraw_soon()
 
-    def incoming_call(self, key, call):
-        """Telegram calls need live audio streaming, which Python for S60 1.4.5
-        cannot do; offer to decline or call back over the phone network."""
-        self.call_id = call.get("id")
-        name = to_u(self.client.peer_name(key))
-        if call.get("video"):
-            what = u"video call"
-        else:
-            what = u"call"
-        items = [u"Decline"]
-        acts = [lambda self=self, call=call: self.client.decline_call(call)]
-        if self.client.peer(key).get("phone"):
-            items.append(u"Decline and call back by phone")
-            acts.append(lambda self=self, call=call, key=key: (
-                self.client.decline_call(call), self.call_peer(key)))
-        items.append(u"Decline and send a message")
-        acts.append(lambda self=self, call=call, key=key: (
-            self.client.decline_call(call), self.open_chat(key), self.compose()))
-        items.append(u"Ignore")
-        acts.append(lambda: None)
-        self.show_toast(u"Telegram " + what, name + u" is calling you")
-        i = appuifw.popup_menu(items, name + u": Telegram " + what)
-        if i is not None and getattr(self, "call_id", None) == call.get("id"):
-            acts[i]()
-        self.call_id = None
+    # ---------------------------------------------------------- Telegram calls
 
-    def call_ended(self, cid):
-        if getattr(self, "call_id", None) == cid:
-            self.call_id = None
+    def telegram_call(self, key):
+        """Start an outgoing Telegram call (signalling only for now)."""
+        if self.client.call_busy():
+            appuifw.note(u"You are already in a call.", "info")
+            return
+        self.client.start_call(key)
+
+    def call_yield(self):
+        try:
+            self.redraw()
+            e32.ao_yield()
+        except:
+            pass
+
+    def call_changed(self):
+        cs = self.client.cs
+        if cs is None:
+            return
+        if self.screen != "call":
+            if isinstance(self.view, tgui.PlayerView):
+                self.view.close()
+            self.call_return = self.screen
+            self.screen = "call"
+            self.set_screen("large")
+            self.view = tgui.CallView(self)
+            self.view.show()
+        self.call_menu()
+        self.redraw()
+        st = cs["state"]
+        if st == "connected" and not self.call_timer:
+            self.call_timer = 1
+            self.net.later(1, self.call_tick)
+        elif st == "ended":
+            self.call_gen = self.call_gen + 1
+            gen = self.call_gen
+
+            def close(self=self, gen=gen):
+                if self.call_gen == gen:
+                    self.close_call()
+            self.net.later(2, close)
+
+    def call_tick(self):
+        cs = self.client.cs
+        if cs is not None and cs["state"] == "connected" and self.screen == "call":
+            self.redraw()
+            self.net.later(1, self.call_tick)
+        else:
+            self.call_timer = 0
+
+    def call_menu(self):
+        cs = self.client.cs
+        st = cs["state"]
+        if st == "incoming":
+            appuifw.app.menu = [(u"Accept", self.call_primary), (u"Decline", self.call_hangup)]
+            appuifw.app.exit_key_handler = self.call_hangup
+        elif st == "ended":
+            appuifw.app.menu = [(u"Close", self.close_call)]
+            appuifw.app.exit_key_handler = self.close_call
+        else:
+            appuifw.app.menu = [(u"Hang up", self.call_hangup)]
+            appuifw.app.exit_key_handler = self.call_hangup
+
+    def call_primary(self):
+        cs = self.client.cs
+        if cs is None:
+            return
+        st = cs["state"]
+        if st == "incoming":
+            self.client.accept_call()
+        elif st == "ended":
+            self.close_call()
+        else:
+            self.call_hangup()
+
+    def call_hangup(self):
+        cs = self.client.cs
+        if cs is None:
+            return
+        if cs["state"] == "ended":
+            self.close_call()
+        else:
+            self.client.hang_up()
+
+    def close_call(self):
+        self.call_gen = self.call_gen + 1
+        if self.screen != "call":
+            return
+        self.call_timer = 0
+        ret = self.call_return
+        if ret == "chat" and self.chat_key is not None:
+            self.back_to_chat()
+        elif ret == "profile" and self.chat_key is not None:
+            self.view_profile()
+        else:
+            self.back_to_chats()
 
     # ---------------------------------------------------------- live updates
 
@@ -1799,6 +1874,8 @@ class App:
             self.view.close()
         if isinstance(self.view, tgui.CallTestView):
             self.view.stop()
+        if self.client is not None and self.client.call_busy():
+            self.client.hang_up()
         if self.client is not None and self.client.me is not None:
             self.save_cache()
         self.net.cancel_all()

@@ -254,6 +254,8 @@ class Client:
         self.sessions = {}
         self.main_dc = int(store.get("main_dc", "2"))
         self.peers = {}        # key -> info dict (see peer_info)
+        self.cs = None         # current Telegram call
+        self.dh = None         # cached (g, p) from messages.getDhConfig
         self.verify = 0        # full msg_key check on received data (slow)
         self.me = None
         uid = store.get("user_id")
@@ -1024,12 +1026,268 @@ class Client:
                    "id": ids, "random_id": rids, "to_peer": self.input_peer(to_key)},
                   ok, on_err)
 
-    def decline_call(self, call):
+    # ---------------------------------------------------------- Telegram calls
+    # Signalling only (DH key exchange); the call state lives in self.cs:
+    # {"key", "id", "hash", "out", "state", "text", "a", "g_a", "g_a_hash",
+    #  "start", "conns", "fp", "kb", "emoji"}.
+    # states: calling ringing incoming keys connected ended
+
+    CALL_PROTOCOL = {"_": "phoneCallProtocol", "udp_p2p": 1, "udp_reflector": 1,
+                     "min_layer": 65, "max_layer": 92, "library_versions": ["2.4.4"]}
+
+    def call_busy(self):
+        return self.cs is not None and self.cs["state"] != "ended"
+
+    def call_log(self, cs, msg):
+        self.log("call %s: %s" % (cs["state"], msg))
+
+    def call_state(self, cs, state, text):
+        cs["state"] = state
+        cs["text"] = text
+        self.call_log(cs, text)
+        self.ui.call_changed()
+
+    def call_input(self, cs):
+        return {"_": "inputPhoneCall", "id": cs["id"], "access_hash": cs["hash"]}
+
+    def call_fail(self, cs, e):
+        if cs["state"] != "ended":
+            self.call_state(cs, "ended", "Call failed: " + e.message)
+            self.ui.call_changed()
+
+    def get_dh_config(self, on_ok, on_err):
+        if self.dh is not None:
+            on_ok(self.dh)
+            return
+
+        def ok(res, self=self, on_ok=on_ok, on_err=on_err):
+            g = res.get("g", 0)
+            p = res.get("p", "")
+            if res.get("_") != "messages.dhConfig" or len(p) != 256 or ord(p[0]) < 128 \
+                    or g < 2 or g > 7:
+                on_err(RpcError(0, "BAD_DH_CONFIG"))
+                return
+            self.dh = (g, tgcrypto.bytes_to_long(p))
+            on_ok(self.dh)
+        self.call({"_": "messages.getDhConfig", "version": 0, "random_length": 256},
+                  ok, on_err)
+
+    def dh_ok(self, x, p):
+        """Range check from the docs: 2^1984 < x < p - 2^1984."""
+        lim = long(2) ** 1984
+        return x > lim and x < p - lim
+
+    def fingerprint(self, kb):
+        s = tgcrypto.sha1(kb)[-8:]
+        l = list(s)
+        l.reverse()
+        v = tgcrypto.bytes_to_long("".join(l))
+        if v >= long(2) ** 63:
+            v = v - long(2) ** 64
+        return v
+
+    def new_call(self, key, out):
+        self.cs = {"key": key, "id": None, "hash": 0, "out": out, "state": "calling",
+                   "text": "", "a": None, "g_a": "", "g_a_hash": "", "start": 0,
+                   "conns": [], "fp": 0, "kb": "", "emoji": ""}
+        return self.cs
+
+    def start_call(self, key):
+        """Outgoing Telegram call to user key 'u<id>'. False if busy."""
+        if self.call_busy():
+            return 0
+        cs = self.new_call(key, 1)
+        self.call_state(cs, "calling", "Calling...")
+
+        def fail(e, self=self, cs=cs):
+            self.call_fail(cs, e)
+
+        def have(dh, self=self, cs=cs, key=key, fail=fail):
+            if cs["state"] == "ended":
+                return
+            g, p = dh
+            self.call_state(cs, "calling", "Creating key...")
+            self.ui.call_yield()
+            a = tgcrypto.bytes_to_long(tgcrypto.random_bytes(256))
+            ga = pow(g, a, p)
+            if not self.dh_ok(ga, p):
+                fail(RpcError(0, "BAD_G_A"))
+                return
+            gab = tgcrypto.long_to_bytes(ga, 256)
+            cs["a"] = a
+            cs["g_a"] = gab
+            self.call_state(cs, "calling", "Calling...")
+            pk = self.input_peer(key)
+
+            def sent(res, self=self, cs=cs):
+                c = res.get("phone_call") or {}
+                cs["id"] = c.get("id")
+                cs["hash"] = c.get("access_hash", 0)
+                if cs["state"] == "ended":
+                    # hung up before the server answered
+                    self.send_discard(cs, "phoneCallDiscardReasonHangup", 0)
+                    return
+                self.call_log(cs, "requested, id %s" % str(cs["id"]))
+                if c.get("receive_date"):
+                    self.call_state(cs, "ringing", "Ringing...")
+            self.call({"_": "phone.requestCall",
+                       "user_id": {"_": "inputUser", "user_id": pk["user_id"],
+                                   "access_hash": pk["access_hash"]},
+                       "random_id": int(tgcrypto.bytes_to_long(tgcrypto.random_bytes(4))
+                                        % 2147483647),
+                       "g_a_hash": tgcrypto.sha256(gab),
+                       "protocol": self.CALL_PROTOCOL}, sent, fail)
+        self.get_dh_config(have, fail)
+        return 1
+
+    def accept_call(self):
+        cs = self.cs
+        if cs is None or cs["state"] != "incoming":
+            return
+
+        def fail(e, self=self, cs=cs):
+            self.call_fail(cs, e)
+
+        def have(dh, self=self, cs=cs, fail=fail):
+            if cs["state"] == "ended":
+                return
+            g, p = dh
+            self.call_state(cs, "keys", "Exchanging keys...")
+            self.ui.call_yield()
+            b = tgcrypto.bytes_to_long(tgcrypto.random_bytes(256))
+            gb = pow(g, b, p)
+            if not self.dh_ok(gb, p):
+                fail(RpcError(0, "BAD_G_B"))
+                return
+            cs["a"] = b
+            cs["p"] = p
+
+            def sent(res, self=self, cs=cs):
+                self.call_log(cs, "accepted, waiting for the caller's key")
+            self.call({"_": "phone.acceptCall", "peer": self.call_input(cs),
+                       "g_b": tgcrypto.long_to_bytes(gb, 256),
+                       "protocol": self.CALL_PROTOCOL}, sent, fail)
+        self.get_dh_config(have, fail)
+
+    def send_discard(self, cs, reason, duration):
+        self.call({"_": "phone.discardCall", "duration": duration, "connection_id": 0,
+                   "peer": self.call_input(cs), "reason": {"_": reason}},
+                  lambda r: None, lambda e: None)
+
+    def hang_up(self):
+        """Decline (incoming, ringing), cancel or hang up."""
+        cs = self.cs
+        if cs is None or cs["state"] == "ended":
+            return
+        dur = 0
+        reason = "phoneCallDiscardReasonHangup"
+        if cs["state"] == "incoming":
+            reason = "phoneCallDiscardReasonBusy"
+        if cs["start"]:
+            dur = int(time.time() - cs["start"])
+        if cs["id"] is not None:
+            self.send_discard(cs, reason, dur)
+        self.call_state(cs, "ended", "Call ended")
+
+    def decline_busy(self, c):
         self.call({"_": "phone.discardCall", "duration": 0, "connection_id": 0,
-                   "peer": {"_": "inputPhoneCall", "id": call["id"],
-                            "access_hash": call["access_hash"]},
+                   "peer": {"_": "inputPhoneCall", "id": c["id"],
+                            "access_hash": c["access_hash"]},
                    "reason": {"_": "phoneCallDiscardReasonBusy"}},
                   lambda r: None, lambda e: None)
+
+    def call_connected(self, cs, c):
+        cs["conns"] = c.get("connections", [])
+        cs["start"] = time.time()
+        for x in cs["conns"]:
+            self.log("call connection: %s ip=%s port=%s tag=%s id=%s" % (
+                x.get("_"), x.get("ip", ""), x.get("port", ""),
+                binascii.hexlify(x.get("peer_tag", "")), x.get("id", "")))
+        self.log("call key fingerprint %s, key sha1 %s" % (
+            str(cs["fp"]), binascii.hexlify(tgcrypto.sha1(cs["kb"]))))
+        h = binascii.hexlify(tgcrypto.sha256(cs["kb"] + cs["g_a"]))
+        cs["emoji"] = "%s %s %s %s" % (h[0:4], h[4:8], h[8:12], h[12:16])
+        self.call_state(cs, "connected", "Connected")
+
+    def call_update(self, c):
+        n = c.get("_")
+        cs = self.cs
+        if n == "phoneCallRequested" and c.get("participant_id") == self.me:
+            if self.call_busy():
+                self.log("call: busy, declining %s" % str(c["id"]))
+                self.decline_busy(c)
+                return
+            cs = self.new_call("u%d" % c["admin_id"], 0)
+            cs["id"] = c["id"]
+            cs["hash"] = c["access_hash"]
+            cs["g_a_hash"] = c.get("g_a_hash", "")
+            self.call({"_": "phone.receivedCall", "peer": self.call_input(cs)},
+                      lambda r: None, lambda e: None)
+            self.call_state(cs, "incoming", "Incoming Telegram call")
+            return
+        if cs is None or cs["state"] == "ended":
+            return
+        if cs["id"] is None or c.get("id") != cs["id"]:
+            return
+        if n == "phoneCallDiscarded":
+            r = (c.get("reason") or {}).get("_", "")
+            text = "Call ended"
+            if r == "phoneCallDiscardReasonBusy":
+                text = "Call ended (busy)"
+            elif r == "phoneCallDiscardReasonMissed":
+                text = "Call ended (missed)"
+            elif r == "phoneCallDiscardReasonDisconnect":
+                text = "Call ended (disconnected)"
+            self.call_state(cs, "ended", text)
+        elif n == "phoneCallWaiting":
+            if cs["out"] and cs["state"] == "calling" and c.get("receive_date"):
+                self.call_state(cs, "ringing", "Ringing...")
+        elif n == "phoneCallAccepted" and cs["out"] and cs["state"] != "keys":
+            self.call_state(cs, "keys", "Exchanging keys...")
+            self.ui.call_yield()
+            g, p = self.dh
+            gb = tgcrypto.bytes_to_long(c.get("g_b", ""))
+            if not self.dh_ok(gb, p):
+                self.fail_call_now(cs, "BAD_G_B")
+                return
+            kb = tgcrypto.long_to_bytes(pow(gb, cs["a"], p), 256)
+            cs["kb"] = kb
+            cs["fp"] = self.fingerprint(kb)
+
+            def done(res, self=self, cs=cs):
+                if cs["state"] == "ended":
+                    return
+                self.call_connected(cs, res.get("phone_call") or {})
+
+            def fail(e, self=self, cs=cs):
+                self.call_fail(cs, e)
+            self.call({"_": "phone.confirmCall", "peer": self.call_input(cs),
+                       "g_a": cs["g_a"], "key_fingerprint": cs["fp"],
+                       "protocol": self.CALL_PROTOCOL}, done, fail)
+        elif n == "phoneCall" and not cs["out"] and cs["state"] == "keys":
+            ga = c.get("g_a_or_b", "")
+            if tgcrypto.sha256(ga) != cs["g_a_hash"]:
+                self.fail_call_now(cs, "G_A_HASH_MISMATCH")
+                return
+            p = cs["p"]
+            gan = tgcrypto.bytes_to_long(ga)
+            if not self.dh_ok(gan, p):
+                self.fail_call_now(cs, "BAD_G_A")
+                return
+            self.ui.call_yield()
+            kb = tgcrypto.long_to_bytes(pow(gan, cs["a"], p), 256)
+            fp = self.fingerprint(kb)
+            if fp != c.get("key_fingerprint"):
+                self.fail_call_now(cs, "KEY_FINGERPRINT_MISMATCH")
+                return
+            cs["g_a"] = ga
+            cs["kb"] = kb
+            cs["fp"] = fp
+            self.call_connected(cs, c)
+
+    def fail_call_now(self, cs, why):
+        self.send_discard(cs, "phoneCallDiscardReasonDisconnect", 0)
+        self.call_state(cs, "ended", "Call failed: " + why)
 
     def mark_read(self, key, max_id):
         if key[0] == "h":
@@ -1129,11 +1387,7 @@ class Client:
         elif n == "updateDeleteChannelMessages":
             self.ui.messages_deleted("h%d" % x["channel_id"], x.get("messages", []))
         elif n == "updatePhoneCall":
-            c = x.get("phone_call") or {}
-            if c.get("_") == "phoneCallRequested" and c.get("participant_id") == self.me:
-                self.ui.incoming_call("u%d" % c["admin_id"], c)
-            elif c.get("_") == "phoneCallDiscarded":
-                self.ui.call_ended(c.get("id"))
+            self.call_update(x.get("phone_call") or {})
         elif n == "updateUserTyping" or n == "updateChatUserTyping":
             pass
         elif n == "updateChannelTooLong":

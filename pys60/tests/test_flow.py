@@ -192,8 +192,32 @@ def handle(f):
     if n == "messages.forwardMessages":
         state["forwarded"] = (f["id"], f["to_peer"]["_"], len(f["random_id"]))
         return {"_": "updates", "users": [], "chats": [], "date": 0, "seq": 0, "updates": []}
+    if n == "messages.getDhConfig":
+        return {"_": "messages.dhConfig", "g": G, "p": i2b(P), "version": 1, "random": "r" * 256}
+    if n == "phone.requestCall":
+        state["req"] = f
+        return {"_": "phone.phoneCall", "users": [], "phone_call": {"_": "phoneCallWaiting",
+                "id": 777, "access_hash": 9, "date": 0, "admin_id": 7, "participant_id": 42,
+                "protocol": f["protocol"]}}
+    if n == "phone.acceptCall":
+        state["acc"] = f
+        return {"_": "phone.phoneCall", "users": [], "phone_call": {"_": "phoneCallWaiting",
+                "id": 555, "access_hash": 1, "date": 0, "admin_id": 42, "participant_id": 7,
+                "protocol": f["protocol"]}}
+    if n == "phone.confirmCall":
+        state["conf"] = f
+        return {"_": "phone.phoneCall", "users": [], "phone_call": {"_": "phoneCall",
+                "id": 777, "access_hash": 9, "date": 0, "admin_id": 7, "participant_id": 42,
+                "g_a_or_b": f["g_a"], "key_fingerprint": f["key_fingerprint"],
+                "protocol": f["protocol"], "start_date": 0,
+                "connections": [{"_": "phoneConnection", "id": 1, "ip": "1.2.3.4",
+                                 "ipv6": "", "port": 598, "peer_tag": "\x01\x02" * 8}]}}
+    if n == "phone.receivedCall":
+        state["received"] = f["peer"]["id"]
+        return True
     if n == "phone.discardCall":
         state["declined"] = f["peer"]["id"]
+        state["discard"] = (f["peer"]["id"], f["reason"]["_"], f["duration"])
         return {"_": "updates", "users": [], "chats": [], "date": 0, "seq": 0, "updates": []}
     raise AssertionError("unexpected call " + n)
 
@@ -339,12 +363,106 @@ popups[:] = [1]          # "Delete for me and Alice"
 app.delete_message(mine); app.net.run()
 assert state["deleted"] == ([11], 1), state
 assert not [m for m in app.msgs["u42"] if m["id"] == 11]
-popups[:] = [0]          # Decline
-app.client.update({"_": "updatePhoneCall", "phone_call": {"_": "phoneCallRequested", "id": 555,
-                   "access_hash": 1, "date": 0, "admin_id": 42, "participant_id": 7,
-                   "g_a_hash": "", "protocol": {"_": "phoneCallProtocol"}}})
-app.net.run()
-assert state["declined"] == 555
+def upd(c):
+    app.client.update({"_": "updatePhoneCall", "phone_call": c})
+    app.net.run()
+
+def fp_of(kb):
+    h = hashlib.sha1(kb).digest()[-8:]
+    import struct
+    return struct.unpack("<q", h)[0]
+
+def incoming_req(cid, ga):
+    upd({"_": "phoneCallRequested", "id": cid, "access_hash": 1, "date": 0, "admin_id": 42,
+         "participant_id": 7, "g_a_hash": hashlib.sha256(i2b(ga)).digest(),
+         "protocol": {"_": "phoneCallProtocol"}})
+
+app.chat_key = "u42"
+app.back_to_chat()
+# incoming call, declined with the right softkey
+ga = pow(G, 123456789123456789123456789, P)
+incoming_req(555, ga)
+assert app.screen == "call" and state["received"] == 555
+t = screen_text(); print "call:", t
+assert t.find(u"Incoming Telegram call") >= 0 and t.find(u"Alice B") >= 0, t
+appuifw.app.exit_key_handler(); app.net.run()
+assert state["discard"] == (555, "phoneCallDiscardReasonBusy", 0), state["discard"]
+assert screen_text().find(u"Call ended") >= 0
+app.close_call()
+assert app.screen == "chat"
+
+# incoming call accepted: caller (simulated) sends g_a_or_b after our g_b
+ca = 98765432123456789987654321
+ga = pow(G, ca, P)
+incoming_req(555, ga)
+app.call_primary(); app.net.run()
+gb = tgcrypto.bytes_to_long(state["acc"]["g_b"])
+assert 1 < gb < P - 1
+kb = i2b(pow(gb, ca, P))
+upd({"_": "phoneCall", "id": 555, "access_hash": 1, "date": 0, "admin_id": 42,
+     "participant_id": 7, "g_a_or_b": i2b(ga), "key_fingerprint": fp_of(kb),
+     "protocol": {"_": "phoneCallProtocol"}, "start_date": 0,
+     "connections": [{"_": "phoneConnection", "id": 2, "ip": "5.6.7.8", "ipv6": "",
+                      "port": 599, "peer_tag": "\x09" * 16}]})
+t = screen_text(); print "call:", t
+assert app.client.cs["state"] == "connected", app.client.cs
+assert t.find(u"Connected 00:") >= 0 and t.find(u"audio coming soon") >= 0 and t.find(u"Key: ") >= 0, t
+assert app.client.cs["kb"] == kb
+# timer tick keeps going, then hang up with centre
+app.call_tick(); app.net.run()
+state["discard"] = None
+press("select")
+assert state["discard"][:2] == (555, "phoneCallDiscardReasonHangup"), state["discard"]
+app.close_call()
+
+# a wrong fingerprint is refused
+incoming_req(556, ga)
+app.call_primary(); app.net.run()
+upd({"_": "phoneCall", "id": 556, "access_hash": 1, "date": 0, "admin_id": 42,
+     "participant_id": 7, "g_a_or_b": i2b(ga), "key_fingerprint": 12345,
+     "protocol": {"_": "phoneCallProtocol"}, "start_date": 0, "connections": []})
+assert app.client.cs["state"] == "ended" and app.client.cs["text"].find("FINGERPRINT") >= 0
+app.close_call()
+
+# outgoing call reaching connected
+app.telegram_call("u42"); app.net.run()
+req = state["req"]
+assert req["user_id"]["user_id"] == 42 and req["protocol"]["max_layer"] == 92
+assert app.screen == "call" and screen_text().find(u"Calling...") >= 0
+upd({"_": "phoneCallWaiting", "id": 777, "access_hash": 9, "date": 0, "admin_id": 7,
+     "participant_id": 42, "protocol": {"_": "phoneCallProtocol"}, "receive_date": 5})
+assert screen_text().find(u"Ringing...") >= 0
+# busy: a second incoming call is declined without disturbing this one
+incoming_req(600, ga)
+assert state["discard"][:2] == (600, "phoneCallDiscardReasonBusy") and app.client.cs["id"] == 777
+cb = 5555555555555555555555555
+gbv = pow(G, cb, P)
+upd({"_": "phoneCallAccepted", "id": 777, "access_hash": 9, "date": 0, "admin_id": 7,
+     "participant_id": 42, "g_b": i2b(gbv), "protocol": {"_": "phoneCallProtocol"}})
+conf = state["conf"]
+assert hashlib.sha256(conf["g_a"]).digest() == req["g_a_hash"]
+kb = i2b(pow(gbv, cb * 0 + 1, P))   # placeholder, replaced below
+ga_n = tgcrypto.bytes_to_long(conf["g_a"])
+kb = i2b(pow(ga_n, cb, P))
+assert conf["key_fingerprint"] == fp_of(kb), "fingerprint"
+assert app.client.cs["state"] == "connected" and app.client.cs["kb"] == kb
+t = screen_text(); print "call:", t
+assert t.find(u"Connected 00:") >= 0, t
+# remote discard
+upd({"_": "phoneCallDiscarded", "id": 777, "reason": {"_": "phoneCallDiscardReasonHangup"}})
+assert screen_text().find(u"Call ended") >= 0 and app.client.cs["state"] == "ended"
+app.close_call()
+assert app.screen == "chat"
+# remote discard while ringing (incoming), then outgoing cancelled by us
+incoming_req(557, ga)
+upd({"_": "phoneCallDiscarded", "id": 557, "reason": {"_": "phoneCallDiscardReasonMissed"}})
+assert app.client.cs["text"] == "Call ended (missed)"
+app.close_call()
+app.telegram_call("u42"); app.net.run()
+state["discard"] = None
+appuifw.app.exit_key_handler(); app.net.run()
+assert state["discard"][:2] == (777, "phoneCallDiscardReasonHangup"), state["discard"]
+app.close_call()
 screen_text()
 app.save_cache()
 assert os.path.getsize(TMP + "/cache.bin") > 100

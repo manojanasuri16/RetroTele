@@ -1814,6 +1814,7 @@ F 58943ee2 messages.setTyping flags:# peer:InputPeer top_msg_id:flags.0?int acti
 F fef48f62 messages.sendMessage flags:# no_webpage:flags.1?true silent:flags.5?true background:flags.6?true clear_draft:flags.7?true noforwards:flags.14?true update_stickersets_order:flags.15?true invert_media:flags.16?true allow_paid_floodskip:flags.19?true peer:InputPeer reply_to:flags.0?InputReplyTo message:string random_id:long reply_markup:flags.2?ReplyMarkup entities:flags.3?Vector<MessageEntity> schedule_date:flags.10?int schedule_repeat_period:flags.24?int send_as:flags.13?InputPeer quick_reply_shortcut:flags.17?InputQuickReplyShortcut effect:flags.18?long allow_paid_stars:flags.21?long suggested_post:flags.22?SuggestedPost rich_message:flags.23?InputRichMessage =Updates
 F 13704a7c messages.forwardMessages flags:# silent:flags.5?true background:flags.6?true with_my_score:flags.8?true drop_author:flags.11?true drop_media_captions:flags.12?true noforwards:flags.14?true allow_paid_floodskip:flags.19?true from_ephemeral:flags.25?true from_peer:InputPeer id:Vector<int> random_id:Vector<long> to_peer:InputPeer top_msg_id:flags.9?int reply_to:flags.22?InputReplyTo schedule_date:flags.10?int schedule_repeat_period:flags.24?int send_as:flags.13?InputPeer quick_reply_shortcut:flags.17?InputQuickReplyShortcut effect:flags.18?long video_timestamp:flags.20?int allow_paid_stars:flags.21?long suggested_post:flags.23?SuggestedPost =Updates
 F aeb00b34 messages.getFullChat chat_id:long =messages.ChatFull
+F 26cf8950 messages.getDhConfig version:int random_length:int =messages.DhConfig
 F b106e66c messages.editMessage flags:# no_webpage:flags.1?true invert_media:flags.16?true peer:InputPeer id:int message:flags.11?string media:flags.14?InputMedia reply_markup:flags.2?ReplyMarkup entities:flags.3?Vector<MessageEntity> schedule_date:flags.15?int schedule_repeat_period:flags.18?int quick_reply_shortcut_id:flags.17?int rich_message:flags.23?InputRichMessage =Updates
 F e470bcfd messages.getPeerDialogs peers:Vector<InputDialogPeer> =messages.PeerDialogs
 F efd48c89 messages.getDialogFilters =messages.DialogFilters
@@ -1827,5 +1828,8 @@ F cc104937 channels.readHistory channel:InputChannel max_id:int =Bool
 F 84c1fd4e channels.deleteMessages channel:InputChannel id:Vector<int> =messages.AffectedMessages
 F ad8c9a23 channels.getMessages channel:InputChannel id:Vector<InputMessage> =messages.Messages
 F 08736a09 channels.getFullChannel channel:InputChannel =messages.ChatFull
+F 42ff96ed phone.requestCall flags:# video:flags.0?true user_id:InputUser random_id:int g_a_hash:bytes protocol:PhoneCallProtocol =phone.PhoneCall
+F 3bd2b4a0 phone.acceptCall peer:InputPhoneCall g_b:bytes protocol:PhoneCallProtocol =phone.PhoneCall
+F 2efe1722 phone.confirmCall peer:InputPhoneCall g_a:bytes key_fingerprint:long protocol:PhoneCallProtocol =phone.PhoneCall
 F 17d54f61 phone.receivedCall peer:InputPhoneCall =Bool
 F b2cbc1c0 phone.discardCall flags:# video:flags.0?true peer:InputPhoneCall duration:int reason:PhoneCallDiscardReason connection_id:long =Updates

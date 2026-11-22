@@ -4,6 +4,7 @@
 # Python 2.2 compatible: no conditional expressions, no sorted/enumerate.
 
 import os
+import time
 import appuifw
 import e32
 import graphics
@@ -1930,6 +1931,80 @@ class ProfileView(CanvasView):
         # fixed header bar
         g.rectangle((0, 0, w, H), fill=BLUE)
         g.text((12, 30), u"Info", fill=WHITE, font=font("title"))
+
+
+# ---------------------------------------------------------------- Telegram call
+
+CALL_BG = 0x16283F
+CALL_TOP = 0x1E3A5F
+
+
+class CallView(CanvasView):
+    """Call screen: avatar, name, status. Centre = accept / hang up,
+    right softkey (exit handler) = decline / hang up."""
+    PHOTO = 80
+
+    def __init__(self, app):
+        CanvasView.__init__(self, app)
+
+    def key(self, k):
+        if k == "select" or k == "5":
+            self.app.call_primary()
+
+    def elapsed(self):
+        cs = self.app.client.cs
+        if cs is None or not cs["start"]:
+            return u"00:00"
+        n = int(time.time() - cs["start"])
+        if n < 0:
+            n = 0
+        return u"%02d:%02d" % (n / 60, n % 60)
+
+    def paint(self, g, w, h):
+        app = self.app
+        cl = app.client
+        cs = cl.cs
+        g.clear(CALL_BG)
+        g.rectangle((0, 0, w, h / 2), fill=CALL_TOP)
+        if cs is None:
+            return
+        key = cs["key"]
+        PH = self.PHOTO
+        x = (w - PH) / 2
+        y = 36
+        g.ellipse((x - 4, y - 4, x + PH + 4, y + PH + 4), fill=BLUE)
+        app.avatars.draw(g, key, cl.peer_name(key), cl.peer(key).get("photo"),
+                         x, y, PH, None)
+        name = fit(g, cl.peer_name(key), "title", w - 20)
+        y = y + PH + 34
+        txt(g, (w - width(g, name, "title")) / 2, y, name, WHITE, "title", "b")
+        st = cs["state"]
+        lines = [to_u(cs["text"])]
+        if st == "connected":
+            lines = [u"Connected " + self.elapsed(), u"(audio coming soon)"]
+        for l in lines:
+            y = y + 26
+            l = fit(g, l, "text", w - 16)
+            g.text(((w - width(g, l, "text")) / 2, y), l, fill=HEADER_SUB,
+                   font=font("text"))
+        if st == "connected" and cs["emoji"]:
+            l = u"Key: " + to_u(cs["emoji"])
+            y = y + 26
+            g.text(((w - width(g, l, "small")) / 2, y), l, fill=GREY_LIGHT,
+                   font=font("small"))
+        if app.busy:
+            b = fit(g, app.busy, "small", w - 16)
+            g.text(((w - width(g, b, "small")) / 2, h - 36), b, fill=GREY_LIGHT,
+                   font=font("small"))
+        if st == "incoming":
+            hint = u"OK: Accept    Back: Decline"
+        elif st == "ended":
+            hint = u"OK: Close"
+        else:
+            hint = u"OK or Back: Hang up"
+        hint = fit(g, hint, "small", w - 10)
+        g.text(((w - width(g, hint, "small")) / 2, h - 12), hint, fill=GREY_LIGHT,
+               font=font("small"))
 
 
 # ---------------------------------------------------------------- welcome
