@@ -1633,6 +1633,59 @@ class CallTestView(CanvasView):
                 pass
             self.running = 0
 
+    def helper_test(self):
+        """The same echo test run by tgaudiotest.exe, which has MultimediaDD
+        (RetroTele-audiotest.sis, unlocked phones). Its numbers are read
+        from the file it writes."""
+        self.stop()
+        try:
+            e32.start_exe(u"tgaudiotest.exe", u"20")
+        except:
+            import sys
+            self.error = u"Helper not installed: " + to_u(str(sys.exc_info()[1]))
+            self.draw()
+            return
+        self.lines = [u"Helper echo test: speak for 20 s..."]
+        self.helper_ticks = 0
+        self.draw()
+        self.app.net.later(1, self.helper_tick)
+
+    def helper_tick(self):
+        if self.app.view is not self:
+            return
+        self.helper_ticks = self.helper_ticks + 1
+        text = ""
+        for p in ["E:\\retrotele_audiotest.txt", "C:\\Data\\retrotele_audiotest.txt"]:
+            try:
+                f = open(p, "rb")
+                text = f.read()
+                f.close()
+                break
+            except:
+                pass
+        rows = text.strip().split("\n")
+        last = ""
+        for r in rows:
+            if r[:2] == "t ":
+                last = r
+        out = [u"Helper echo test (%d s)" % self.helper_ticks]
+        if last:
+            parts = last.split(" ")
+            d = {}
+            i = 0
+            while i + 1 < len(parts):
+                d[parts[i]] = parts[i + 1]
+                i = i + 2
+            out.append(u"Recorded %s B, played %s B" % (d.get("rec", "?"), d.get("play", "?")))
+            out.append(u"Gaps %s, write errors %s, last %s" % (d.get("gaps", "?"),
+                       d.get("werr", "?"), d.get("last", "?")))
+        self.lines = out
+        self.draw()
+        if text.find("tgaudiotest end") < 0 and self.helper_ticks < 40:
+            self.app.net.later(1, self.helper_tick)
+        else:
+            self.app.log("helper echo test result:\n" + text)
+
     def opus_test(self):
         """Can the phone compress voice fast enough? Times Opus encode+decode
         of 20 ms frames (16 kHz mono, 16 kbit/s, VoIP mode)."""

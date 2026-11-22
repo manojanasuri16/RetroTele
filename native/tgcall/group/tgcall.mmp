@@ -11,11 +11,11 @@ NOSTRICTDEF
 SYSTEMINCLUDE \epoc32\include
 SYSTEMINCLUDE \epoc32\include\libc
 SYSTEMINCLUDE \epoc32\include\python
-USERINCLUDE   ..\..\opus\bench
+USERINCLUDE   ..\..\opus\bench ..
 EPOCALLOWDLLDATA
 
 SOURCEPATH    ..
-SOURCE        tgcall.cpp
+SOURCE        tgcall.cpp loopback.cpp
 
 STATICLIBRARY tgopus.lib
 LIBRARY       python222.lib euser.lib estlib.lib mediaclientaudioinputstream.lib mediaclientaudiostream.lib

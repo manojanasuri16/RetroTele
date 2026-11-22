@@ -38,3 +38,5 @@ OUT="$EPOCROOT/epoc32/release/gcce/urel/tgcall.pyd"
 [ -f "$OUT" ] || { echo "tgcall build failed"; exit 1; }
 cp "$OUT" "$HERE/../pys60/native/tgcall.pyd"
 ls -la "$HERE/../pys60/native/tgcall.pyd"
+OUT="$EPOCROOT/epoc32/release/gcce/urel/tgaudiotest.exe"
+[ -f "$OUT" ] && cp "$OUT" "$HERE/../pys60/native/tgaudiotest.exe"

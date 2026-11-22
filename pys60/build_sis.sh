@@ -68,3 +68,18 @@ $PY tools/py2sis_rscfix.py "$(dirname $ENS)" $OPTS --drive=any build/app dist/Re
 grep "rscfix" build/py2sis.log || true
 echo "built dist/RetroTele.sis"
 ls -la dist
+
+# Separate helper package for the call test on unlocked phones: tgaudiotest.exe
+# has MultimediaDD, which only installs where the Install Server patch lets
+# self-signed packages have device capabilities. Kept out of RetroTele.sis so
+# the app itself still installs everywhere.
+if [ -f native/tgaudiotest.exe ]; then
+  rm -rf build/audiotest && mkdir -p build/audiotest/sys/bin
+  cp native/tgaudiotest.exe build/audiotest/sys/bin/
+  $PY $ENS simplesis --uid=0xE7A3D5C6 --version=$VERSION --drive=C \
+    --caption="RetroTele audio test" --vendor=RetroTele \
+    --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
+    build/audiotest dist/RetroTele-audiotest.sis </dev/null >build/simplesis.log
+  echo "built dist/RetroTele-audiotest.sis"
+fi
+
