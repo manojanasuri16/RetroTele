@@ -3,13 +3,15 @@
 // profile, CABAC and CAVLC, 8x8 transform, no B-frames, 15 fps, 150-300 kbit/s), checks every
 // picture against the PC decoder's checksum, measures decode time flat out and the CPU load
 // at a paced 15 fps (idle-counter thread), and writes E:\retrotele_h264bench.txt
-// (C:\Data\ if there is no card). Runs the decoder on its own thread with a 256 KB stack.
+// (C:\Data\ if there is no card). Runs the decoder on its own thread (80/64/32 KB stack, see
+// symbian/h264dec_thread.h), or on the main thread (80 KB EPOCSTACKSIZE) if that fails.
 #include <e32base.h>
 #include <e32std.h>
 #include <f32file.h>
 #include <hal.h>
 #include <sys/reent.h>   // CloseSTDLIB
 #include "h264dec.h"
+#include "symbian/h264dec_thread.h"
 #include "gen/h264bench_clips.h"
 
 _LIT(KCard, "E:\\retrotele_h264bench.txt");
@@ -201,7 +203,7 @@ static TInt PacedL(TInt aIndex, TInt aSeconds)
 
 static void RunBenchL()
 {
-    OpenLog(EFalse);
+    OpenLog(ETrue);     // E32Main created the file
     InitClock();
     Log(_L8("RetroTele h264dec benchmark (FFmpeg 0.6.7 H.264 decoder, C only, GCCE -O2)"));
     TInt cpu = 0, ram = 0;
@@ -237,11 +239,23 @@ static TInt BenchThread(TAny*)
     return err;
 }
 
+static void LogAttempt(TInt aStack, TInt aErr)
+{
+    Log(_L8("create decode thread, stack %d KB: %d"), aStack / 1024, aErr);
+}
+
 GLDEF_C TInt E32Main()
 {
     CTrapCleanup* cleanup = CTrapCleanup::New();
+    TInt biggest = 0;
+    TInt avail = User::Available(biggest);
+    TInt heapMax = User::Heap().MaxLength();
+    OpenLog(EFalse);
+    Log(_L8("bench start, heap avail %d KB (biggest block %d KB), heap max %d KB"), avail / 1024, biggest / 1024, heapMax / 1024);
     RThread t;
-    TInt err = t.Create(_L("h264bench"), BenchThread, 0x40000, NULL, NULL);   // 256 KB stack, shared heap
+    TInt stack = 0;
+    TInt err = H264DecCreateThread(t, _L("h264bench"), BenchThread, NULL, &stack, LogAttempt);
+    CloseLog();
     TExitType et = EExitKill;
     TInt reason = err;
     TExitCategoryName cat;
@@ -254,11 +268,17 @@ GLDEF_C TInt E32Main()
         reason = t.ExitReason();
         cat = t.ExitCategory();
         t.Close();
+        OpenLog(ETrue);
+        if (et == EExitPanic) { TBuf8<KMaxExitCategoryName> c8; c8.Copy(cat); Log(_L8("decode thread PANIC %S %d"), &c8, reason); }
+        else Log(_L8("decode thread exit %d (stack %d KB)"), reason, stack / 1024);
+    } else {
+        OpenLog(ETrue);
+        Log(_L8("no decode thread (%d): running on the main thread (80 KB stack)"), err);
+        CloseLog();
+        TRAPD(e2, RunBenchL());
+        OpenLog(ETrue);
+        Log(_L8("main-thread bench exit %d"), e2);
     }
-    OpenLog(err != KErrNone ? EFalse : ETrue);
-    if (err != KErrNone) Log(_L8("cannot create the decode thread: %d"), err);
-    else if (et == EExitPanic) { TBuf8<KMaxExitCategoryName> c8; c8.Copy(cat); Log(_L8("decode thread PANIC %S %d"), &c8, reason); }
-    else Log(_L8("decode thread exit %d"), reason);
     Log(_L8("bench end"));
     CloseLog();
     delete cleanup;

@@ -10,7 +10,9 @@ API (`h264dec.h`): `h264dec_create(max_w, max_h)`, `h264dec_decode(d, annexb_au,
 `h264dec_reset`, `h264dec_stats`, `h264dec_destroy`, optional `h264dec_set_log`. One decoder
 per thread; per-decoder state lives in the context. Pictures larger than max_w x max_h (by
 area and longer side) are refused with `H264DEC_ERR_TOOBIG` before anything is allocated.
-Low-delay output (no reordering wait). Run it on a thread with >= 128 KB stack.
+Low-delay output (no reordering wait). Symbian caps user thread stacks at 80 KB (a bigger
+request fails with KErrTooBig, -40): start the decode thread with `symbian/h264dec_thread.h`
+(`H264DecCreateThread`: 80, 64, then 32 KB, shared heap), as tgh264bench.exe does.
 
 Process-wide state: FFmpeg's read-only-after-init tables (VLC tables, clip table; about 47 KB
 of bss) filled by the first `h264dec_create()`. Fine in an EXE (tgvideo.exe, the bench); a DLL

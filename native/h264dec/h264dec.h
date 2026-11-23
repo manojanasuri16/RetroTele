@@ -9,7 +9,8 @@
  * Threading: one decoder instance per thread (no locking inside). The only process-wide state
  * is a few read-only-after-init tables (VLC tables, clip table) that the first
  * h264dec_create() fills; create the first decoder before starting other decoding threads.
- * On Symbian run decoding on a thread with >= 64 KB stack (128 KB recommended).
+ * On Symbian run decoding on a thread with 64-80 KB stack (80 KB is the Symbian maximum;
+ * symbian/h264dec_thread.h: H264DecCreateThread).
  */
 #ifndef H264DEC_H
 #define H264DEC_H
