@@ -106,6 +106,18 @@ One file, `RetroTele.sis`, installs everything: the app, the native crypto modul
 
 Emoji images: [Twemoji](https://github.com/twitter/twemoji) by Twitter, Inc and other contributors, licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). The sprite sheets in `pys60/assets/` are built by `tools/emoji/make_emoji.py`.
 
+## Source code of components
+
+The reusable parts of RetroTele live in their own open-source repos (all MIT unless noted):
+
+- [telegram-call-engine-c](https://github.com/manojanasuri16/telegram-call-engine-c): the Telegram call engine (library 2.7.7) in portable C, with tests and the protocol notes.
+- [mtproto-py22](https://github.com/manojanasuri16/mtproto-py22): MTProto 2.0, TL, 2FA SRP and the native crypto module for Python 2.2 / PyS60.
+- [opus-symbian-s60](https://github.com/manojanasuri16/opus-symbian-s60): Opus built for Symbian S60 3rd Edition, with the porting notes.
+- [symbian-s60v3-media-notes](https://github.com/manojanasuri16/symbian-s60v3-media-notes): N79 camera, H.264 and audio findings with the helper sources (needs a hacked phone).
+- [pys60-toolbox](https://github.com/manojanasuri16/pys60-toolbox): the memory-card fix (rscfix), packaging tools and Python 2.2 checkers.
+
+The full list is on the [RetroArchive Open source page](https://manojanasuri16.github.io/RetroArchive/opensource/).
+
 ## License
 
 MIT, see [LICENSE](LICENSE). Third-party components (for example Opus, Nokia's VoIP Audio Services, which is not redistributed here) keep their own licences.
