@@ -60,12 +60,176 @@ int c277_session_init(c277_session *s, const u8 *key256, int is_outgoing,
     return C277_SESS_OK;
 }
 
+
+/* ---------------------------------------------------------------- capture */
+
+static void cap_ch(c277_session *s, char ch)
+{
+    if (s->cap_len < C277_CAP_MAX) s->cap[s->cap_len++] = ch;
+    else s->cap_drop++;
+}
+static void cap_str(c277_session *s, const char *t) { while (*t) cap_ch(s, *t++); }
+static void cap_dec(c277_session *s, u32 v)
+{
+    char b[12]; int n = 0;
+    if (v == 0) { cap_ch(s, '0'); return; }
+    while (v) { b[n++] = (char)('0' + (int)(v % 10)); v /= 10; }
+    while (n) cap_ch(s, b[--n]);
+}
+static void cap_hex8(c277_session *s, u32 v, int digits)
+{
+    int i;
+    for (i = digits - 1; i >= 0; i--) cap_ch(s, "0123456789abcdef"[(v >> (4 * i)) & 15]);
+}
+static void cap_hexdump(c277_session *s, const u8 *p, u32 n, u32 max)
+{
+    u32 i;
+    if (n > max) n = max;
+    for (i = 0; i < n; i++) cap_hex8(s, p[i], 2);
+}
+static void cap_ascii(c277_session *s, const u8 *p, u32 n, u32 max)
+{
+    u32 i;
+    if (n > max) n = max;
+    for (i = 0; i < n; i++) cap_ch(s, (char)((p[i] >= 32 && p[i] < 127) ? p[i] : '.'));
+}
+static void cap_head(c277_session *s, const char *chan, int type, u32 len)
+{
+    cap_str(s, "t="); cap_dec(s, s->cur_now);
+    cap_str(s, " "); cap_str(s, chan);
+    cap_str(s, " id="); cap_dec(s, (u32)type);
+    cap_str(s, " len="); cap_dec(s, len);
+}
+
+void c277_session_capture(c277_session *s, int on, int vid)
+{
+    s->cap_on = on != 0;
+    s->vid_on = on != 0 && vid != 0;
+}
+
+u32 c277_session_cap_take(c277_session *s, char *out, u32 cap)
+{
+    u32 n = s->cap_len;
+    if (n > cap) n = cap;
+    memcpy(out, s->cap, n);
+    memmove(s->cap, s->cap + n, s->cap_len - n);
+    s->cap_len -= n;
+    return n;
+}
+
+static void cap_sum_add(c277_session *s, int pt, u32 ssrc, u32 bytes)
+{
+    int i;
+    if (s->vs_pk == 0) s->vs_start = s->cur_now;
+    s->vs_pk++; s->vs_bytes += bytes;
+    for (i = 0; i < s->vs_npt; i++) if (s->vs_pt[i] == (u32)pt) break;
+    if (i == s->vs_npt && s->vs_npt < 4) s->vs_pt[s->vs_npt++] = (u32)pt;
+    for (i = 0; i < s->vs_nssrc; i++) if (s->vs_ssrc[i] == ssrc) break;
+    if (i == s->vs_nssrc && s->vs_nssrc < 4) s->vs_ssrc[s->vs_nssrc++] = ssrc;
+}
+
+static void cap_sum_flush(c277_session *s, u32 now)
+{
+    int i;
+    if (!s->cap_on || (s->vs_pk == 0 && s->vs_rtcp == 0)) return;
+    if ((u32)(now - s->vs_start) < 1000UL) return;
+    cap_str(s, "t="); cap_dec(s, now);
+    cap_str(s, " vsum pk="); cap_dec(s, s->vs_pk);
+    cap_str(s, " bytes="); cap_dec(s, s->vs_bytes);
+    cap_str(s, " rtcp="); cap_dec(s, s->vs_rtcp);
+    cap_str(s, " pt=");
+    for (i = 0; i < s->vs_npt; i++) { if (i) cap_ch(s, ','); cap_dec(s, s->vs_pt[i]); }
+    cap_str(s, " ssrc=");
+    for (i = 0; i < s->vs_nssrc; i++) { if (i) cap_ch(s, ','); cap_hex8(s, s->vs_ssrc[i], 8); }
+    cap_str(s, " drop="); cap_dec(s, s->cap_drop);
+    cap_ch(s, '\n');
+    s->vs_pk = 0; s->vs_bytes = 0; s->vs_rtcp = 0; s->vs_npt = 0; s->vs_nssrc = 0;
+    s->vs_start = now;
+}
+
+static void cap_rtcp(c277_session *s, int type, const u8 *b, u32 n)
+{
+    s->vn_rtcp++; s->vs_rtcp++;
+    if (s->vs_pk == 0 && s->vs_rtcp == 1) s->vs_start = s->cur_now;
+    if (s->vn_rtcp > 30) return;
+    cap_head(s, "tr", type, n);
+    cap_str(s, " RTCP pt="); cap_dec(s, n > 1 ? b[1] : 0);
+    cap_str(s, " fmt="); cap_dec(s, n > 0 ? (u32)(b[0] & 31) : 0);
+    cap_str(s, " hex="); cap_hexdump(s, b, n, 64); cap_ch(s, '\n');
+}
+
+/* one decrypted message (chan 0 = signalling, 1 = transport) */
+static void cap_msg(c277_session *s, int chan, int type, const u8 *body, u32 blen)
+{
+    c277_rtp_hdr h;
+    const char *cn = chan ? "tr" : "sig";
+    if (!s->cap_on) return;
+    if (type == C277_MSG_AUDIO || type == C277_MSG_VIDEO) {
+        if (c277_rtp_is_rtcp(body, blen)) { cap_rtcp(s, type, body, blen); return; }
+        if (type == C277_MSG_AUDIO) {
+            s->vn_audio++;
+            if (s->vn_audio > 3) return;
+            cap_head(s, cn, type, blen); cap_str(s, " audio\n");
+            return;
+        }
+        s->vn_vid++;
+        if (c277_rtp_parse(body, blen, &h) < 0) {
+            if (s->vn_vid <= 30) { cap_head(s, cn, type, blen); cap_str(s, " badrtp hex="); cap_hexdump(s, body, blen, 64); cap_ch(s, '\n'); }
+            return;
+        }
+        cap_sum_add(s, h.pt, h.ssrc, blen);
+        if (s->vn_vid <= 30) {
+            cap_head(s, cn, type, blen);
+            cap_str(s, " VideoData pt="); cap_dec(s, (u32)h.pt);
+            cap_str(s, " ssrc="); cap_hex8(s, h.ssrc, 8);
+            cap_str(s, " seq="); cap_dec(s, h.seq);
+            cap_str(s, " ts="); cap_dec(s, h.ts);
+            cap_str(s, " m="); cap_dec(s, (u32)(h.marker != 0));
+            cap_str(s, " plen="); cap_dec(s, h.plen);
+            cap_str(s, " p8="); cap_hexdump(s, h.payload, h.plen, 8);
+            cap_str(s, " hex="); cap_hexdump(s, body, blen, 64);
+            cap_ch(s, '\n');
+        }
+        return;
+    }
+    cap_head(s, cn, type, blen);
+    if (type == C277_MSG_CANDIDATES) { cap_str(s, " candidates (not dumped)\n"); return; }
+    cap_str(s, " hex=");
+    cap_hexdump(s, body, blen, type == C277_MSG_VIDEOFORMATS ? 1200 : 600);
+    if (type == C277_MSG_VIDEOFORMATS) { cap_str(s, " ascii="); cap_ascii(s, body, blen, 1200); }
+    cap_ch(s, '\n');
+}
+
+static void put_be32(u8 *p, u32 v)
+{
+    p[0] = (u8)(v >> 24); p[1] = (u8)(v >> 16); p[2] = (u8)(v >> 8); p[3] = (u8)v;
+}
+
+/* our minimal VideoFormats: H264 only (spec 1.3). Returns body length. */
+static u32 build_videoformats(u8 *o)
+{
+    static const char *kv[3][2] = {
+        { "level-asymmetry-allowed", "1" }, { "packetization-mode", "1" }, { "profile-level-id", "42e01f" } };
+    u32 n = 0, i, l;
+    o[n++] = 1;
+    put_be32(o + n, 4); n += 4; memcpy(o + n, "H264", 4); n += 4;
+    o[n++] = 3;
+    for (i = 0; i < 3; i++) {
+        l = (u32)strlen(kv[i][0]); put_be32(o + n, l); n += 4; memcpy(o + n, kv[i][0], l); n += l;
+        l = (u32)strlen(kv[i][1]); put_be32(o + n, l); n += 4; memcpy(o + n, kv[i][1], l); n += l;
+    }
+    o[n++] = 1;                 /* encodersCount */
+    return n;
+}
+
 /* ---------------------------------------------------------------- receive */
 
 static void cb_sig(void *user, int type, const u8 *body, u32 blen)
 {
     c277_session *s = (c277_session *)user;
     int k;
+    cap_msg(s, 0, type, body, blen);
+    if (s->vid_on && type == C277_MSG_VIDEOFORMATS && !s->vf_sent) s->vf_reply = 1;
     if (type == C277_MSG_CANDIDATES) {
         k = c277_ice_on_candidates(&s->ice, body, blen);
         if (k > 0) s->peer_cands += k;
@@ -77,6 +241,7 @@ static void cb_tr(void *user, int type, const u8 *body, u32 blen)
 {
     c277_session *s = (c277_session *)user;
     c277_rtp_hdr h;
+    cap_msg(s, 1, type, body, blen);
     if (type == C277_MSG_AUDIO) {
         if (c277_rtp_is_rtcp(body, blen)) return;
         if (c277_rtp_parse(body, blen, &h) < 0 || h.pt != C277_RTP_PT || h.plen == 0) return;
@@ -88,6 +253,11 @@ static void cb_tr(void *user, int type, const u8 *body, u32 blen)
         int a, v;
         c277_msg_media_state_parse(body[0], &a, &v);
         s->peer_audio = a == 1;
+        if (s->cap_on) {
+            cap_str(s, "t="); cap_dec(s, s->cur_now);
+            cap_str(s, " RemoteMediaState audio="); cap_dec(s, (u32)a);
+            cap_str(s, " video="); cap_dec(s, (u32)v); cap_ch(s, '\n');
+        }
     }
 }
 
@@ -171,6 +341,26 @@ int c277_session_tick(c277_session *s, u32 now)
         k = c277_conn_build(&s->tr, now, C277_MSG_MEDIASTATE, &b, 1, 1, s->tmp, C277_OUT_MAX);
         if (k > 0 && push_wrapped(s, peer, s->tmp, (u32)k) == 0) s->media_state_sent = 1;
     }
+    /* 5b. video capture reply: our VideoFormats (signalling), then RemoteMediaState video=0 */
+    if (s->vid_on && s->vf_reply && !s->vf_sent && have_room(s)) {
+        u8 vf[96];
+        u32 vl = build_videoformats(vf);
+        it = push(s, C277_OUT_SIGNAL);
+        k = c277_conn_build(&s->sig, now, C277_MSG_VIDEOFORMATS, vf, vl, 1, it->data, C277_OUT_MAX);
+        if (k > 0) {
+            it->len = (u32)k; s->vf_sent = 1; s->ms_resend = 1;
+            if (s->cap_on) { cap_str(s, "t="); cap_dec(s, now); cap_str(s, " sent our VideoFormats H264\n"); }
+        } else s->out.n--;
+    }
+    if (s->ms_resend && s->media_state_sent && have_room(s) && c277_ice_peer_tag(&s->ice, &peer)) {
+        u8 b2 = c277_msg_media_state_build(1, 0);
+        k = c277_conn_build(&s->tr, now, C277_MSG_MEDIASTATE, &b2, 1, 1, s->tmp, C277_OUT_MAX);
+        if (k > 0 && push_wrapped(s, peer, s->tmp, (u32)k) == 0) {
+            s->ms_resend = 0;
+            if (s->cap_on) { cap_str(s, "t="); cap_dec(s, now); cap_str(s, " sent RemoteMediaState video=0\n"); }
+        }
+    }
+    cap_sum_flush(s, now);
     /* 6. transport acks / resends */
     if (have_room(s) && c277_ice_peer_tag(&s->ice, &peer)) {
         k = c277_conn_tick(&s->tr, now, s->tmp, C277_OUT_MAX);

@@ -531,6 +531,16 @@ public:
             b.Format(_L8("step: v277 session init %d conns %d\n"), r, iNConn);
             Write(b);
         }
+        if (r == C277_SESS_OK) {
+            _LIT(KFlag, "E:\\retrotele_videocap.flag");
+            TEntry ent;
+            if (iFs.Entry(KFlag, ent) == KErrNone) {
+                c277_session_capture(iS, 1, 1);
+                iCap = ETrue;
+                CapWrite(_L8("--- v277 call, video capture on (no key, no peer IPs logged)\n"));
+                Write(_L8("step: video capture flag present\n"));
+            }
+        }
         if (r != C277_SESS_OK) { Check(_L8("SessInit"), r); iStatusName.Copy(_L8("failed")); SendStatus(iStatusName); return; }
         iRelayRecv->Start(iRelaySock);
         iRelayOk = ETrue;
@@ -539,8 +549,33 @@ public:
         SendStatus(_L8("ready"));
         Write(_L8("relay start v277\n"));
     }
+    void CapWrite(const TDesC8& aText)
+    {
+        _LIT(KVid, "E:\\retrotele_callvideo.txt");
+        RFile f;
+        TInt e = f.Open(iFs, KVid, EFileWrite | EFileShareAny);
+        if (e == KErrNotFound) e = f.Replace(iFs, KVid, EFileWrite | EFileShareAny);
+        if (e != KErrNone) return;
+        TInt sz = 0;
+        f.Size(sz);
+        f.Seek(ESeekEnd, sz);
+        f.Write(aText);
+        f.Close();
+    }
+    void FlushCap()
+    {
+        if (!iCap || !iS || iS->cap_len == 0) return;
+        char buf[1024];
+        TInt tot = 0;
+        while (iS->cap_len > 0 && tot < 8192) {
+            u32 n = c277_session_cap_take(iS, buf, sizeof(buf));
+            CapWrite(TPtrC8((const TUint8*)buf, (TInt)n));
+            tot += (TInt)n;
+        }
+    }
     void Drain277()
     {
+        FlushCap();
         for (TInt i = 0; i < iS->out.n; i++) {
             c277_out_item& it = iS->out.item[i];
             if (it.kind == C277_OUT_UDP) {
@@ -1257,6 +1292,7 @@ private:
     // v277
     TBool iV277;
     c277_session* iS;
+    TBool iCap;
     c277_sess_conn iConn277[KMaxConn];
     TInt iNConn;
     TUint8 iRnd[56];

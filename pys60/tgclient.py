@@ -2,6 +2,7 @@
 # chats and folders, history, sending, read state and live updates.
 # No UI code here. Python 2.2 compatible.
 
+import os
 import time
 import sys
 import binascii
@@ -1086,6 +1087,28 @@ class Client:
     def call_busy(self):
         return self.cs is not None and self.cs["state"] != "ended"
 
+    VCAP_FLAG = "E:\\retrotele_videocap.flag"
+    VCAP_LOG = "E:\\retrotele_callvideo.txt"
+
+    def vcap_on(self):
+        """Stage 0 video capture: only when E:\\retrotele_videocap.flag exists."""
+        try:
+            return os.path.exists(self.VCAP_FLAG)
+        except:
+            return 0
+
+    def vcap_log(self, msg):
+        if not self.vcap_on():
+            return
+        try:
+            f = open(self.VCAP_LOG, "a")
+            try:
+                f.write(msg + "\n")
+            finally:
+                f.close()
+        except:
+            pass
+
     def call_log(self, cs, msg):
         self.log("call %s: %s" % (cs["state"], msg))
 
@@ -1178,13 +1201,17 @@ class Client:
                 self.call_log(cs, "requested, id %s" % str(cs["id"]))
                 if c.get("receive_date"):
                     self.call_state(cs, "ringing", "Ringing...")
-            self.call({"_": "phone.requestCall",
-                       "user_id": {"_": "inputUser", "user_id": pk["user_id"],
-                                   "access_hash": pk["access_hash"]},
-                       "random_id": int(tgcrypto.bytes_to_long(tgcrypto.random_bytes(4))
-                                        % 2147483647),
-                       "g_a_hash": tgcrypto.sha256(gab),
-                       "protocol": self.protocol_for(cs)}, sent, fail)
+            req = {"_": "phone.requestCall",
+                   "user_id": {"_": "inputUser", "user_id": pk["user_id"],
+                               "access_hash": pk["access_hash"]},
+                   "random_id": int(tgcrypto.bytes_to_long(tgcrypto.random_bytes(4))
+                                    % 2147483647),
+                   "g_a_hash": tgcrypto.sha256(gab),
+                   "protocol": self.protocol_for(cs)}
+            if self.vcap_on():
+                req["video"] = 1
+                self.vcap_log("requestCall with video flag set")
+            self.call(req, sent, fail)
         self.get_dh_config(have, fail)
         return 1
 
@@ -1275,6 +1302,8 @@ class Client:
     def call_update(self, c):
         n = c.get("_")
         cs = self.cs
+        if n in ("phoneCallRequested", "phoneCall", "phoneCallAccepted", "phoneCallWaiting"):
+            self.vcap_log("%s flags=%s (0x%x)" % (n, str(c.get("flags")), c.get("flags") or 0))
         if n == "phoneCallRequested" and c.get("participant_id") == self.me:
             if self.call_busy():
                 self.log("call: busy, declining %s" % str(c["id"]))

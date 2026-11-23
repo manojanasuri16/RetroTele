@@ -15,6 +15,7 @@
 #define C277_SESS_RANDOM  56    /* random bytes required by init */
 #define C277_OUT_MAX      1500  /* bytes per output item */
 #define C277_OUTQ         16    /* output queue capacity */
+#define C277_CAP_MAX      8192  /* capture text ring bytes */
 #define C277_SIG_RX_MAX   8192  /* largest accepted signalling payload */
 
 #define C277_OUT_UDP     1      /* datagram to send to ip:port (reflector framing already applied) */
@@ -67,6 +68,17 @@ typedef struct {
     c277_outq out;
     u8 tmp[C277_OUT_MAX], rtpb[C277_OUT_MAX];
     u8 scratch[C277_SIG_RX_MAX];
+    /* Stage 0 video capture (docs/CALL-VIDEO-SPEC.md): text log ring drained by the
+     * helper, and the optional video reply. Both are off unless the helper sets
+     * them (flag file E:\\retrotele_videocap.flag). Never logs keys or peer IPs. */
+    int cap_on, vid_on;
+    u32 cap_len, cap_drop;
+    char cap[C277_CAP_MAX];
+    int vf_reply, vf_sent, ms_resend;
+    u32 vn_audio, vn_vid, vn_rtcp;                 /* totals */
+    u32 vs_start, vs_pk, vs_bytes, vs_rtcp;        /* per-second window */
+    int vs_npt, vs_nssrc;
+    u32 vs_pt[4], vs_ssrc[4];
 } c277_session;
 
 /* key256: raw DH key. rnd: C277_SESS_RANDOM random bytes (nrnd = how many).
@@ -92,6 +104,12 @@ int c277_session_send_opus(c277_session *s, const u8 *opus, u32 n, u32 now);
 int c277_session_poll_opus(c277_session *s, u8 *out, u32 cap, u32 *len);
 
 void c277_outq_clear(c277_outq *q);
+
+/* Capture: on != 0 logs every decrypted message; vid != 0 also answers the peer's
+ * VideoFormats with ours (H264 only) and RemoteMediaState video=0. */
+void c277_session_capture(c277_session *s, int on, int vid);
+/* Copies up to cap bytes of pending capture text into out and removes them. */
+u32  c277_session_cap_take(c277_session *s, char *out, u32 cap);
 
 /* state */
 int c277_session_signaling_acked(const c277_session *s);  /* our CandidatesList sent and acked */

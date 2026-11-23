@@ -10,3 +10,5 @@ tools/py22/
 native/opus/src/
 native/opus/build.log
 native/call277/fixtures/
+retrotele_callvideo.txt
+retrotele_videocap.flag
