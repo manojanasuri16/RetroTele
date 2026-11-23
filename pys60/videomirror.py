@@ -7,9 +7,10 @@
 # Python 2.2 compatible. e32socket rule: sockets are never close()d while the
 # app runs (see retrotele.py PhoneConn).
 #
+# Default pipeline: camera + encoder running, then hardware decoder uid 0x102073ef (loopback).
 # Keys: 1 rear/front camera, 2 size 176x144 <-> 320x240, 3 fps 10/15/20,
 #       4 bitrate 64/128/256, # keyframe, centre pause/resume,
-#       6 decoder order sweep (diagnostic, about 1 minute, also started once automatically
+#       6 decoder order sweep (diagnostic, still available, about 1 minute, also started once automatically
 #       when the decoder is blocked), 5 colour flags (debug: swap U/V, swap 4:2:2 byte order), Back = exit.
 import sys
 import os
@@ -25,6 +26,7 @@ PORT_CMD = 47012        # helper listens here
 PORT_STATUS = 47011     # we listen here
 LOG_PATHS = ["E:\\retrotele_videomirror.txt", "C:\\Data\\retrotele_videomirror.txt"]
 TICK = 0.07
+MIRROR_VERSION = "0.13.3 loopback camera+encoder+decoder 0x102073ef"
 
 SIZES = [(176, 144), (320, 240)]
 FPSES = [10, 15, 20]
@@ -131,7 +133,7 @@ class Mirror:
     # ---------------------------------------------------------- start / stop
     def start(self):
         _fresh_log()
-        log("videomirror start")
+        log("videomirror start " + MIRROR_VERSION)
         try:
             import tgvdisp
             self.tgvdisp = tgvdisp

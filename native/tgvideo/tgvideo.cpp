@@ -266,8 +266,10 @@ static TInt LatFind(TInt64 aTs)
 
 // ---------------------------------------------------------------- decoder
 struct TDecOpt { TInt iUid, iOutPick, iPostProc, iSync, iBoost; };
-static TDecOpt gDecOpt = { 0x10204bfc, -1, 0, 0, 0 };
-static TInt gEncToDec = 1;          // encoder output goes to the decoder (not in the clip tests)
+static TDecOpt gDecOpt = { 0x102073ef, -1, 0, 0, 0 };
+static TInt gEncToDec = 1;
+static TBuf8<256> gParams;          // last SPS+PPS seen from the encoder (fed before the first IDR of a late decoder)
+static TInt gDecFed = 0, gDecSkipped = 0;          // encoder output goes to the decoder (not in the clip tests)
 
 class CDec : public CBase, public MMMFDevVideoPlayObserver
 {
@@ -277,14 +279,14 @@ public:
     volatile TInt iInitDone, iInitErr, iFatal;
     TInt iPattern, iLayout;
     TInt iFirst;
-    TBool iStarted;
+    TBool iStarted, iGotIdr;
 
     ~CDec() { if (iPlay && iStarted) iPlay->Stop(); delete iPlay; }
 
     void SetupL(TSize aSz, TInt aFps)
     {
         iInitDone = iInitErr = iFatal = 0;
-        iFirst = 0; iPattern = 0; iLayout = 0; iStarted = EFalse;
+        iFirst = 0; iPattern = 0; iLayout = 0; iStarted = EFalse; iGotIdr = EFalse; gDecFed = 0; gDecSkipped = 0;
         Log(_L8("step dec: CMMFDevVideoPlay::NewL"));
         iPlay = CMMFDevVideoPlay::NewL(*this);
         const TUid duid = TUid::Uid(gDecOpt.iUid);
@@ -368,6 +370,21 @@ public:
     void Write(const TDesC8& aD, TInt64 aTs)
     {
         if (!iStarted || iFatal) return;
+        if (!iGotIdr) {
+            // a decoder that starts late must begin with parameter sets + an IDR picture
+            TBool vcl, idr, sps, pps;
+            ScanNal(aD, vcl, idr, sps, pps);
+            if (!idr) { gDecSkipped++; return; }
+            iGotIdr = ETrue;
+            Log(_L8("dec: first IDR (%d bytes, sps=%d), skipped %d units before, cached params %d bytes"),
+                aD.Length(), (TInt)sps, gDecSkipped, gParams.Length());
+            if (!sps && gParams.Length() > 0) WriteRaw(gParams, aTs);
+        }
+        WriteRaw(aD, aTs);
+    }
+
+    void WriteRaw(const TDesC8& aD, TInt64 aTs)
+    {
         TVideoInputBuffer* b = NULL;
         TRAPD(err, b = iPlay->GetBufferL(aD.Length()));
         if (err || !b) { if (Err() <= 5) Log(_L8("dec GetBufferL err=%d b=%d"), err, b ? 1 : 0); return; }
@@ -376,6 +393,7 @@ public:
         b->iPresentationTimestamp = TTimeIntervalMicroSeconds(aTs);
         TRAPD(e2, iPlay->WriteCodedDataL(b));
         if (e2 && Err() <= 5) Log(_L8("dec WriteCodedDataL err=%d"), e2);
+        if (!e2) { gDecFed++; if (gDecFed <= 3) Log(_L8("dec fed unit %d (%d bytes)"), gDecFed, aD.Length()); }
     }
 
     // MMMFDevVideoPlayObserver
@@ -400,8 +418,8 @@ public:
                 TInt len = p->iData.iRawData->Length();
                 if (iFirst == 0) {
                     iFirst = 1;
-                    Log(_L8("dec first picture: fmt=0x%x size=%dx%d len=%d opts=0x%x crop=%d,%d-%d,%d"), (TInt)p->iData.iDataFormat,
-                        w, h, len, (TInt)p->iOptions, p->iCropRect.iTl.iX, p->iCropRect.iTl.iY,
+                    Log(_L8("dec first picture: pattern=%d layout=%d fmt=0x%x size=%dx%d len=%d opts=0x%x crop=%d,%d-%d,%d"), iPattern, iLayout,
+                        (TInt)p->iData.iDataFormat, w, h, len, (TInt)p->iOptions, p->iCropRect.iTl.iX, p->iCropRect.iTl.iY,
                         p->iCropRect.iBr.iX, p->iCropRect.iBr.iY);
                 }
                 if (len > TGV_DEC_CAP) len = TGV_DEC_CAP;
@@ -593,6 +611,10 @@ public:
                     (TInt)idr, (TInt)sps, (TInt)pps);
             if (vcl) gSt.iEnc++;
             if (idr) { gSt.iKeys++; HSet(TGV_W_KEYS, gSt.iKeys); }
+            if (sps || pps) {
+                if (sps && !vcl) gParams.Zero();
+                if (gParams.Length() + b->iData.Length() <= gParams.MaxLength() && !vcl) gParams.Append(b->iData);
+            }
             if (gDecoder && gEncToDec) gDecoder->Write(b->iData, b->iCaptureTimestamp.Int64());
             iRec->ReturnBuffer(b);
         }
@@ -822,7 +844,7 @@ static void ResetStats()
     HSet(TGV_W_DEC_FPS, 0); HSet(TGV_W_LAT_MS, 0); HSet(TGV_W_BPS, 0); HSet(TGV_W_KEYS, 0);
 }
 
-static TInt gOrder = 0;      // start order: 0 camera opened first (as before), 1 decoder first, 2 decoder first + viewfinder
+static TInt gOrder = 3;      // 3 (default): camera + encoder first, then decoder 0x102073ef (loopback);  start order: 0 camera opened first (as before), 1 decoder first, 2 decoder first + viewfinder
 
 static TInt BuildDec(TSize sz)
 {
@@ -842,6 +864,18 @@ static TInt BuildDec(TSize sz)
         HSet(TGV_W_BLOCKED, 0);
     }
     return de;
+}
+
+static TInt BuildEnc(TSize sz);
+static void Settle(TInt aMs);
+// camera + encoder are running: create the loopback decoder now and ask for an IDR with parameter sets
+static void LateDecoder()
+{
+    Settle(600);
+    gDecOpt.iUid = 0x102073ef;
+    TInt de = BuildDec(TSize(gW, gHt));
+    Log(_L8("loopback decoder 0x%08x err=%d"), gDecOpt.iUid, de);
+    if (gEncoder) gEncoder->KeyFrame();
 }
 
 static TInt BuildEnc(TSize sz)
@@ -883,7 +917,8 @@ static void StartPipeline(TInt aW, TInt aH, TInt aFps, TInt aKbps, TInt aCam)
     ResetStats();
     gEncToDec = 1;
     Log(_L8("pipeline start: %dx%d@%d %d kbit/s cam %d order %d"), gW, gHt, gFps, gKbps, gCamIdx, gOrder);
-    if (gOrder > 0) BuildDec(TSize(gW, gHt));       // decoder before the camera is touched
+    gDecOpt.iUid = (gOrder == 3) ? 0x102073ef : 0x10204bfc;
+    if (gOrder > 0 && gOrder < 3) BuildDec(TSize(gW, gHt));       // decoder before the camera is touched
     CCam* c = new CCam;
     if (!c) { Err(); return; }
     gCam = c;
@@ -898,9 +933,11 @@ static void StartPipeline(TInt aW, TInt aH, TInt aFps, TInt aKbps, TInt aCam)
     TBool sizeChanged = (c->iW != gW || c->iH != gHt);
     gW = c->iW; gHt = c->iH;
     HSet(TGV_W_CAM, gCamIdx);
-    if (gOrder > 0 && !sizeChanged) BuildEnc(TSize(gW, gHt)); else BuildCodecs();
+    if (gOrder == 3) BuildEnc(TSize(gW, gHt));
+    else if (gOrder > 0 && !sizeChanged) BuildEnc(TSize(gW, gHt)); else BuildCodecs();
     e = BeginCam(c);
     if (e != KErrNone) { Err(); HSet(TGV_W_STATE, 3); return; }
+    if (gOrder == 3) LateDecoder();
     HSet(TGV_W_STATE, 1);
     Log(_L8("pipeline running %dx%d"), gW, gHt);
 }
@@ -930,15 +967,18 @@ static void SwitchCamera(TInt aNew)
     }
     gCamIdx = aNew;
     HSet(TGV_W_CAM, gCamIdx);
+    TBool needDec = EFalse;
     if (c->iW != gW || c->iH != gHt) {
         Log(_L8("camera %d offers %dx%d instead of %dx%d: rebuilding codecs"), gCamIdx, c->iW, c->iH, gW, gHt);
         gW = c->iW; gHt = c->iH;
-        BuildCodecs();
+        if (gOrder == 3) { delete gDecoder; gDecoder = NULL; BuildEnc(TSize(gW, gHt)); } else BuildCodecs();
+        needDec = (gOrder == 3);
     } else if (gEncoder) {
         gEncoder->KeyFrame();
     }
     e = BeginCam(c);
     if (e != KErrNone) { Err(); HSet(TGV_W_STATE, 3); return; }
+    if (needDec) LateDecoder();
     HSet(TGV_W_STATE, 1);
     if (gEncoder) gEncoder->KeyFrame();
 }
@@ -1027,7 +1067,7 @@ static void Result(TInt aId, const char* aSub, const char* aDesc, TInt aDecErr)
     if (cam > 0 && dec > 0) flag.Copy(_L8(" BOTH OK"));
     Log(_L8("order %S: %S: dec init err=%d, cam frames=%d, enc units=%d, decoded=%d%S"), &sub, &desc, aDecErr, cam, units, dec, &flag);
     if (cam > 0 && dec > 0) {
-        if (aSub[0] == 0 || aSub[0] == 'a') gBothV[aId] = 1;
+        if (aSub[0] == 0 || aSub[0] == 'a' || aSub[0] == 'b') gBothV[aId] = 1;
         if (gBoth.Length() < 140) { gBoth.Append(sub); gBoth.Append(' '); }
     }
 }
@@ -1125,6 +1165,7 @@ static void SweepL()
                 gDecOpt.iUid = u[i].iUid;
                 Mark();
                 TInt d2 = NewDec();
+                if (!d2 && gEncoder) gEncoder->KeyFrame();
                 Settle(d2 ? 200 : 3000);
                 Result(4, "b", "other decoder uid while camera+encoder run", d2);
             }
@@ -1211,7 +1252,7 @@ static void SweepL()
     TInt win = -1;
     if (gBothV[2]) win = 1; else if (gBothV[3]) win = 2; else if (gBothV[4]) win = 0;
     if (win >= 0) {
-        gOrder = win;
+        Log(_L8("order sweep: variant %d also works (default stays order 3, loopback decoder 0x102073ef)"), win);
         HSet(TGV_W_BLOCKED, 0);
         Log(_L8("order winner: start order %d (stored in header)"), gOrder);
     } else {
