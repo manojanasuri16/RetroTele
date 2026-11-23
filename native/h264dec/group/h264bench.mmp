@@ -1,0 +1,19 @@
+// tgh264bench.exe: h264dec speed/correctness benchmark (RetroTele-h264bench.sis), see bench/h264bench.cpp
+TARGET        tgh264bench.exe
+TARGETTYPE    exe
+UID           0x0 0xE7A3D5EC
+CAPABILITY    None
+VENDORID      0
+EPOCSTACKSIZE 0x5000
+EPOCHEAPSIZE  0x40000 0x1000000
+
+SYSTEMINCLUDE \epoc32\include
+SYSTEMINCLUDE \epoc32\include\libc
+USERINCLUDE   ..
+USERINCLUDE   ..\bench
+
+SOURCEPATH    ..\bench
+SOURCE        h264bench.cpp
+
+STATICLIBRARY h264dec.lib
+LIBRARY       euser.lib efsrv.lib hal.lib estlib.lib

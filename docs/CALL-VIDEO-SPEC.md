@@ -125,3 +125,10 @@ Signalling when the user turns video on: VideoFormats (if not already sent) on t
 Log (when `E:\retrotele_videocap.flag` exists): `retrotele_callvideo.txt` gets `peerSPS profile= level= size=WxH` for every peer SPS (repeats throttled to one per 10 s), once per second `vtx fps10= bps= pk= au= idr= drop= pli= nack= twcc= rr_frac= rr_lost=`, `video send ON/OFF`; `retrotele_callaudio.txt` gets a `v ...` line per second whenever video was used in the call. No keys or peer addresses are logged.
 
 Not done / known gaps: no transport-cc feedback and no NACK retransmission history (we only count them), no rotation (`VIDEO_ROTATION_DEG` in callvideo.py is carried to tgvideo.exe but only 0 is implemented), nothing is shown of the peer's video.
+
+## 8. Peer video decode: software H.264 decoder (0.14.8, stage 1-2 of 3)
+
+Nokia's decoders cannot show the peer's stream (0x102073ef: setup OK but no picture; 0x10204bfc: "fatal error"): the official apps send H.264 High (profile_idc 100, CABAC, 8x8 transform, no B-frames) at 528x960, 352x640, 240x480, 176x320 (level up to 3.1). `native/h264dec` is FFmpeg 0.6.7's H.264 decoder (C only, LGPL 2.1; `native/third_party/ffmpeg-0.6.7/NOTICE`) behind a small C API (`h264dec.h`), built as `h264dec.lib` with GCCE `-O2 -mcpu=arm1136j-s`.
+Chosen over OpenH264 (C++, needs a newer compiler/STL-free port, slower C paths) and hand-written code: it is the fastest pure-C H.264 decoder of its time, gcc-3-era code, and bit-exact on all PC tests.
+PC: `native/h264dec/tests/conformance.sh` decodes x264 streams shaped like the sender (High CABAC/CAVLC, 8x8dct, ref 1-3, 1/4/size-limited slices, intra refresh, scaling lists, weighted prediction, 176x320 to 528x960, size changes, late join before an IDR, losses, fuzzed data) and compares the YUV with the system ffmpeg byte for byte.
+Phone: `RetroTele-h264bench.sis` (`tgh264bench.exe`) checks the decoded pictures against the PC's checksums and measures the speed; `E:\retrotele_h264bench.txt`. Stage 3 (after the bench): decoder in tgvideo.exe's peer path instead of Nokia's, pictures into the shared chunk, peer picture large with the self-view in a corner, video_rx on by default.

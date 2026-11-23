@@ -206,6 +206,80 @@ PYEOF
   echo "built dist/RetroTele-videobench.sis"
 fi
 
+# H.264 software decoder benchmark (E:\retrotele_h264bench.txt): tgh264bench.exe (UID EC) in a
+# small Python wrapper app (ED). Own package, not part of RetroTele.sis.
+if [ -f native/tgh264bench.exe ]; then
+  rm -rf build/h264bench_app && mkdir -p build/h264bench_app/extras/sys/bin
+  cp native/tgh264bench.exe build/h264bench_app/extras/sys/bin/
+  cat > build/h264bench_app/default.py <<'PYEOF'
+# RetroTele H.264 decoder bench: runs tgh264bench.exe, waits for its report file, shows the summary.
+import e32
+import appuifw
+import os
+
+PATHS = ["E:\\retrotele_h264bench.txt", "C:\\Data\\retrotele_h264bench.txt"]
+
+
+def report():
+    for p in PATHS:
+        try:
+            f = open(p, "r")
+            t = f.read()
+            f.close()
+        except:
+            continue
+        if t.find("bench end") >= 0:
+            return p, t
+    return None, None
+
+
+def main():
+    for p in PATHS:
+        try:
+            os.remove(p)
+        except:
+            pass
+    try:
+        e32.start_exe(u"tgh264bench.exe", u"")
+    except:
+        appuifw.note(u"Cannot start tgh264bench.exe", "error")
+        return
+    appuifw.note(u"H.264 bench running (about 1.5 min), please wait...", "info")
+    p = None
+    n = 0
+    while n < 400:
+        e32.ao_sleep(1)
+        p, t = report()
+        if p is not None:
+            break
+        n = n + 1
+    if p is None:
+        appuifw.note(u"Bench did not finish. Look for retrotele_h264bench.txt", "error")
+        return
+    lines = []
+    for l in t.split("\n"):
+        if l.find("SUMMARY") >= 0 or l.find("check:") >= 0 or l.find("PANIC") >= 0:
+            lines.append(unicode(l.strip()))
+    appuifw.app.title = u"H.264 bench"
+    txt = appuifw.Text()
+    txt.set(u"Report: " + unicode(p) + u"\n\n" + u"\n".join(lines))
+    appuifw.app.body = txt
+    lock = e32.Ao_lock()
+    appuifw.app.exit_key_handler = lock.signal
+    lock.wait()
+
+
+main()
+PYEOF
+  $PY $ENS py2sis --uid=0xE7A3D5ED --appname="RetroTele h264 bench" --version=$VERSION \
+    --caption="RetroTele h264 bench" --shortcaption="H264 bench" --vendor=RetroTele \
+    --caps=NetworkServices+LocalServices+ReadUserData+WriteUserData+UserEnvironment \
+    --drive=C --extrasdir=extras \
+    --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
+    build/h264bench_app dist/RetroTele-h264bench.sis </dev/null >build/h264bench.log
+  echo "built dist/RetroTele-h264bench.sis"
+fi
+
 # Video mirror, STAGE 1 of video calls: camera -> H.264 encode -> decode -> screen on this phone
 # (E:\retrotele_videomirror.txt). Own package, own UID; not part of RetroTele.sis.
 # tgvideo.exe (MultimediaDD) does the codecs, tgvdisp.pyd draws its frames into graphics.Image.

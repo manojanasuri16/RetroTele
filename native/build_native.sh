@@ -71,3 +71,7 @@ bldmake bldfiles >/dev/null 2>&1
 abld build gcce urel 2>&1 | grep -iE "error" || true
 OUT="$EPOCROOT/epoc32/release/gcce/urel/tgvdisp.pyd"
 [ -f "$OUT" ] && cp "$OUT" "$HERE/../pys60/native/tgvdisp.pyd"
+
+# h264dec.lib: software H.264 decoder (FFmpeg 0.6.7 h264, LGPL, see native/third_party/ffmpeg-0.6.7/NOTICE)
+# and tgh264bench.exe: its benchmark (separate package, RetroTele-h264bench.sis)
+sh "$HERE/h264dec/build_h264dec.sh"

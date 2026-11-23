@@ -1,0 +1,38 @@
+FFmpeg 0.6.7 (H.264 decoder subset) in RetroTele
+================================================
+
+What: the H.264 video decoder of FFmpeg 0.6.7 (libavcodec + the parts of libavutil it needs),
+C only, used by native/h264dec (h264dec.lib) to show the other person's video in Telegram calls
+on the Nokia N79.
+
+Source: https://ffmpeg.org/releases/ffmpeg-0.6.7.tar.bz2
+        sha256 67a0cf9d8b90b0a212412a99b508b8c4ea3f7d9ddce8445701dc432cf643878e
+        (git: https://git.ffmpeg.org/ffmpeg.git, tag n0.6.7)
+
+Licence: GNU Lesser General Public License version 2.1 or later, see COPYING.LGPLv2.1 and
+LICENSE (FFmpeg's own licence summary). Copyright (c) the FFmpeg developers, see CREDITS and
+the headers of the files. No GPL part of FFmpeg is used (configured without --enable-gpl; every
+file here carries the LGPL header).
+
+Only the files needed for the decoder are kept (native/h264dec/sources.txt lists the compiled
+ones; the headers are their includes). Everything else in the release was left out.
+
+Changes (all marked "RetroTele h264dec" in the code, full diff in retrotele-h264dec.patch):
+- libavcodec/h264.c: optional size limit before a new size is allocated
+  (h264dec_size_ok(), only with -DH264DEC_HOOKS); in CODEC_FLAG_LOW_DELAY mode never add
+  output delay after POC gaps; keep the rbsp buffers on a size change (use-after-free, fixed
+  the same way in later FFmpeg); clear the stale reference lists on a size change; skip motion
+  compensation from a missing reference picture.
+- libavcodec/h264_cavlc.c: reject corrupt total_zeros / run_before values (out of bounds read).
+- libavcodec/h264_ps.c: reject SPS with chroma format other than 4:2:0 or bit depth other than 8.
+- libavcodec/h264idct.c: clip with av_clip_uint8() instead of the crop table (no out of bounds
+  read on corrupt coefficients).
+The configuration (native/h264dec/config/config.h) disables all assembler and every codec
+except the H.264 decoder.
+
+Relinking (LGPL 2.1 section 6): the complete source of this library, the modifications, the
+build files and the code that uses it are in this repository. To use a modified FFmpeg:
+replace the files here, then run native/h264dec/build_h264dec.sh (static library h264dec.lib and
+the benchmark) or native/build_native.sh (all RetroTele binaries, including those that link
+h264dec.lib), and pys60/build_sis.sh to package them. The PC test (native/h264dec/tests/
+conformance.sh) checks a rebuilt decoder against the system ffmpeg.

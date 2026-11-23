@@ -12,3 +12,5 @@ native/opus/build.log
 native/call277/fixtures/
 retrotele_callvideo.txt
 retrotele_videocap.flag
+native/h264dec/bench/gen/
+native/h264dec/build.log

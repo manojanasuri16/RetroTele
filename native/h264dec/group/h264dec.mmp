@@ -1,0 +1,56 @@
+// h264dec.lib: H.264 decoder (FFmpeg 0.6.7 h264, C only) + the h264dec API, static library.
+// Sources: ../../third_party/ffmpeg-0.6.7 (LGPL 2.1, see its NOTICE), list in ../sources.txt.
+TARGET        h264dec.lib
+TARGETTYPE    lib
+OPTION GCCE   -O2 -mcpu=arm1136j-s -fomit-frame-pointer -fno-strict-aliasing -Wimplicit-function-declaration
+MACRO         HAVE_AV_CONFIG_H
+MACRO         H264DEC_HOOKS
+
+SYSTEMINCLUDE ..\config\symbian
+SYSTEMINCLUDE \epoc32\include
+SYSTEMINCLUDE \epoc32\include\libc
+USERINCLUDE   ..\config
+USERINCLUDE   ..\..\third_party\ffmpeg-0.6.7
+// for abld's dependency scan (cpp -I-): it does not search the including header's folder
+USERINCLUDE   ..\..\third_party\ffmpeg-0.6.7\libavcodec
+USERINCLUDE   ..\..\third_party\ffmpeg-0.6.7\libavutil
+USERINCLUDE   ..
+
+SOURCEPATH    ..\..\third_party\ffmpeg-0.6.7\libavcodec
+SOURCE        h264.c
+SOURCE        h264_loopfilter.c
+SOURCE        h264_direct.c
+SOURCE        h264_sei.c
+SOURCE        h264_ps.c
+SOURCE        h264_refs.c
+SOURCE        h264_cavlc.c
+SOURCE        h264_cabac.c
+SOURCE        h264dsp.c
+SOURCE        h264idct.c
+SOURCE        h264pred.c
+SOURCE        cabac.c
+SOURCE        golomb.c
+SOURCE        mpegvideo.c
+SOURCE        error_resilience.c
+SOURCE        dsputil.c
+SOURCE        simple_idct.c
+SOURCE        jrevdct.c
+SOURCE        faanidct.c
+SOURCE        utils.c
+SOURCE        imgconvert.c
+SOURCE        options.c
+SOURCE        opt.c
+SOURCE        eval.c
+SOURCE        bitstream.c
+SOURCE        avpacket.c
+SOURCE        audioconvert.c
+SOURCEPATH    ..\..\third_party\ffmpeg-0.6.7\libavutil
+SOURCE        mem.c
+SOURCE        log.c
+SOURCE        mathematics.c
+SOURCE        rational.c
+SOURCE        pixdesc.c
+SOURCE        avstring.c
+SOURCEPATH    ..\src
+SOURCE        h264dec.c
+SOURCE        h264dec_compat.c
