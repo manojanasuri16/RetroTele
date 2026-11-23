@@ -68,7 +68,23 @@ const TInt KDnPrefill = 960;    /* 120 ms */
 const TInt KOpusMax = 1500;
 const TInt KPortVideoIn = 47014;    /* tgvideo.exe -> here: 'V' + one Annex-B encoder unit */
 const TInt KPortVideoCmd = 47012;   /* tgvideo.exe command port: 'K' = IDR, 'Q' = quit */
-const TInt KPortVideoRx = 47015;    /* here -> tgvideo.exe: peer video, see PumpRx */
+const TInt KPortVideoRx = 47015;
+/* Bluetooth headset combinations (Settings / in-call "Bluetooth test" picks one, 'X n'):
+ * iDev: VoIP stream device 0 handset, 1 loudspeaker, 2 no preference; iPre: close the streams
+ * BEFORE asking for the Bluetooth output; iSeq: 1 = earpiece first, then Bluetooth; iAfter: once
+ * the output is Bluetooth: 0 nothing, 1 close + re-open the streams, 2 stop + start them. */
+struct TBtCombo { TInt iDev, iPre, iSeq, iAfter; const char* iDesc; };
+static const TBtCombo KBtCombos[] = {
+    { 0, 0, 0, 0, "handset device, Bluetooth output, streams untouched (0.15.2)" },
+    { 0, 0, 0, 1, "handset device, Bluetooth output, then streams re-opened" },
+    { 2, 0, 0, 1, "no-preference device, Bluetooth output, then streams re-opened" },
+    { 1, 0, 0, 1, "loudspeaker device, Bluetooth output, then streams re-opened" },
+    { 0, 0, 0, 2, "handset device, Bluetooth output, then streams stopped and started" },
+    { 0, 0, 1, 1, "earpiece output, then Bluetooth output, then streams re-opened" },
+    { 0, 1, 0, 0, "streams closed, Bluetooth output, then streams opened (handset device)" },
+    { 2, 1, 0, 0, "streams closed, Bluetooth output, then streams opened (no-preference device)" }
+};
+const TInt KBtCombosN = 8;    /* here -> tgvideo.exe: peer video, see PumpRx */
 const TInt KVideoMax = 16400;       /* largest unit datagram (c277 C277_VAU_MAX + 'V') */
 
 static TInt NowUs()
@@ -229,6 +245,7 @@ public:
         iBtLinks = -2;
         iBtWant = -1;
         iBtOut = -1;
+        iBtCombo = 1;      /* default: Bluetooth output, then the streams re-opened */
     }
     ~CRunner()
     {
@@ -384,12 +401,63 @@ public:
         if (!Check(_L8("DnOpen"), iDn->Open(*this))) return;
         Check(_L8("UpOpen"), iUp->Open(*this));
     }
+    // ---- close / re-open both VoIP streams (Bluetooth: the streams seem to bind to the audio
+    // device when they open, 0.15.2 phone log) ----
+    void CloseStreams()
+    {
+        TInt t0 = NowMs();
+        if (iUp) { iUp->Stop(); iUp->Close(); }
+        delete iUpFmt; iUpFmt = NULL;
+        delete iUp; iUp = NULL;
+        if (iDn) { iDn->Stop(); iDn->Close(); }
+        delete iDnFmt; iDnFmt = NULL;
+        delete iDn; iDn = NULL;
+        iUpOpen = iDnOpen = EFalse;
+        iStarted = EFalse;
+        iUpReopen = EFalse;
+        TBuf8<64> lb;
+        lb.Format(_L8("audio: streams closed (%d ms)\n"), NowMs() - t0);
+        Write(lb);
+    }
+    void OpenStreams()
+    {
+        if (!iFactory) return;
+        TInt e = KErrNone;
+        if (!iDn) e = iFactory->CreateDownlinkStream(TVersion(1, 0, 0), CVoIPUtilityFactory::EVoIPCall, iDn);
+        if (e == KErrNone && !iUp) e = iFactory->CreateUplinkStream(TVersion(1, 0, 0), CVoIPUtilityFactory::EVoIPCall, iUp);
+        if (e == KErrNone) e = iDn->SetFormat(EPCM16, iDnFmt);
+        if (e == KErrNone && iDnFmt) iDnFmt->SetObserver(*this);
+        if (e == KErrNone) e = iUp->SetFormat(EPCM16, iUpFmt);
+        if (e == KErrNone && iUpFmt) iUpFmt->SetObserver(*this);
+        if (e == KErrNone) e = iDn->Open(*this);
+        if (e == KErrNone) e = iUp->Open(*this);
+        iOpenAt = NowMs();
+        TBuf8<64> lb;
+        lb.Format(_L8("audio: streams re-opening, err %d\n"), e);
+        Write(lb);
+    }
+    CVoIPAudioDownlinkStream::TVoIPOutputDevice StreamDev()
+    {
+        if (iWantRoute == 2 && iBtLinks > 0) {
+            TInt d = KBtCombos[iBtCombo].iDev;
+            return d == 1 ? CVoIPAudioDownlinkStream::ELoudSpeaker :
+                   (d == 2 ? CVoIPAudioDownlinkStream::ENoPreference : CVoIPAudioDownlinkStream::EHandset);
+        }
+        return RouteDev(iWantRoute);
+    }
     void MaybeStart()
     {
         if (!iDnOpen || !iUpOpen || iStarted) return;
         iStarted = ETrue;
+        iEverStarted = ETrue;
         TInt mv = 0, mg = 0;
-        Check(_L8("SetAudioDevice"), iDn->SetAudioDevice(RouteDev(iWantRoute)));
+        if (iOpenAt) {
+            TBuf8<64> lb;
+            lb.Format(_L8("audio: streams open again after %d ms, starting\n"), NowMs() - iOpenAt);
+            Write(lb);
+            iOpenAt = 0;
+        }
+        Check(_L8("SetAudioDevice"), iDn->SetAudioDevice(StreamDev()));
         iDn->GetMaxVolume(mv);
         Check(_L8("SetVolume"), iDn->SetVolume(mv * 70 / 100));
         iUp->GetMaxGain(mg);
@@ -463,6 +531,22 @@ public:
             }
             if (n == 2 && aData[0] == 'R' && aData[1] >= '0' && aData[1] <= '2') {
                 SetRoute(aData[1] - '0');
+                return ETrue;
+            }
+            if (n == 2 && aData[0] == 'X' && aData[1] >= '0' && aData[1] < '0' + KBtCombosN) {
+                iBtCombo = aData[1] - '0';
+                TBuf8<48> lb;
+                lb.Format(_L8("control: Bluetooth combination %d\n"), iBtCombo);
+                Write(lb);
+                if (iWantRoute == 2 && iBtLinks > 0 && iBtReady) BtCombo();
+                return ETrue;
+            }
+            if (n >= 2 && aData[0] == 'Y') {
+                /* a Bluetooth test answer from the user, logged with the levels of the last second */
+                TBuf8<200> lb;
+                lb.Format(_L8("btsweep answer %S: combination %d, spk_peak %d mic_peak %d mic_rms %d uplink frames %d, telephony output %d, stream device %d\n"),
+                          &aData.Mid(1).Left(60), iBtCombo, iLastSpkPeak, iLastMicPeak, iLastMicRms, iUpLastSec, iBtOut, iActualRoute);
+                Write(lb);
                 return ETrue;
             }
             if (n == 2 && aData[0] == 'A' && aData[1] >= '0' && aData[1] <= '2') {
@@ -577,12 +661,55 @@ public:
     void BtApply()
     {
         if (iBtWant < 0) return;
+        if (iBtWant == 2) { BtCombo(); return; }
         TBuf8<8> c;
-        c.Format(_L8("R %c"), iBtWant == 2 ? 'b' : (iBtWant == 1 ? 'l' : 'h'));
+        c.Format(_L8("R %c"), iBtWant == 1 ? 'l' : 'h');
         BtSend(c);
+        iBtStage = 0;
         TBuf8<64> lb;
         lb.Format(_L8("route: asked tgbtroute for %S\n"), &c);
         Write(lb);
+    }
+    // Bluetooth output with the stream handling of combination iBtCombo (see KBtCombos)
+    void BtCombo()
+    {
+        const TBtCombo& c = KBtCombos[iBtCombo];
+        TPtrC8 desc((const TUint8*)c.iDesc);
+        TBuf8<160> lb;
+        lb.Format(_L8("route: Bluetooth combination %d: %S\n"), iBtCombo, &desc);
+        Write(lb);
+        if (c.iPre) CloseStreams();
+        iBtReqAt = NowMs();
+        if (c.iSeq == 1) { BtSend(_L8("R h")); iBtStage = 1; }
+        else { BtSend(_L8("R b")); iBtStage = 2; }
+    }
+    // the telephony output reached the step we waited for
+    void BtStep(TInt aOut, TBool aTimeout)
+    {
+        if (iBtStage == 1 && (aOut == 2 || aTimeout)) {
+            BtSend(_L8("R b"));
+            iBtStage = 2;
+            iBtReqAt = NowMs();
+            return;
+        }
+        if (iBtStage != 2 || (aOut != 5 && !aTimeout)) return;
+        iBtStage = 0;
+        const TBtCombo& c = KBtCombos[iBtCombo];
+        TBuf8<128> lb;
+        if (aTimeout) lb.Format(_L8("route: waiting for the Bluetooth link timed out after %d ms, continuing\n"), NowMs() - iBtReqAt);
+        else lb.Format(_L8("route: Bluetooth output active after %d ms, stream action %d\n"), NowMs() - iBtReqAt, c.iAfter);
+        Write(lb);
+        if (c.iPre) { OpenStreams(); return; }
+        if (c.iAfter == 1) { CloseStreams(); OpenStreams(); return; }
+        if (c.iAfter == 2 && iStarted && iUp && iDn) {
+            TInt e1 = iDn->Stop(), e2 = iUp->Stop();
+            TInt e3 = iDn->SetAudioDevice(StreamDev());
+            TInt e4 = iDn->Start(), e5 = iUp->Start();
+            lb.Format(_L8("audio: streams stop/start (%d %d dev %d %d %d)\n"), e1, e2, e3, e4, e5);
+            Write(lb);
+            return;
+        }
+        if (iStarted && iDn) iDn->SetAudioDevice(StreamDev());
     }
     void BtRouteReport(const TDesC8& aData)
     {
@@ -600,6 +727,7 @@ public:
         if (out >= 0) {
             iBtOut = out;
             SendInfo('T', out);
+            if (iBtStage) BtStep(out, EFalse);
         }
     }
     void SetRoute(TInt aRoute)
@@ -609,9 +737,7 @@ public:
         TInt rerr = KErrNone;
         // with a headset: "Bluetooth" and "earpiece" are both private (handset) on the VoIP stream,
         // tgbtroute picks the accessory or the handset
-        TVoIPOutputDeviceAlias dev = RouteDev(iWantRoute);
-        if (iBtLinks > 0 && iWantRoute == 2) dev = CVoIPAudioDownlinkStream::EHandset;
-        if (iStarted && iDn) rerr = iDn->SetAudioDevice(dev);
+        if (iStarted && iDn) rerr = iDn->SetAudioDevice(StreamDev());
         BtWant(iWantRoute);
         TBuf8<96> lb;
         lb.Format(_L8("route: request %d -> err %d (uplink frames %d in the last second)\n"), aRoute, rerr, iUpLastSec);
@@ -640,6 +766,13 @@ public:
     {
         TInt n = BtLinks();
         if (iBtProcOpen && !BtAlive() && iBtWant >= 0) BtWant(iBtWant);   /* it crashed: try again */
+        if (iBtStage && NowMs() - iBtReqAt > 3000) BtStep(-1, ETrue);
+        if (iOpenAt && !iStarted && NowMs() - iOpenAt > 4000 && iReopenTries < 3) {
+            iReopenTries++;
+            Write(_L8("audio: streams did not open in 4 s, trying again\n"));
+            CloseStreams();
+            OpenStreams();
+        }
         if (n == iBtLinks) return;
         iBtLinks = n;
         if (n > 0 && iStarted) BtWant(iWantRoute);
@@ -1033,7 +1166,7 @@ public:
     // (MicWatchdog, once a second) restarts the uplink.
     void KeepAlive277()
     {
-        if (!iStarted || !iEnc || iMuted || !Media277()) return;
+        if (!iEverStarted || !iEnc || iMuted || !Media277()) return;
         TInt now = NowMs();
         if (now - iLastUpMs < 300) return;
         TInt16 z[KFrameSamples];
@@ -1652,6 +1785,7 @@ public:
                 ml.Format(_L8("mic %d peak %d rms %d out_peak %d gain %d.%d dB boost %d gated %d limited %d frames %d silence_sent %d spk_peak %d route %d\n"),
                           iTicks, pi, ri, po, gd / 10, (gd < 0 ? -gd : gd) % 10, iAgc.mode, gt, lim, iUpLastSec, iSilFrames, iPeakOut, iActualRoute);
                 Write(ml);
+                iLastSpkPeak = iPeakOut; iLastMicPeak = pi; iLastMicRms = ri;
                 iPeakIn = 0;
                 iPeakOut = 0;
             }
@@ -1782,11 +1916,12 @@ private:
     TInt iPeakIn, iPeakOut;
     c277_agc iAgc;                 /* mic boost */
     TInt iLastUpMs, iLastDnMs, iUpFrames, iUpLastSec, iUpFixAt, iUpFixes, iDnFixAt, iSilFrames, iRouteAt;
-    TBool iUpBroken, iDnBroken, iUpReopen;
+    TBool iUpBroken, iDnBroken, iUpReopen, iEverStarted;
     TInt iActualRoute, iBtLinks;
     RProcess iBtProc;
     TBool iBtProcOpen, iBtReady, iBtUnavailable;
     TInt iBtStarts, iBtWant, iBtOut;
+    TInt iBtCombo, iBtStage, iBtReqAt, iOpenAt, iReopenTries, iLastSpkPeak, iLastMicPeak, iLastMicRms;
     // v277
     TBool iV277;
     c277_session* iS;

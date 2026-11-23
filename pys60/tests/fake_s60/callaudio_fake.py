@@ -76,6 +76,13 @@ class CallAudio:
         self.want_route = n
         self.sent.append("R%d" % n)
 
+    def set_btmode(self, n):
+        self.want_bt = n
+        self.sent.append("X%d" % n)
+
+    def bt_answer(self, text):
+        self.sent.append("Y" + text)
+
     def set_agc(self, mode):
         self.want_agc = mode
         self.sent.append("A%d" % mode)

@@ -21,6 +21,8 @@ typedef struct {
     int env_peak;      /* peak envelope of the input */
     int env_mean;      /* mean-abs envelope of the input */
     int floor;         /* noise floor estimate (mean abs of quiet frames) */
+    int floor_peak;    /* noise floor of the frame peaks (slow minimum) */
+    int hang;          /* frames left of the current talk spurt (speech + 300 ms) */
     /* statistics since the last c277_agc_stats() */
     int st_peak_in, st_peak_out, st_frames, st_clipped, st_gated;
     unsigned long long st_sq;   /* sum of x*x of the input */

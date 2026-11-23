@@ -12,6 +12,7 @@
 #define START_G_N  (2 * ONE)
 #define START_G_H  (4 * ONE)
 #define MIN_SPEECH 40                /* mean abs below this is never speech (-58 dBFS) */
+#define MIN_PEAK   300               /* peaks below this are never speech (-41 dBFS) */
 #define KNEE       24576             /* soft limiter starts at -2.5 dBFS */
 
 /* Q12 gain for 0..24 dB in 1 dB steps */
@@ -44,7 +45,7 @@ void c277_agc_set_mode(c277_agc *a, int mode)
 void c277_agc_init(c277_agc *a, int mode)
 {
     a->mode = -1;
-    a->env_peak = 0; a->env_mean = 0; a->floor = 30;
+    a->env_peak = 0; a->env_mean = 0; a->floor = 30; a->floor_peak = 100; a->hang = 0;
     a->st_peak_in = a->st_peak_out = a->st_frames = a->st_clipped = a->st_gated = 0;
     a->st_sq = 0; a->st_n = 0;
     c277_agc_set_mode(a, mode);
@@ -76,8 +77,18 @@ void c277_agc_process(c277_agc *a, short *pcm, int n)
     /* noise floor: follows quiet frames down at once, creeps up slowly */
     if (mean < a->floor) a->floor = mean > 4 ? mean : 4;
     else if (mean < a->floor * 4) a->floor += (a->floor >> 7) + 1;
+    if (peak < a->floor_peak) a->floor_peak = peak > 16 ? peak : 16;
+    else if (peak < a->floor_peak * 4) a->floor_peak += (a->floor_peak >> 7) + 1;
     maxg = a->mode == C277_AGC_HIGH ? MAX_G_H : MAX_G_N;
-    if (mean > MIN_SPEECH && mean > a->floor * 3) {
+    /* speech: the level is well above the noise floor, by the mean (steady sounds) OR by the peaks
+     * (the N79 mic gives peaky low-RMS speech: rms 40-60 with peaks around 2000; 0.15.1 gated
+     * 50 of 51 such frames on the mean alone) */
+    if ((mean > MIN_SPEECH && mean > a->floor * 3) ||
+        (peak > MIN_PEAK && peak > a->floor_peak * 4))
+        a->hang = 15;
+    else if (a->hang > 0)
+        a->hang--;
+    if (a->hang > 0) {
         int pt = a->mode == C277_AGC_HIGH ? PEAK_T_H : PEAK_T_N;
         want = (int)(((unsigned int)pt << 12) / (unsigned int)(a->env_peak > 1 ? a->env_peak : 1));
         {

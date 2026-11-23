@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.15.2"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.15.3"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -1889,8 +1889,9 @@ class App:
         ca.on_info = self.audio_info
         try:
             ca.set_agc(self.mic_boost())
+            ca.set_btmode(self.bt_mode())
         except:
-            self.log("mic boost: " + err_text())
+            self.log("mic boost / bt mode: " + err_text())
         if self.client.call_version == "2.7.7" and self.cfg.get("video_rx") != "0":
             try:
                 # receive the peer's video (on by default since 0.15.0: software H.264 decoder in
@@ -2288,6 +2289,8 @@ class App:
                         (u"Speaker", lambda self=self: self.call_pick_route(1)),
                         (u"Earpiece", lambda self=self: self.call_pick_route(0)),
                         (u"Auto (headset if connected)", lambda self=self: self.call_pick_route(2)))))
+                if self.call_bt():
+                    m.append((u"Bluetooth test", self.call_bt_test))
                 if self.call_video_ok():
                     if self.call_video_on():
                         m.append((u"Turn video off", self.call_toggle_video))
@@ -2427,6 +2430,100 @@ class App:
         self.client.get_dialogs(self.got_dialogs, self.load_failed, 20)
 
     # ---------------------------------------------------------- menus
+
+    def bt_mode(self):
+        """Bluetooth headset combination found by the in-call Bluetooth test (default 1)."""
+        try:
+            m = int(self.cfg.get("bt_mode", "1"))
+        except:
+            m = 1
+        if m < 0 or m > 7:
+            m = 1
+        return m
+
+    BT_COMBOS = [u"Bluetooth output only (0.15.2 way)",
+                 u"Bluetooth output, then audio restarted",
+                 u"Bluetooth (no device preference), audio restarted",
+                 u"Bluetooth (loudspeaker device), audio restarted",
+                 u"Bluetooth output, audio paused and resumed",
+                 u"earpiece, then Bluetooth, audio restarted",
+                 u"audio closed, Bluetooth output, audio opened",
+                 u"audio closed, Bluetooth (no preference), audio opened"]
+
+    def call_bt_test(self):
+        """Guided test during a call with a Bluetooth headset: tries the 8 ways of moving the call
+        audio to the headset, asks after each one, keeps the best for the next calls (bt_mode).
+        Answers go to E:\\retrotele_btsweep.txt and into the call log with the audio levels."""
+        ca = self.call_audio
+        if ca is None or not self.call_bt():
+            appuifw.note(u"No Bluetooth headset connected", "info")
+            return
+        if not appuifw.query(u"Bluetooth test: 8 short steps of about 8 s. In each, talk and "
+                             u"listen, then answer. The call goes on. Start?", "query"):
+            return
+        answers = []
+        best = -1
+        ca.route_user = 1
+        self.call_set_route(2)
+        i = 0
+        while i < len(self.BT_COMBOS):
+            try:
+                ca.set_btmode(i)
+            except:
+                self.log("bt test: " + err_text())
+            self.show_toast(u"Bluetooth test %d/8" % (i + 1), self.BT_COMBOS[i])
+            try:
+                e32.ao_sleep(8)
+            except:
+                pass
+            if self.call_audio is not ca:
+                return                          # the call ended
+            j = appuifw.popup_menu([u"Yes: I hear them and they hear me",
+                                    u"I hear them, they don't hear me",
+                                    u"They hear me, I don't hear them",
+                                    u"No sound at all",
+                                    u"Stop the test"],
+                                   u"Test %d/8: works?" % (i + 1))
+            if j is None or j == 4:
+                break
+            word = ["yes", "spk-only", "mic-only", "none"][j]
+            answers.append((i, word))
+            try:
+                ca.bt_answer("%d %s" % (i, word))
+            except:
+                pass
+            self.bt_sweep_log("combination %d (%s): %s" % (i, to_b(self.BT_COMBOS[i]), word))
+            if j == 0 and best < 0:
+                best = i
+            i = i + 1
+        if best >= 0:
+            self.cfg.set("bt_mode", str(best))
+            self.cfg.save()
+            try:
+                ca.set_btmode(best)
+            except:
+                pass
+            self.bt_sweep_log("chosen: combination %d" % best)
+            appuifw.note(u"Bluetooth: using way %d for calls from now on" % (best + 1), "info")
+        else:
+            try:
+                ca.set_btmode(self.bt_mode())
+            except:
+                pass
+            self.bt_sweep_log("no combination worked (answers %s)" % str(answers))
+            appuifw.note(u"No way worked. Please send E:\\retrotele_callaudio.txt and "
+                         u"E:\\retrotele_btsweep.txt", "info")
+
+    def bt_sweep_log(self, line):
+        self.log("bt test: " + line)
+        for p in ("E:\\retrotele_btsweep.txt", "C:\\Data\\retrotele_btsweep.txt"):
+            try:
+                f = open(p, "a")
+                f.write(time.strftime("%H:%M:%S ") + line + "\n")
+                f.close()
+                return
+            except:
+                pass
 
     def mic_boost(self):
         """0 off, 1 normal (default), 2 high: the digital mic gain in calls (tgcallaudio's AGC)."""

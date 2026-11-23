@@ -502,9 +502,28 @@ mb[1][1][1]()                                   # the user picks the speaker: ke
 assert fa.sent[-1] == "R1" and fa.route_user == 1
 fa.helper_info(0, 1)
 assert fa.sent[-1] == "R1"                       # no automatic switch back
+# the in-call Bluetooth test: 8 ways, answers kept, the first "yes" becomes bt_mode
+assert u"Bluetooth test" in [m[0] for m in appuifw.app.menu]
+_sleep = retrotele.e32.ao_sleep
+retrotele.e32.ao_sleep = lambda t, cb=None: None
+answers[:] = [1]
+popups[:] = [3, 1, 0, 3, 3, 3, 3, 3]          # none, speaker only, YES, none...
+app.call_bt_test()
+retrotele.e32.ao_sleep = _sleep
+assert app.cfg.get("bt_mode") == "2" and fa.want_bt == 2, (app.cfg.get("bt_mode"), fa.sent[-4:])
+assert "Y0 none" in fa.sent and "Y2 yes" in fa.sent and "X7" in fa.sent, fa.sent
+assert app.client.cs["state"] == "connected" and fa.running
+# stopping the test early keeps the old choice
+answers[:] = [1]
+popups[:] = [4]
+retrotele.e32.ao_sleep = lambda t, cb=None: None
+app.call_bt_test()
+retrotele.e32.ao_sleep = _sleep
+assert fa.want_bt == 2 and app.client.cs["state"] == "connected"
 fa.bt_links = 0
 fa.helper_info(0, 1)
-assert [m for m in appuifw.app.menu if m[0][:6] == u"Sound:"][0][0] == u"Sound: Speaker"
+assert [m for m in appuifw.app.menu if m[0][:6] == u"Sound:"][0][0] == u"Sound: Auto"   # the test chose route 2
+assert u"Bluetooth test" not in [m[0] for m in appuifw.app.menu]
 assert app.client.cs["state"] == "connected" and fa.running
 # Options menu opened and cancelled (also its Sound output submenu): no menu callback runs and the
 # call goes on. If the right softkey fires with the Cancel (some S60 builds), it asks first.

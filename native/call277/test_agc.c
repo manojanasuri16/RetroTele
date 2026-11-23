@@ -32,6 +32,13 @@ static void speech(short *f, int n, int t0, int peak, int hiss)
     }
 }
 
+static int isqrt_ll(long long v)
+{
+    long long r = 0;
+    while ((r + 1) * (r + 1) <= v) r++;
+    return (int)r;
+}
+
 static int frame_peak(const short *f, int n)
 {
     int i, p = 0;
@@ -79,6 +86,29 @@ int main(void)
         if (peaks[i] >= 1000) CHECK(pk >= 8000);           /* -12 dBFS or louder */
         CHECK(hs <= 15 * 2 + 8 + pk / 8);                  /* pauses: hiss not boosted beyond +6 dB */
         CHECK(lim == 0);
+    }
+    /* N79-like speech (0.15.1 phone log): low RMS (40-60) with peaks around 2400 from voiced
+     * pulses, background hiss: must be boosted, not gated */
+    {
+        int t, outpk = 0;
+        long long sq = 0;
+        c277_agc_init(&a, C277_AGC_NORMAL);
+        for (t = 0; t < 8 * 8000; t += 160) {
+            int k, ph = t % 2800, voiced = ph < 1600;
+            for (k = 0; k < 160; k++) {
+                int u = (t + k) % 700, v = 0;              /* a sharp pulse every 700 samples */
+                if (voiced && u < 6) v = (u & 1 ? -1 : 1) * (2400 >> u);
+                f[k] = (short)(v + rnd(12));
+                if (t < 8000) sq += (long long)f[k] * f[k];
+            }
+            c277_agc_process(&a, f, 160);
+            if (t >= 7 * 8000 && voiced && frame_peak(f, 160) > outpk) outpk = frame_peak(f, 160);
+        }
+        c277_agc_stats(&a, &pi, &ri, &po, &gd, &gt, &lim);
+        printf("peaky speech: input rms %d (first second), gain %d.%d dB, output peak %d\n",
+               (int)isqrt_ll(sq / 8000), gd / 10, gd % 10, outpk);
+        CHECK(gd >= 120);                                   /* boosted by 12 dB or more */
+        CHECK(outpk >= 12000 && outpk <= 26000);
     }
     /* high mode is louder for very quiet speech */
     c277_agc_init(&a, C277_AGC_HIGH);
