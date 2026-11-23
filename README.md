@@ -6,6 +6,18 @@ Modern Symbian Telegram apps such as Symbigram need Qt Quick Components (Symbian
 
 ![RetroTele screens](docs/screenshots.png)
 
+## Requirements: a hacked (unlocked) phone
+
+**RetroTele needs a hacked phone.** Its call helpers (`tgcallaudio.exe` and the other native helpers in `RetroTele.sis`) are built with the capabilities **MultimediaDD, ReadDeviceData and WriteDeviceData**, which are needed for the phone's audio and camera/video hardware. A self-signed package on a stock S60 3rd Edition phone can only be granted the user-grantable capabilities (NetworkServices, LocalServices, ReadUserData, WriteUserData, UserEnvironment, Location), so on a stock phone the install is refused. The rest of the package (the app and the `.pyd` modules) uses only user-grantable capabilities.
+
+On the N79 this means the "Easy Hack Kit" (EasyHackKit 2.0, which installs **RomPatcher+**), with **Install Server RP+** and **Open4All RP+** applied:
+
+1. Hack the phone once with EasyHackKit (see the [unlock guide](https://github.com/manojanasuri16/symbian-unlock-guide) for the step-by-step).
+2. Before installing, open **RomPatcher+**, tick **Open4All rp+** and apply it (a green tick). Use *Options > Add to Auto* so it is applied on every boot.
+3. Then install `RetroTele.sis`.
+
+If it isn't on, the install fails with **"Update error"** or **"requested application access not granted"**. Only do this on a phone you own; a hacked phone no longer checks signatures. The same Open4All patch also lets the memory-card fix (below) write to `\resource`.
+
 ## Features
 
 - Telegram-style look: blue header, round avatars (initials or the chat's photo thumbnail), unread badges, online dots, chat bubbles, read ticks
@@ -21,11 +33,12 @@ Modern Symbian Telegram apps such as Symbigram need Qt Quick Components (Symbian
 - Live incoming messages with a pop-up banner (muted chats stay quiet), plus read receipts and online status
 - Search your chats and contacts, or open any @username
 - **Call** a contact's phone number as a normal phone call
+- **Telegram voice calls** with the official Telegram apps (call library version 2.7.7), with full-duplex audio, and **send-only video** (your camera is sent to the other side, with a self-view; the other side's video isn't shown)
 - The chat list is cached, so it appears instantly when the app starts
 - **Profile** of any chat (Options > View profile, or right key in a chat): big photo, status, phone, username, bio or description, members, and Mute/Unmute
 - **Fast mode** (on by default): received data is decrypted but its SHA-256 integrity hash isn't checked, which makes loading 2-3x faster on the phone. Switch it off in Settings for the full check. Big packets are decrypted in slices so keys keep working meanwhile.
 
-There's no secret chats, file/video download, playback of GIFs or animated stickers, or answering **Telegram** voice/video calls. Calls need real-time audio streaming with the Opus codec and GIFs/stickers are MP4/WebP/Lottie, none of which Python for S60 1.4.5 can decode, so "Call" uses the normal phone line.
+There's no secret chats, file/video download or playback of GIFs or animated stickers (they are MP4/WebP/Lottie, which Python for S60 1.4.5 can't decode). Voice messages use Opus/OGG, which the N79 can't decode yet.
 
 ### Keys
 
@@ -42,10 +55,11 @@ There's no secret chats, file/video download, playback of GIFs or animated stick
 
 ## Install
 
+0. Make sure the phone is hacked and **Open4All rp+** is on (see [Requirements](#requirements-a-hacked-unlocked-phone)).
 1. Install **Python for S60 1.4.5** (`PythonForS60_1_4_5_3rdEd.sis`) if it's not on the phone yet.
-2. Install `RetroTele.sis` and choose **phone memory or memory card**: either works, wherever Python for S60 is installed, on an unlocked phone (e.g. the Open4All patch). A Python for S60 1.4.5 app on a different drive from Python normally closes at once, because Python's `appuifw` looks for its resource file `appuifwmodule.rsc` on the app's drive. The package includes that file and a tiny native program that the installer runs once to put it in place (see [pys60/rscfix/README.md](pys60/rscfix/README.md)). Tested on a Nokia N79 with RetroTele on the memory card and Python in phone memory. On a phone that isn't unlocked, install RetroTele on the same drive as Python.
-3. On a computer, open <https://my.telegram.org>, go to **API development tools** and create an app. Note the **api_id** and **api_hash**.
-4. Open RetroTele and enter api_id and api_hash once. Choose an access point (Wi-Fi or packet data), then log in.
+2. Install `RetroTele.sis` and choose **phone memory or memory card**: either works, wherever Python for S60 is installed, on a hacked phone (Open4All on, see Requirements). A Python for S60 1.4.5 app on a different drive from Python normally closes at once, because Python's `appuifw` looks for its resource file `appuifwmodule.rsc` on the app's drive. The package includes that file and a tiny native program that the installer runs once to put it in place (see [pys60/rscfix/README.md](pys60/rscfix/README.md)). Tested on a Nokia N79 with RetroTele on the memory card and Python in phone memory. On a phone that isn't unlocked, install RetroTele on the same drive as Python.
+3. On a computer, open <https://my.telegram.org>, go to **API development tools** and create an app. Note your own **api_id** and **api_hash**: RetroTele ships none, you enter yours.
+4. Open RetroTele and enter your api_id and api_hash once. Choose an access point (Wi-Fi or packet data), then log in.
 
 The first connection creates a secure key with Telegram, which takes a few seconds of 2048-bit math on the phone. After that, start-up is quick. Data lives in `E:\RetroTele\` (session, settings). The log is `E:\retrotele_log.txt`.
 
@@ -86,7 +100,7 @@ Like this app, both are Python for S60 1.4.5 apps that install to phone memory o
 
 ## What's in RetroTele.sis
 
-One file installs everything: the app, the native crypto module, the call audio helper (Opus, full-duplex VoIP audio, Telegram call protocol 2.7.7), the memory-card fix and Nokia's *VoIP Audio Services* system component (needed by the phone for two-way call audio; (c) Nokia, from the S60 3rd Edition FP2 API Plug-In Pack, included unmodified).
+One file, `RetroTele.sis`, installs everything: the app, the native crypto module, the call audio helper (Opus, full-duplex VoIP audio, Telegram call protocol 2.7.7), the memory-card fix and Nokia's *VoIP Audio Services* system component (needed by the phone for two-way call audio; (c) Nokia, from the S60 3rd Edition FP2 API Plug-In Pack, included unmodified).
 
 ## Credits
 
