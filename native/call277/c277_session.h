@@ -11,6 +11,7 @@
 #include "c277_refl.h"
 #include "c277_ice.h"
 #include "c277_rtp.h"
+#include "c277_video.h"
 
 #define C277_SESS_RANDOM  56    /* random bytes required by init */
 #define C277_OUT_MAX      1500  /* bytes per output item */
@@ -79,6 +80,27 @@ typedef struct {
     u32 vs_start, vs_pk, vs_bytes, vs_rtcp;        /* per-second window */
     int vs_npt, vs_nssrc;
     u32 vs_pt[4], vs_ssrc[4];
+    /* Video send (docs/CALL-VIDEO-SPEC.md). vid_want: the user turned video on;
+     * vid_act: we announced RemoteMediaState video=Active. */
+    int vid_want, vid_act, vf_pending;
+    u32 vf_at;                                   /* when our VideoFormats went out */
+    int peer_vid;                                /* peer RemoteMediaState video (-1 unknown) */
+    u32 req_video_n;                             /* RequestVideo messages from the peer */
+    c277_vtx vtx;
+    int sr_started;
+    u32 sr_next, wall_unix, wall_now;
+    u32 pli_n, fir_n, nack_n, twcc_n, remb_n, rtcp_rx;
+    u32 rr_fraction, rr_lost, rr_jitter;
+    int rr_have;
+    int idr_req;                                 /* tgvideo.exe should produce an IDR */
+    u32 idr_t0, last_pli_at;
+    int idr_step;
+    u32 vw_start, vw_au, vw_pk, vw_oct, vw_idr, vw_drop;   /* 1 s send window */
+    u32 vtx_last_fps, vtx_last_bps;              /* last window result (fps x10, bit/s) */
+    u32 peer_sps_t, n_sps_log;
+    u8  peer_sps[24];
+    u32 peer_sps_len;
+    u32 n_peer_vrtp;
 } c277_session;
 
 /* key256: raw DH key. rnd: C277_SESS_RANDOM random bytes (nrnd = how many).
@@ -110,6 +132,22 @@ void c277_outq_clear(c277_outq *q);
 void c277_session_capture(c277_session *s, int on, int vid);
 /* Copies up to cap bytes of pending capture text into out and removes them. */
 u32  c277_session_cap_take(c277_session *s, char *out, u32 cap);
+
+/* ---- video send. A helper (tgvideo.exe via the call engine) feeds encoder units. */
+/* 0 = off, 1 = on. Turning on announces VideoFormats / VideoParameters / RemoteMediaState
+ * (video Active) as soon as the path is up; off announces video Inactive. */
+void c277_session_video_enable(c277_session *s, int on);
+/* One encoder unit (Annex-B). C277_VTX_* result (DROPPED also while not active). */
+int  c277_session_video_put(c277_session *s, const u8 *unit, u32 n, u32 now);
+/* Emits packets of the queued access unit while the output queue has room; returns 1
+ * while more remain (drain s->out, then call again). */
+int  c277_session_video_pump(c277_session *s, u32 now);
+/* Wall clock for RTCP sender reports: unix seconds at time now (ms). */
+void c277_session_set_wall(c277_session *s, u32 unix_sec, u32 now);
+/* 1 once if an IDR should be requested from the encoder (PLI/FIR, or the early schedule). */
+int  c277_session_take_idr_req(c277_session *s);
+/* Video state */
+int  c277_session_video_active(const c277_session *s);
 
 /* state */
 int c277_session_signaling_acked(const c277_session *s);  /* our CandidatesList sent and acked */

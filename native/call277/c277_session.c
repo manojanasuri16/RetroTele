@@ -56,6 +56,13 @@ int c277_session_init(c277_session *s, const u8 *key256, int is_outgoing,
     c277_ice_set_local(&s->ice, s->rank, s->own_rt, s->r_port, s->r_ip, s->r_port);
     c277_rtp_tx_init(&s->rtp, s->is_outgoing, rnd + 48);
     c277_jb_init(&s->jb);
+    {
+        /* video: SSRC 4 (caller) / 3 (callee), as in the official apps' captures */
+        u8 vr[6];
+        vr[0] = rnd[54]; vr[1] = rnd[55]; vr[2] = rnd[40]; vr[3] = rnd[41]; vr[4] = rnd[42]; vr[5] = rnd[43];
+        c277_vtx_init(&s->vtx, s->is_outgoing ? 4UL : 3UL, vr);
+    }
+    s->peer_vid = -1;
     s->ok = 1;
     return C277_SESS_OK;
 }
@@ -222,6 +229,202 @@ static u32 build_videoformats(u8 *o)
     return n;
 }
 
+
+/* ---------------------------------------------------------------- video */
+
+#define VIDEO_ASPECT 1222UL     /* 11:9 = QCIF */
+
+static void req_idr(c277_session *s, u32 now)
+{
+    if (s->idr_req) return;
+    if (s->last_pli_at != 0 && (u32)(now - s->last_pli_at) < 400UL) return;
+    s->idr_req = 1;
+    s->last_pli_at = now ? now : 1;
+}
+
+/* log one peer NAL: SPS size/profile (docs: does the official app downsize over time?) */
+static void log_peer_nal(c277_session *s, const u8 *nal, u32 n)
+{
+    c277_sps sp;
+    u32 cmp, same;
+    if (!s->cap_on || n < 4 || (nal[0] & 31) != 7 || s->n_sps_log >= 400) return;
+    if (c277_sps_parse(nal, n, &sp) != 0) return;
+    cmp = n < sizeof(s->peer_sps) ? n : (u32)sizeof(s->peer_sps);
+    same = n == s->peer_sps_len && memcmp(nal, s->peer_sps, cmp) == 0;
+    if (same && s->peer_sps_t != 0 && (u32)(s->cur_now - s->peer_sps_t) < 10000UL) return;
+    memcpy(s->peer_sps, nal, cmp);
+    s->peer_sps_len = n; s->peer_sps_t = s->cur_now ? s->cur_now : 1;
+    s->n_sps_log++;
+    cap_str(s, "t="); cap_dec(s, s->cur_now);
+    cap_str(s, " peerSPS profile="); cap_dec(s, (u32)sp.profile);
+    cap_str(s, " level="); cap_dec(s, (u32)sp.level);
+    cap_str(s, " size="); cap_dec(s, (u32)sp.width);
+    cap_str(s, "x"); cap_dec(s, (u32)sp.height);
+    cap_str(s, same ? " (repeat)\n" : "\n");
+}
+
+static void peer_video_rtp(c277_session *s, const u8 *body, u32 blen)
+{
+    c277_rtp_hdr h;
+    u32 pos;
+    int t;
+    if (c277_rtp_parse(body, blen, &h) < 0 || h.plen < 2) return;
+    s->n_peer_vrtp++;
+    t = h.payload[0] & 31;
+    if (t == 7) log_peer_nal(s, h.payload, h.plen);
+    else if (t == 24) {
+        pos = 1;
+        while (pos + 2 <= h.plen) {
+            u32 sz = ((u32)h.payload[pos] << 8) | h.payload[pos + 1];
+            if (sz == 0 || pos + 2 + sz > h.plen) break;
+            log_peer_nal(s, h.payload + pos + 2, sz);
+            pos += 2 + sz;
+        }
+    }
+}
+
+static void peer_rtcp(c277_session *s, const u8 *body, u32 blen)
+{
+    c277_rtcp_info ri;
+    if (c277_rtcp_parse(body, blen, s->vtx.ssrc, &ri) < 0) return;
+    s->rtcp_rx++;
+    s->pli_n += ri.n_pli; s->fir_n += ri.n_fir; s->nack_n += ri.n_nack;
+    s->twcc_n += ri.n_twcc; s->remb_n += ri.n_remb;
+    if (ri.rr_have) {
+        s->rr_have = 1; s->rr_fraction = ri.rr_fraction; s->rr_lost = ri.rr_lost; s->rr_jitter = ri.rr_jitter;
+    }
+    if ((ri.n_pli || ri.n_fir) && s->vid_act) req_idr(s, s->cur_now);
+}
+
+void c277_session_video_enable(c277_session *s, int on)
+{
+    s->vid_want = on != 0;
+}
+
+void c277_session_set_wall(c277_session *s, u32 unix_sec, u32 now)
+{
+    s->wall_unix = unix_sec; s->wall_now = now;
+}
+
+int c277_session_take_idr_req(c277_session *s)
+{
+    int r = s->idr_req;
+    s->idr_req = 0;
+    return r;
+}
+
+int c277_session_video_active(const c277_session *s) { return s->vid_act; }
+
+int c277_session_video_put(c277_session *s, const u8 *unit, u32 n, u32 now)
+{
+    int r;
+    if (!s->ok) return C277_VTX_DROPPED;
+    s->cur_now = now;
+    if (!s->vid_act || c277_ice_state(&s->ice) != C277_ICE_CONNECTED) { s->vw_drop++; return C277_VTX_DROPPED; }
+    r = c277_vtx_put(&s->vtx, unit, n, now);
+    if (r == C277_VTX_QUEUED) { s->vw_au++; if (s->vtx.idr) s->vw_idr++; }
+    else if (r == C277_VTX_DROPPED) { s->vw_drop++; if (!s->vtx.sent_idr) req_idr(s, now); }
+    return r;
+}
+
+int c277_session_video_pump(c277_session *s, u32 now)
+{
+    u32 peer;
+    int r, k;
+    if (!s->ok || !s->vtx.pending) return 0;
+    if (!s->vid_act || c277_ice_state(&s->ice) != C277_ICE_CONNECTED || !c277_ice_peer_tag(&s->ice, &peer)) {
+        s->vtx.pending = 0;
+        return 0;
+    }
+    while (s->vtx.pending && have_room(s)) {
+        r = c277_vtx_next(&s->vtx, s->rtpb, C277_OUT_MAX);
+        if (r <= 0) break;
+        k = c277_conn_build(&s->tr, now, C277_MSG_VIDEO, s->rtpb, (u32)r, 0, s->tmp, C277_OUT_MAX);
+        if (k < 0) { s->vw_drop++; continue; }
+        if (push_wrapped(s, peer, s->tmp, (u32)k) < 0) break;
+        s->vw_pk++; s->vw_oct += (u32)r;
+    }
+    return s->vtx.pending;
+}
+
+/* video housekeeping in the tick: announce on/off, early IDR schedule, SR, stats */
+static void video_tick(c277_session *s, u32 now)
+{
+    static const u16 idr_at[5] = { 300, 1500, 3500, 6500, 10000 };
+    u32 peer;
+    int k;
+    if (!s->ok) return;
+    if (s->vid_want && !s->vf_sent && !s->vf_reply) s->vf_reply = 1;      /* step 5b sends VideoFormats */
+    if (s->vf_sent && s->vf_at == 0) s->vf_at = now ? now : 1;
+    if (c277_ice_state(&s->ice) == C277_ICE_CONNECTED && s->media_state_sent && have_room(s) &&
+        c277_ice_peer_tag(&s->ice, &peer)) {
+        if (s->vid_want && !s->vid_act && s->vf_sent &&
+            (c277_conn_pending(&s->sig) == 0 || (u32)(now - s->vf_at) > 1500UL) && s->out.n + 2 <= C277_OUTQ) {
+            u8 vp[4], ms;
+            vp[0] = (u8)(VIDEO_ASPECT >> 24); vp[1] = (u8)(VIDEO_ASPECT >> 16);
+            vp[2] = (u8)(VIDEO_ASPECT >> 8); vp[3] = (u8)VIDEO_ASPECT;
+            k = c277_conn_build(&s->tr, now, C277_MSG_VIDEOPARAMS, vp, 4, 1, s->tmp, C277_OUT_MAX);
+            if (k > 0) push_wrapped(s, peer, s->tmp, (u32)k);
+            ms = c277_msg_media_state_build(1, 2);
+            k = c277_conn_build(&s->tr, now, C277_MSG_MEDIASTATE, &ms, 1, 1, s->tmp, C277_OUT_MAX);
+            if (k > 0 && push_wrapped(s, peer, s->tmp, (u32)k) == 0) {
+                s->vid_act = 1;
+                c277_vtx_reset(&s->vtx);
+                s->sr_started = 0; s->idr_step = 0; s->idr_t0 = now ? now : 1;
+                s->vw_start = now; s->vw_au = s->vw_pk = s->vw_oct = s->vw_idr = s->vw_drop = 0;
+                if (s->cap_on) { cap_str(s, "t="); cap_dec(s, now); cap_str(s, " video send ON (RemoteMediaState video=2, aspect 1222)\n"); }
+            }
+        } else if (!s->vid_want && s->vid_act) {
+            u8 ms = c277_msg_media_state_build(1, 0);
+            k = c277_conn_build(&s->tr, now, C277_MSG_MEDIASTATE, &ms, 1, 1, s->tmp, C277_OUT_MAX);
+            if (k > 0 && push_wrapped(s, peer, s->tmp, (u32)k) == 0) {
+                s->vid_act = 0;
+                c277_vtx_reset(&s->vtx);
+                if (s->cap_on) { cap_str(s, "t="); cap_dec(s, now); cap_str(s, " video send OFF (RemoteMediaState video=0)\n"); }
+            }
+        }
+    }
+    if (!s->vid_act) return;
+    if (s->idr_step < 5 && (u32)(now - s->idr_t0) >= (u32)idr_at[s->idr_step]) {
+        s->idr_step++;
+        s->idr_req = 1;
+    }
+    /* sender report about every second once video went out */
+    if (s->vtx.n_pk > 0 && have_room(s) && c277_ice_peer_tag(&s->ice, &peer) &&
+        (!s->sr_started || LATER(now, s->sr_next))) {
+        u32 el = (u32)(now - s->wall_now), sec = s->wall_unix + el / 1000UL, frac = (el % 1000UL) * 4294967UL;
+        k = c277_rtcp_build_sr(s->rtpb, C277_OUT_MAX, s->vtx.ssrc, sec + 2208988800UL, frac,
+                               c277_vtx_ts_at(&s->vtx, now), s->vtx.n_pk, s->vtx.n_oct);
+        if (k > 0) {
+            k = c277_conn_build(&s->tr, now, C277_MSG_VIDEO, s->rtpb, (u32)k, 0, s->tmp, C277_OUT_MAX);
+            if (k > 0) push_wrapped(s, peer, s->tmp, (u32)k);
+        }
+        s->sr_started = 1; s->sr_next = now + 1000UL;
+    }
+    /* once-per-second send statistics */
+    if ((u32)(now - s->vw_start) >= 1000UL) {
+        u32 el = (u32)(now - s->vw_start);
+        s->vtx_last_fps = s->vw_au * 10000UL / el;
+        s->vtx_last_bps = s->vw_oct * 8000UL / el;
+        if (s->cap_on) {
+            cap_str(s, "t="); cap_dec(s, now);
+            cap_str(s, " vtx fps10="); cap_dec(s, s->vtx_last_fps);
+            cap_str(s, " bps="); cap_dec(s, s->vtx_last_bps);
+            cap_str(s, " pk="); cap_dec(s, s->vw_pk);
+            cap_str(s, " au="); cap_dec(s, s->vw_au);
+            cap_str(s, " idr="); cap_dec(s, s->vw_idr);
+            cap_str(s, " drop="); cap_dec(s, s->vw_drop);
+            cap_str(s, " pli="); cap_dec(s, s->pli_n + s->fir_n);
+            cap_str(s, " nack="); cap_dec(s, s->nack_n);
+            cap_str(s, " twcc="); cap_dec(s, s->twcc_n);
+            cap_str(s, " rr_frac="); cap_dec(s, s->rr_have ? s->rr_fraction : 0);
+            cap_str(s, " rr_lost="); cap_dec(s, s->rr_have ? s->rr_lost : 0);
+            cap_ch(s, '\n');
+        }
+        s->vw_start = now; s->vw_au = s->vw_pk = s->vw_oct = s->vw_idr = s->vw_drop = 0;
+    }
+}
+
 /* ---------------------------------------------------------------- receive */
 
 static void cb_sig(void *user, int type, const u8 *body, u32 blen)
@@ -242,8 +445,14 @@ static void cb_tr(void *user, int type, const u8 *body, u32 blen)
     c277_session *s = (c277_session *)user;
     c277_rtp_hdr h;
     cap_msg(s, 1, type, body, blen);
+    if (type == C277_MSG_VIDEO) {
+        if (c277_rtp_is_rtcp(body, blen)) peer_rtcp(s, body, blen);
+        else peer_video_rtp(s, body, blen);
+        return;
+    }
+    if (type == C277_MSG_REQUESTVIDEO) { s->req_video_n++; return; }
     if (type == C277_MSG_AUDIO) {
-        if (c277_rtp_is_rtcp(body, blen)) return;
+        if (c277_rtp_is_rtcp(body, blen)) { peer_rtcp(s, body, blen); return; }
         if (c277_rtp_parse(body, blen, &h) < 0 || h.pt != C277_RTP_PT || h.plen == 0) return;
         s->n_rtp_rx++;
         s->audio_seen = 1;
@@ -253,6 +462,7 @@ static void cb_tr(void *user, int type, const u8 *body, u32 blen)
         int a, v;
         c277_msg_media_state_parse(body[0], &a, &v);
         s->peer_audio = a == 1;
+        s->peer_vid = v;
         if (s->cap_on) {
             cap_str(s, "t="); cap_dec(s, s->cur_now);
             cap_str(s, " RemoteMediaState audio="); cap_dec(s, (u32)a);
@@ -342,13 +552,13 @@ int c277_session_tick(c277_session *s, u32 now)
         if (k > 0 && push_wrapped(s, peer, s->tmp, (u32)k) == 0) s->media_state_sent = 1;
     }
     /* 5b. video capture reply: our VideoFormats (signalling), then RemoteMediaState video=0 */
-    if (s->vid_on && s->vf_reply && !s->vf_sent && have_room(s)) {
-        u8 vf[96];
+    if ((s->vid_on || s->vid_want) && s->vf_reply && !s->vf_sent && have_room(s)) {
+        u8 vf[128];       /* the message is 100 bytes */
         u32 vl = build_videoformats(vf);
         it = push(s, C277_OUT_SIGNAL);
         k = c277_conn_build(&s->sig, now, C277_MSG_VIDEOFORMATS, vf, vl, 1, it->data, C277_OUT_MAX);
         if (k > 0) {
-            it->len = (u32)k; s->vf_sent = 1; s->ms_resend = 1;
+            it->len = (u32)k; s->vf_sent = 1; s->ms_resend = !s->vid_want; s->vf_at = now ? now : 1;
             if (s->cap_on) { cap_str(s, "t="); cap_dec(s, now); cap_str(s, " sent our VideoFormats H264\n"); }
         } else s->out.n--;
     }
@@ -360,6 +570,7 @@ int c277_session_tick(c277_session *s, u32 now)
             if (s->cap_on) { cap_str(s, "t="); cap_dec(s, now); cap_str(s, " sent RemoteMediaState video=0\n"); }
         }
     }
+    video_tick(s, now);
     cap_sum_flush(s, now);
     /* 6. transport acks / resends */
     if (have_room(s) && c277_ice_peer_tag(&s->ice, &peer)) {

@@ -113,3 +113,15 @@ Total ~1,100-1,300 lines native + ~250 Python, ~2x the stage-1-5 effort of a typ
 6. Mode-switch glitches: camera open/close while a hardware decoder is active; UID/memory constraints of tgvideo.exe (see N79 UID registry, RetroTele owns E0-EF).
 7. The `video` flag/TL layer details in requestCall/PhoneCallRequested are UNVERIFIED against our TL layer in tgclient.py.
 8. The tgcalls pin is a 2026-10-27 snapshot; real peers on other builds might differ. Real servers were not observed by me.
+
+## 7. Implemented in 0.14.0: send-only video (what the 2026-11-23 capture settled)
+
+Capture facts (official app, plain RTP inside AES-CTR transport message id 6): PT 96 for the single common H264 format (we offer only `42e01f`, packetization-mode 1, level-asymmetry-allowed 1, which is in the peer's list), SSRC 3 for the callee and 4 for the caller (same split as audio 1/2), one-byte header extension id 2 (transport-cc seq, 2 bytes + 1 pad), STAP-A(SPS,PPS) then FU-A, marker on the last packet, RTCP SR (pt 200, 44 bytes with SDES CNAME "cname") about once a second and an empty RR for the audio SSRC, all in message id 6. The peer sent High 528x960 L3.1 first and 352x640 L2.2 in a second call (it downsizes; logged as `peerSPS`).
+
+Data path: `tgvideo.exe` (camera + SW encoder 0x20001c13 + loopback decoder 0x102073ef for the self-view) sends every encoder unit as one UDP datagram `'V'+Annex-B` to `127.0.0.1:47014` (command `E 1`); `tgcallaudio.exe` packetizes natively (`native/call277/c277_video.c`: single NAL <= 1000 bytes, STAP-A SPS+PPS before each IDR, FU-A otherwise) and sends through the session. UDP was chosen over a shared chunk because units arrive as events in the helper's active scheduler (no polling, no seqlock), at 15 fps / ~60 kbit/s the load is below 40 KB/s, and the rest of the helper chain already uses localhost UDP. IDR requests go back as `K` to `127.0.0.1:47012` on PLI/FIR and on an early schedule (0.3, 1.5, 3.5, 6.5, 10 s after video starts). Python only sends `V1`/`V0` (CallAudio.set_video) and drives tgvideo.exe (`pys60/callvideo.py`).
+
+Signalling when the user turns video on: VideoFormats (if not already sent) on the signalling channel, then (after it is acked, or 1.5 s) VideoParameters(1222) and RemoteMediaState{audio=1, video=2} on the transport channel; off sends video=0. The peer's RequestVideo is shown as "Peer asks for video (press 4)"; the camera never starts by itself.
+
+Log (when `E:\retrotele_videocap.flag` exists): `retrotele_callvideo.txt` gets `peerSPS profile= level= size=WxH` for every peer SPS (repeats throttled to one per 10 s), once per second `vtx fps10= bps= pk= au= idr= drop= pli= nack= twcc= rr_frac= rr_lost=`, `video send ON/OFF`; `retrotele_callaudio.txt` gets a `v ...` line per second whenever video was used in the call. No keys or peer addresses are logged.
+
+Not done / known gaps: no transport-cc feedback and no NACK retransmission history (we only count them), no rotation (`VIDEO_ROTATION_DEG` in callvideo.py is carried to tgvideo.exe but only 0 is implemented), nothing is shown of the peer's video.

@@ -643,6 +643,140 @@ static void test_sim(void)
     sim_world(5, 60, 20, 5);     /* loss + reorder + lossy signalling */
 }
 
+
+/* ------------------------------------------------------- video send (two sessions) */
+
+static void inject(world *w, int from, u32 now, int type, const u8 *body, u32 blen, int reliable)
+{
+    c277_session *s = w->s[from];
+    u8 pk[C277_OUT_MAX], o[C277_OUT_MAX];
+    u32 peer = 0;
+    int k, k2;
+    k = c277_conn_build(&s->tr, now, type, body, blen, reliable, pk, sizeof(pk));
+    CHECK(k > 0 && c277_ice_peer_tag(&s->ice, &peer));
+    k2 = c277_refl_wrap(s->tag16, peer, s->own_rt, pk, (u32)k, o, sizeof(o));
+    CHECK(k2 > 0);
+    refl_in(&w->m, now, from, o, (u32)k2);
+}
+
+static u32 vunit(u8 *o, int idr, u32 body, int ps)
+{
+    static const u8 sps[] = { 0x67, 0x42, 0x80, 0x0a, 0xda, 0x0b, 0x13, 0x90 };
+    static const u8 pps[] = { 0x68, 0xce, 0x3c, 0x80 };
+    u32 n = 0, i;
+    if (ps) {
+        o[n++] = 0; o[n++] = 0; o[n++] = 0; o[n++] = 1; memcpy(o + n, sps, sizeof(sps)); n += sizeof(sps);
+        o[n++] = 0; o[n++] = 0; o[n++] = 0; o[n++] = 1; memcpy(o + n, pps, sizeof(pps)); n += sizeof(pps);
+    }
+    o[n++] = 0; o[n++] = 0; o[n++] = 0; o[n++] = 1;
+    o[n++] = (u8)(idr ? 0x65 : 0x41);
+    for (i = 1; i < body; i++) o[n++] = (u8)(1 + (i * 13) % 250);
+    return n;
+}
+
+static void test_video_sim(int loss)
+{
+    world *w = (world *)calloc(1, sizeof(world));
+    u8 key[256], rn[2][C277_SESS_RANDOM], unit[8000];
+    char cap[C277_CAP_MAX + 1];
+    c277_sess_conn cs[2];
+    u32 now, frames = 0, tot = 0, capn;
+    int k, want_idr = 1, first_p_dropped = 0, pli_seen = 0, was_active = 0, peer2 = 0, idr_reqs = 0;
+    u32 next_frame = 0;
+    char *txt;
+
+    w->s[0] = (c277_session *)malloc(sizeof(c277_session));
+    w->s[1] = (c277_session *)malloc(sizeof(c277_session));
+    w->m.loss = loss; w->sig_loss = 0;
+    data(key, 256, 29, 7);
+    for (k = 0; k < 2; k++) { u32 i; for (i = 0; i < C277_SESS_RANDOM; i++) rn[k][i] = (u8)rnd(); }
+    memset(cs, 0, sizeof(cs));
+    cs[0].id.lo = 50; cs[0].ip = 0x5B6C1108UL; cs[0].port = 597; cs[0].tcp = 1;
+    cs[1].id.lo = 99; cs[1].ip = 0x5B6C1108UL; cs[1].port = 598;
+    for (k = 0; k < 16; k++) { cs[0].peer_tag[k] = (u8)(0x30 + k); cs[1].peer_tag[k] = (u8)(0x60 + k); }
+    {
+        c277_sess_conn a[2], b[2];
+        memcpy(a, cs, sizeof(cs)); memcpy(b, cs, sizeof(cs));
+        a[1].peer_tag[0] = 0x00; b[1].peer_tag[0] = 0x01;
+        CHECK(c277_session_init(w->s[0], key, 1, a, 2, rn[0], C277_SESS_RANDOM) == C277_SESS_OK);
+        CHECK(c277_session_init(w->s[1], key, 0, b, 2, rn[1], C277_SESS_RANDOM) == C277_SESS_OK);
+    }
+    CHECK(w->s[0]->vtx.ssrc == 4 && w->s[1]->vtx.ssrc == 3);          /* caller 4, callee 3 */
+    c277_session_capture(w->s[1], 1, 0);                              /* the receiver logs (no auto reply) */
+    c277_session_capture(w->s[0], 1, 0);
+    c277_session_set_wall(w->s[0], 1790000000UL, 1000);
+    for (now = 1000; now < 26000; now += 20) {
+        int who;
+        for (who = 0; who < 2; who++) {
+            c277_session *s = w->s[who];
+            c277_session_tick(s, now);
+            drain(w, who, now);
+        }
+        if (now == 6000) {
+            CHECK(!c277_session_video_active(w->s[0]));
+            c277_session_video_enable(w->s[0], 1);
+            /* nothing is sent before the announcement */
+            CHECK(c277_session_video_put(w->s[0], unit, vunit(unit, 1, 500, 1), now) == C277_VTX_DROPPED);
+            next_frame = now + 200;
+        }
+        if (now == 16000) {                     /* the peer asks for a keyframe, and asks for video */
+            u8 pli[12];
+            CHECK(c277_rtcp_build_pli(pli, 12, 3, 4) == 12);
+            c277_session_take_idr_req(w->s[0]);
+            inject(w, 1, now, C277_MSG_VIDEO, pli, 12, 0);
+            inject(w, 1, now, C277_MSG_REQUESTVIDEO, pli, 0, 1);
+        }
+        if (now == 22000) c277_session_video_enable(w->s[0], 0);
+        if (c277_session_video_active(w->s[0])) {
+            was_active = 1;
+            if (c277_session_take_idr_req(w->s[0])) { want_idr = 1; idr_reqs++; }
+            if (now >= next_frame && now < 22000) {
+                u32 un;
+                int r;
+                if (frames == 0 && !first_p_dropped) {      /* P frame before the first IDR: dropped, IDR requested */
+                    un = vunit(unit, 0, 300, 0);
+                    CHECK(c277_session_video_put(w->s[0], unit, un, now) == C277_VTX_DROPPED);
+                    first_p_dropped = 1;
+                }
+                un = vunit(unit, want_idr, want_idr ? 3000 : 400, want_idr);
+                r = c277_session_video_put(w->s[0], unit, un, now);
+                CHECK(r == C277_VTX_QUEUED);
+                want_idr = 0; frames++;
+                while (c277_session_video_pump(w->s[0], now)) { drain(w, 0, now); world_deliver(w, now); }
+                drain(w, 0, now);
+                next_frame += 66;
+            }
+        }
+        world_deliver(w, now);
+        if (w->s[1]->peer_vid == 2) peer2 = 1;
+        if (w->s[0]->pli_n > 0) pli_seen = 1;
+    }
+    tot = w->s[0]->vtx.n_pk;
+    capn = c277_session_cap_take(w->s[1], cap, C277_CAP_MAX); cap[capn] = 0; txt = cap;
+    printf("video sim loss=%d%%: %u frames, %u packets sent, %u received, idr %u, pli seen %u, idr requests %d\n",
+           loss, frames, tot, w->s[1]->n_peer_vrtp, w->s[0]->vtx.n_idr, w->s[0]->pli_n, idr_reqs);
+    CHECK(was_active && peer2);                                       /* RemoteMediaState video=Active reached the peer */
+    CHECK(w->s[1]->peer_vid == 0);                                    /* and Inactive after we switched off */
+    CHECK(!c277_session_video_active(w->s[0]));
+    CHECK(frames > 150 && tot > frames);
+    CHECK(w->s[0]->vtx.n_idr >= 5);                                   /* first + scheduled / requested IDRs */
+    CHECK(pli_seen && w->s[0]->pli_n == 1 && w->s[0]->req_video_n == 1);
+    CHECK(idr_reqs >= 5);                                             /* early schedule fired and the PLI took one */
+    if (loss == 0) CHECK(w->s[1]->n_peer_vrtp == tot);
+    else CHECK(w->s[1]->n_peer_vrtp >= tot - tot * (u32)loss / 50);
+    CHECK(strstr(txt, "peerSPS profile=66 level=10 size=176x144") != 0);
+    CHECK(strstr(txt, "RTCP pt=200") != 0);                           /* our sender reports arrive */
+    CHECK(strstr(txt, "RemoteMediaState audio=1 video=2") != 0);
+    CHECK(w->s[1]->n_sps_log >= 1 && w->s[1]->n_sps_log <= 3);        /* repeats are throttled */
+    capn = c277_session_cap_take(w->s[0], cap, C277_CAP_MAX); cap[capn] = 0;
+    CHECK(strstr(cap, " vtx fps10=") != 0 && strstr(cap, "video send ON") != 0 &&
+          strstr(cap, "video send OFF") != 0);
+    CHECK(w->s[0]->vtx_last_fps > 0 || frames > 0);
+    /* nothing about keys or addresses in the log */
+    CHECK(strstr(cap, "key") == 0);
+    free(w->s[0]); free(w->s[1]); free(w);
+}
+
 static void test_misc(void)
 {
     c277_session *s = (c277_session *)malloc(sizeof(*s));
@@ -678,6 +812,8 @@ int main(int argc, char **argv)
     test_ice_pair();
     test_capture();
     test_sim();
+    test_video_sim(0);
+    test_video_sim(4);
     test_misc();
     printf("%d checks, %d failed\n", g_n, g_fail);
     return g_fail ? 1 : 0;
