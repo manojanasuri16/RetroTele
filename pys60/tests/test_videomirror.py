@@ -64,7 +64,7 @@ class FakeImage:
     def text(self, pos, s, fill=0): self.texts.append(s)
 
 mod("graphics", Image=FakeImage)
-mod("key_codes", EKey1=49, EKey2=50, EKey3=51, EKey4=52, EKey5=53, EKeyHash=127, EKeySelect=167)
+mod("key_codes", EKey1=49, EKey2=50, EKey3=51, EKey4=52, EKey5=53, EKey6=54, EKeyHash=127, EKeySelect=167)
 
 
 class FakeSock:
@@ -76,7 +76,7 @@ class FakeSock:
 mod("socket", AF_INET=2, SOCK_DGRAM=2, socket=FakeSock)
 
 # header words: see TGV_W_* in native/tgvideo/tgvshared.h
-HDR = [0x54475646, 1, 2, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+HDR = [0x54475646, 1, 2, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 RENDERS = []
 
 
@@ -148,6 +148,21 @@ m.canvas.keys[167]()
 # status datagram handling
 m.sock.cb(("T 1 0 176 144 150 150 150 100 2000 0 0 1 1", ("127.0.0.1", 47011)))
 assert m.status_line.startswith("T 1")
+# decoder blocked: one automatic D, then the message after the sweep
+del SENT[:]
+HDR[26] = 1
+m.on_tick(); m.on_tick()
+assert [x[0] for x in SENT].count("D") == 1, SENT
+HDR[2] = 5
+m.on_tick()
+assert m.msg.startswith(u"Diagnostic"), m.msg
+HDR[2] = 1; HDR[27] = 2
+m.on_tick()
+assert m.msg == u"decoder blocked while camera runs", m.msg
+m.canvas.keys[54]()
+assert SENT[-1][0] == "D"
+HDR[26] = 0; HDR[27] = 0
+m.on_tick()
 # helper error state shows a message
 HDR[2] = 3
 m.on_tick()

@@ -26,7 +26,7 @@
 enum {
     TGV_W_MAGIC = 0,
     TGV_W_VERSION,
-    TGV_W_STATE,        /* 0 starting, 1 running, 2 paused/idle, 3 error, 4 quitting */
+    TGV_W_STATE,        /* 0 starting, 1 running, 2 idle, 3 error, 4 quitting, 5 order sweep */
     TGV_W_DEC_SEQ,
     TGV_W_DEC_COUNT,    /* decoded pictures put into the chunk */
     TGV_W_DEC_W,
@@ -49,6 +49,9 @@ enum {
     TGV_W_ENC_OK,
     TGV_W_DEC_OK,
     TGV_W_KEYS,         /* IDR units seen */
+    TGV_W_ORDER,        /* start order in use + 1 (0 = default, not tested): 1 camera first, 2 decoder first, 3 decoder first + viewfinder */
+    TGV_W_BLOCKED,      /* 1 = decoder unavailable while the camera runs */
+    TGV_W_SWEEP,        /* 0 never run, 1 order sweep running, 2 done */
     TGV_W_COUNT
 };
 

@@ -9,7 +9,8 @@
 #
 # Keys: 1 rear/front camera, 2 size 176x144 <-> 320x240, 3 fps 10/15/20,
 #       4 bitrate 64/128/256, # keyframe, centre pause/resume,
-#       5 colour flags (debug: swap U/V, swap 4:2:2 byte order), Back = exit.
+#       6 decoder order sweep (diagnostic, about 1 minute, also started once automatically
+#       when the decoder is blocked), 5 colour flags (debug: swap U/V, swap 4:2:2 byte order), Back = exit.
 import sys
 import os
 import types
@@ -50,6 +51,10 @@ I_ERRORS = 20
 I_DROPS = 21
 I_ENC_OK = 22
 I_DEC_OK = 23
+I_ORDER = 25
+I_BLOCKED = 26
+I_SWEEP = 27
+S_SWEEPING = 5
 
 _LOGPATH = [None]
 
@@ -119,6 +124,7 @@ class Mirror:
         self.lock = e32.Ao_lock()
         self.canvas = None
         self.screen = None
+        self.auto_d = 0
         self.dec_rc = 0
         self.prev_rc = 0
 
@@ -239,6 +245,7 @@ class Mirror:
         c.bind(key_codes.EKey3, self.key_fps)
         c.bind(key_codes.EKey4, self.key_rate)
         c.bind(key_codes.EKey5, self.key_flags)
+        c.bind(key_codes.EKey6, self.key_sweep)
         c.bind(key_codes.EKeyHash, self.key_keyframe)
         c.bind(key_codes.EKeySelect, self.key_pause)
 
@@ -272,6 +279,11 @@ class Mirror:
         self.flags = (self.flags + 1) % 4
         log("key: render flags -> %d" % self.flags)
         self.last_dec = -1
+        self.dirty = 1
+
+    def key_sweep(self):
+        log("key: order sweep (D)")
+        self.send("D")
         self.dirty = 1
 
     def key_keyframe(self):
@@ -347,9 +359,17 @@ class Mirror:
         # the helper listens once its state is 2 (idle): send S then (and again if it stays idle)
         if st == 2 and (not self.sent_s or self.tick_no - self.sent_s_tick > 140):
             self.send_start()
-        if st == 3:
+        if len(inf) > I_SWEEP and inf[I_BLOCKED] == 1 and inf[I_SWEEP] == 0 and not self.auto_d:
+            self.auto_d = 1
+            log("decoder blocked (-44): starting the order sweep once")
+            self.send("D")
+        if st == S_SWEEPING:
+            self.msg = u"Diagnostic sweep running (about 1 min)..."
+        elif st == 3:
             self.msg = u"Helper error: camera/codec failed (see log)"
-        elif self.msg[:6] == u"Helper":
+        elif len(inf) > I_SWEEP and inf[I_BLOCKED] == 1 and inf[I_SWEEP] == 2:
+            self.msg = u"decoder blocked while camera runs"
+        elif self.msg[:6] == u"Helper" or self.msg[:10] == u"Diagnostic" or self.msg[:7] == u"decoder":
             self.msg = u""
         if not self.paused:
             self.draw_frames(inf)

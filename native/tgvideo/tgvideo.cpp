@@ -11,6 +11,8 @@
  *   S w h fps kbps cam   (re)start the pipeline
  *   C n                  switch to camera n, keep encoder/decoder, force a keyframe
  *   K                    request a keyframe
+ *   D                    diagnostic ORDER SWEEP: which start orders let the decoder run while
+ *                        the camera captures (log lines "order N: ..."), then restart
  *   Q                    quit
  * Status lines "T state cam w h capfps10 encfps10 decfps10 lat bps err drops enc dec"
  * go to 127.0.0.1:47011 once per second.
@@ -31,6 +33,7 @@
 #include <mmf/devvideo/devvideoplay.h>
 #include <mmf/devvideo/devvideorecord.h>
 #include "tgvshared.h"
+#include "clip_data.h"
 
 // ---------------------------------------------------------------- log
 static RFs gFs;
@@ -262,6 +265,10 @@ static TInt LatFind(TInt64 aTs)
 }
 
 // ---------------------------------------------------------------- decoder
+struct TDecOpt { TInt iUid, iOutPick, iPostProc, iSync, iBoost; };
+static TDecOpt gDecOpt = { 0x10204bfc, -1, 0, 0, 0 };
+static TInt gEncToDec = 1;          // encoder output goes to the decoder (not in the clip tests)
+
 class CDec : public CBase, public MMMFDevVideoPlayObserver
 {
 public:
@@ -280,10 +287,11 @@ public:
         iFirst = 0; iPattern = 0; iLayout = 0; iStarted = EFalse;
         Log(_L8("step dec: CMMFDevVideoPlay::NewL"));
         iPlay = CMMFDevVideoPlay::NewL(*this);
-        Log(_L8("step dec: SelectDecoderL 0x10204bfc"));
-        iDev = iPlay->SelectDecoderL(TUid::Uid(0x10204bfc));
+        const TUid duid = TUid::Uid(gDecOpt.iUid);
+        Log(_L8("step dec: SelectDecoderL 0x%08x"), duid.iUid);
+        iDev = iPlay->SelectDecoderL(duid);
         Log(_L8("step dec: VideoDecoderInfoLC"));
-        CVideoDecoderInfo* info = iPlay->VideoDecoderInfoLC(TUid::Uid(0x10204bfc));
+        CVideoDecoderInfo* info = iPlay->VideoDecoderInfoLC(duid);
         TInt need = NeedLevel(aSz.iWidth, aSz.iHeight, aFps);
         CCompressedVideoFormat* cf = PickFormat(info->SupportedFormats(), need);
         if (!cf) User::Leave(KErrNotSupported);
@@ -299,14 +307,18 @@ public:
         CleanupClosePushL(of);
         iPlay->GetOutputFormatListL(iDev, of);
         TInt pick = -1;
+        TInt yuvSeen = 0;
         for (TInt i = 0; i < of.Count(); i++) {
             if (of[i].iDataFormat == EYuvRawData) {
                 Log(_L8("  dec output[%d] yuv coeff=%d pattern=%d layout=%d"), i, (TInt)of[i].iYuvFormat.iCoefficients,
                     (TInt)of[i].iYuvFormat.iPattern, (TInt)of[i].iYuvFormat.iDataLayout);
                 TInt pat = (TInt)of[i].iYuvFormat.iPattern, lay = (TInt)of[i].iYuvFormat.iDataLayout;
-                if (pick < 0 && (lay == EYuvDataPlanar || lay == EYuvDataInterleavedLE ||
+                if (gDecOpt.iOutPick >= 0) {
+                    if (yuvSeen == gDecOpt.iOutPick) pick = i;
+                } else if (pick < 0 && (lay == EYuvDataPlanar || lay == EYuvDataInterleavedLE ||
                                  lay == EYuvDataInterleavedBE || lay == EYuvDataSemiPlanar) && pat != 0)
                     pick = i;
+                yuvSeen++;
             } else {
                 Log(_L8("  dec output[%d] datafmt=0x%x rgb=0x%x"), i, (TInt)of[i].iDataFormat, (TInt)of[i].iRgbFormat);
             }
@@ -321,10 +333,16 @@ public:
         CleanupStack::PopAndDestroy(&of);
         HSet(TGV_W_DEC_PATTERN, iPattern);
         HSet(TGV_W_DEC_LAYOUT, iLayout);
+        if (gDecOpt.iPostProc) {
+            Log(_L8("step dec: SetPostProcessTypesL(0)"));
+            TRAPD(e0, iPlay->SetPostProcessTypesL(iDev, 0));
+            Log(_L8("dec SetPostProcessTypesL err=%d"), e0);
+        }
         Log(_L8("step dec: SetVideoDestScreenL(false)"));
         TRAPD(e1, iPlay->SetVideoDestScreenL(EFalse));
         Log(_L8("dec SetVideoDestScreenL err=%d"), e1);
-        iPlay->SynchronizeDecoding(EFalse);
+        iPlay->SynchronizeDecoding(gDecOpt.iSync ? ETrue : EFalse);
+        if (gDecOpt.iBoost) { Log(_L8("dec: thread priority more (no SetPlaybackPriority in this SDK)")); RThread().SetPriority(EPriorityMore); }
         CMMFDevVideoPlay::TBufferOptions bo;
         iPlay->GetBufferOptions(bo);
         if (bo.iMaxInputBufferSize < 0x10000) bo.iMaxInputBufferSize = 0x10000;
@@ -575,7 +593,7 @@ public:
                     (TInt)idr, (TInt)sps, (TInt)pps);
             if (vcl) gSt.iEnc++;
             if (idr) { gSt.iKeys++; HSet(TGV_W_KEYS, gSt.iKeys); }
-            if (gDecoder) gDecoder->Write(b->iData, b->iCaptureTimestamp.Int64());
+            if (gDecoder && gEncToDec) gDecoder->Write(b->iData, b->iCaptureTimestamp.Int64());
             iRec->ReturnBuffer(b);
         }
     }
@@ -594,7 +612,10 @@ public:
     TInt iIdx, iW, iH, iSIdx, iRIdx, iRate100;
     TBool iCapturing, iPoweredOn, iIsReserved;
     TInt iLastTs;
+    TBool iVf;
+    TUint8* iYuv;
 
+    CCam() { iVf = EFalse; iYuv = NULL; }
     ~CCam() { Close(); }
 
     // Reserve + PowerOn + size/rate choice. aW/aH: wanted size (exact, else the largest smaller one).
@@ -672,9 +693,48 @@ public:
         return KErrNone;
     }
 
+    // viewfinder bitmap mode (instead of video capture): frames converted to YUV420 in software
+    TInt BeginViewFinder()
+    {
+        iYuv = (TUint8*)User::Alloc(iW * iH * 3 / 2);
+        if (!iYuv) return KErrNoMemory;
+        TSize vs(iW, iH);
+        Log(_L8("step cam%d: StartViewFinderBitmapsL %dx%d"), iIdx, iW, iH);
+        TRAPD(ve, iCam->StartViewFinderBitmapsL(vs));
+        Log(_L8("cam%d StartViewFinderBitmapsL err=%d (size %dx%d)"), iIdx, ve, vs.iWidth, vs.iHeight);
+        if (ve) return ve;
+        iVf = ETrue;
+        iCapturing = ETrue;
+        return KErrNone;
+    }
+
+    // one YUV420 planar frame of iW x iH: preview copy + encoder
+    void Deliver(const TUint8* aYuv, TInt aLen)
+    {
+        TInt need = iW * iH * 3 / 2;
+        if (aLen >= need && H) {
+            H[TGV_W_PREV_SEQ]++;
+            Mem::Copy(gPrev, aYuv, need);
+            H[TGV_W_PREV_W] = iW;
+            H[TGV_W_PREV_H] = iH;
+            H[TGV_W_CAM] = iIdx;
+            H[TGV_W_PREV_SEQ]++;
+            H[TGV_W_PREV_COUNT]++;
+            if (gEncoder) {
+                TInt64 ts = gEncoder->TsNowUs();
+                LatNote(ts, NowMs());
+                gEncoder->Offer(aYuv, aLen, ts);
+            }
+        } else if (Err() <= 5) {
+            Log(_L8("cam frame bad length %d (need %d)"), aLen, need);
+        }
+    }
+
     void Close()
     {
         if (!iCam) return;
+        if (iVf) { Log(_L8("step cam%d: StopViewFinder"), iIdx); iCam->StopViewFinder(); iVf = EFalse; iCapturing = EFalse; }
+        User::Free(iYuv); iYuv = NULL;
         if (iCapturing) { Log(_L8("step cam%d: StopVideoCapture"), iIdx); iCam->StopVideoCapture(); iCapturing = EFalse; }
         if (iPoweredOn) { Log(_L8("step cam%d: PowerOff"), iIdx); iCam->PowerOff(); iPoweredOn = EFalse; }
         if (iIsReserved) { Log(_L8("step cam%d: Release"), iIdx); iCam->Release(); iIsReserved = EFalse; }
@@ -685,7 +745,46 @@ public:
     // MCameraObserver
     void ReserveComplete(TInt aErr) { iReserveErr = aErr; iReserved = 1; }
     void PowerOnComplete(TInt aErr) { iPowerErr = aErr; iPowered = 1; }
-    void ViewFinderFrameReady(CFbsBitmap&) {}
+    void ViewFinderFrameReady(CFbsBitmap& aB)
+    {
+        if (!iVf || !iYuv) return;
+        gSt.iCap++;
+        TSize bs = aB.SizeInPixels();
+        TDisplayMode dm = aB.DisplayMode();
+        if (bs.iWidth < iW || bs.iHeight < iH || (dm != EColor64K && dm != EColor16MU && dm != EColor16MA)) {
+            if (Err() <= 3) Log(_L8("viewfinder bitmap %dx%d mode %d unusable"), bs.iWidth, bs.iHeight, (TInt)dm);
+            return;
+        }
+        TInt stride = CFbsBitmap::ScanLineLength(bs.iWidth, dm);
+        aB.LockHeap();
+        const TUint8* src = (const TUint8*)aB.DataAddress();
+        TUint8* yp = iYuv;
+        TUint8* up = iYuv + iW * iH;
+        TUint8* vp = up + (iW / 2) * (iH / 2);
+        for (TInt y = 0; y < iH; y++) {
+            const TUint8* row = src + y * stride;
+            for (TInt x = 0; x < iW; x++) {
+                TInt r, g, b;
+                if (dm == EColor64K) {
+                    TUint v = ((const TUint16*)row)[x];
+                    r = (v >> 8) & 0xF8; g = (v >> 3) & 0xFC; b = (v << 3) & 0xF8;
+                } else {
+                    const TUint8* px = row + x * 4;
+                    b = px[0]; g = px[1]; r = px[2];
+                }
+                *yp++ = (TUint8)((((66 * r + 129 * g + 25 * b + 128) >> 8)) + 16);
+                if (((x | y) & 1) == 0) {
+                    TInt u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+                    TInt vv = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+                    TInt ci = (y / 2) * (iW / 2) + x / 2;
+                    up[ci] = (TUint8)(u < 0 ? 0 : (u > 255 ? 255 : u));
+                    vp[ci] = (TUint8)(vv < 0 ? 0 : (vv > 255 ? 255 : vv));
+                }
+            }
+        }
+        aB.UnlockHeap();
+        Deliver(iYuv, iW * iH * 3 / 2);
+    }
     void ImageReady(CFbsBitmap* aB, HBufC8* aD, TInt) { delete aB; delete aD; }
     void FrameBufferReady(MFrameBuffer* aB, TInt aErr)
     {
@@ -695,24 +794,7 @@ public:
         TDesC8* d = NULL;
         TRAPD(err, d = aB->DataL(0));
         if (err || !d) { Err(); aB->Release(); return; }
-        TInt need = iW * iH * 3 / 2;
-        if (d->Length() >= need && H) {
-            // preview copy (fast path)
-            H[TGV_W_PREV_SEQ]++;
-            Mem::Copy(gPrev, d->Ptr(), need);
-            H[TGV_W_PREV_W] = iW;
-            H[TGV_W_PREV_H] = iH;
-            H[TGV_W_CAM] = iIdx;
-            H[TGV_W_PREV_SEQ]++;
-            H[TGV_W_PREV_COUNT]++;
-            if (gEncoder) {
-                TInt64 ts = gEncoder->TsNowUs();
-                LatNote(ts, NowMs());
-                gEncoder->Offer(d->Ptr(), d->Length(), ts);
-            }
-        } else if (Err() <= 5) {
-            Log(_L8("cam frame bad length %d (need %d)"), d->Length(), need);
-        }
+        Deliver(d->Ptr(), d->Length());
         aB->Release();
     }
 };
@@ -740,28 +822,51 @@ static void ResetStats()
     HSet(TGV_W_DEC_FPS, 0); HSet(TGV_W_LAT_MS, 0); HSet(TGV_W_BPS, 0); HSet(TGV_W_KEYS, 0);
 }
 
-// Builds encoder + decoder for the camera's size (aCam is open, not capturing yet).
+static TInt gOrder = 0;      // start order: 0 camera opened first (as before), 1 decoder first, 2 decoder first + viewfinder
+
+static TInt BuildDec(TSize sz)
+{
+    delete gDecoder; gDecoder = NULL;
+    HSet(TGV_W_DEC_OK, 0);
+    CDec* d = new CDec;
+    if (!d) return KErrNoMemory;
+    gDecoder = d;
+    TRAPD(de, d->SetupL(sz, gFps));
+    Log(_L8("dec setup err=%d"), de);
+    if (de) {
+        Err();
+        delete gDecoder; gDecoder = NULL;
+        if (de == KErrHardwareNotAvailable) { HSet(TGV_W_BLOCKED, 1); Log(_L8("decoder unavailable while capturing (-44)")); }
+    } else {
+        HSet(TGV_W_DEC_OK, 1);
+        HSet(TGV_W_BLOCKED, 0);
+    }
+    return de;
+}
+
+static TInt BuildEnc(TSize sz)
+{
+    delete gEncoder; gEncoder = NULL;
+    HSet(TGV_W_ENC_OK, 0);
+    CEnc* e = new CEnc;
+    if (!e) return KErrNoMemory;
+    gEncoder = e;
+    TRAPD(ee, e->StartL(sz, gFps, gKbps));
+    Log(_L8("enc start err=%d"), ee);
+    if (ee) { Err(); delete gEncoder; gEncoder = NULL; } else HSet(TGV_W_ENC_OK, 1);
+    return ee;
+}
+
 static void BuildCodecs()
 {
     TSize sz(gW, gHt);
-    delete gEncoder; gEncoder = NULL;
-    delete gDecoder; gDecoder = NULL;
-    HSet(TGV_W_ENC_OK, 0);
-    HSet(TGV_W_DEC_OK, 0);
-    CDec* d = new CDec;
-    if (d) {
-        gDecoder = d;
-        TRAPD(de, d->SetupL(sz, gFps));
-        Log(_L8("dec setup err=%d"), de);
-        if (de) { Err(); delete gDecoder; gDecoder = NULL; } else HSet(TGV_W_DEC_OK, 1);
-    }
-    CEnc* e = new CEnc;
-    if (e) {
-        gEncoder = e;
-        TRAPD(ee, e->StartL(sz, gFps, gKbps));
-        Log(_L8("enc start err=%d"), ee);
-        if (ee) { Err(); delete gEncoder; gEncoder = NULL; } else HSet(TGV_W_ENC_OK, 1);
-    }
+    BuildDec(sz);
+    BuildEnc(sz);
+}
+
+static TInt BeginCam(CCam* c)
+{
+    return gOrder == 2 ? c->BeginViewFinder() : c->Begin();
 }
 
 static void StartPipeline(TInt aW, TInt aH, TInt aFps, TInt aKbps, TInt aCam)
@@ -774,8 +879,11 @@ static void StartPipeline(TInt aW, TInt aH, TInt aFps, TInt aKbps, TInt aCam)
     if (aCam < 0 || aCam > 1) aCam = 0;
     gW = aW; gHt = aH; gFps = aFps; gKbps = aKbps; gCamIdx = aCam;
     HSet(TGV_W_STATE, 0);
+    HSet(TGV_W_ORDER, gOrder + 1);
     ResetStats();
-    Log(_L8("pipeline start: %dx%d@%d %d kbit/s cam %d"), gW, gHt, gFps, gKbps, gCamIdx);
+    gEncToDec = 1;
+    Log(_L8("pipeline start: %dx%d@%d %d kbit/s cam %d order %d"), gW, gHt, gFps, gKbps, gCamIdx, gOrder);
+    if (gOrder > 0) BuildDec(TSize(gW, gHt));       // decoder before the camera is touched
     CCam* c = new CCam;
     if (!c) { Err(); return; }
     gCam = c;
@@ -787,10 +895,11 @@ static void StartPipeline(TInt aW, TInt aH, TInt aFps, TInt aKbps, TInt aCam)
         delete gCam; gCam = NULL;
         return;
     }
+    TBool sizeChanged = (c->iW != gW || c->iH != gHt);
     gW = c->iW; gHt = c->iH;
     HSet(TGV_W_CAM, gCamIdx);
-    BuildCodecs();
-    e = c->Begin();
+    if (gOrder > 0 && !sizeChanged) BuildEnc(TSize(gW, gHt)); else BuildCodecs();
+    e = BeginCam(c);
     if (e != KErrNone) { Err(); HSet(TGV_W_STATE, 3); return; }
     HSet(TGV_W_STATE, 1);
     Log(_L8("pipeline running %dx%d"), gW, gHt);
@@ -828,10 +937,301 @@ static void SwitchCamera(TInt aNew)
     } else if (gEncoder) {
         gEncoder->KeyFrame();
     }
-    e = c->Begin();
+    e = BeginCam(c);
     if (e != KErrNone) { Err(); HSet(TGV_W_STATE, 3); return; }
     HSet(TGV_W_STATE, 1);
     if (gEncoder) gEncoder->KeyFrame();
+}
+
+// ---------------------------------------------------------------- order sweep (command D)
+// Which start orders let the hardware decoder run while the camera captures? Each variant is
+// ~4 s at 176x144@15 and is torn down completely (plus 400 ms) before the next one.
+static TInt gAuOff[64], gAuLen[64], gAuN = 0;
+static TInt gAuNext = 0;
+static TBuf8<160> gBoth;
+static TInt gBothV[12];        // variant id (1..8) -> BOTH ok
+
+static void ParseClip()
+{
+    const TInt len = sizeof(KClip);
+    TInt acc = 0;
+    gAuN = 0;
+    for (TInt i = 0; i + 3 < len && gAuN < 64; i++) {
+        if (KClip[i] == 0 && KClip[i + 1] == 0 && KClip[i + 2] == 1) {
+            TInt t = KClip[i + 3] & 0x1F;
+            if (t == 1 || t == 5) {
+                // the unit ends where the next start code (with its leading zero) begins
+                TInt e = len;
+                for (TInt k = i + 3; k + 3 < len; k++)
+                    if (KClip[k] == 0 && KClip[k + 1] == 0 && KClip[k + 2] == 1) { e = (KClip[k - 1] == 0 && k > 0) ? k - 1 : k; break; }
+                gAuOff[gAuN] = acc; gAuLen[gAuN] = e - acc; gAuN++;
+                acc = e;
+                i = e - 1;
+            }
+        }
+    }
+    Log(_L8("clip: %d bytes, %d access units"), len, gAuN);
+}
+
+static TInt ClipTick(TAny*)
+{
+    if (!gDecoder || gAuN == 0) return 0;
+    TInt k = gAuNext % gAuN;
+    gDecoder->Write(TPtrC8(KClip + gAuOff[k], gAuLen[k]), (TInt64)(gAuNext + 1) * 66666);
+    gAuNext++;
+    return 0;
+}
+
+static TInt SynthFrame = 0;
+static TInt SynthTick(TAny*)
+{
+    if (!gEncoder) return 0;
+    TInt w = gW, h = gHt, n = w * h * 3 / 2;
+    TUint8* b = (TUint8*)User::Alloc(n);
+    if (!b) return 0;
+    TInt f = SynthFrame++;
+    for (TInt y = 0; y < h; y++) Mem::Fill(b + y * w, w, (TUint8)(40 + ((y * 2 + f * 5) & 127)));
+    Mem::Fill(b + w * h, n - w * h, 128);
+    TInt bx = (f * 4) % (w - 40), by = (f * 3) % (h - 40);
+    for (TInt y = by; y < by + 32; y++) Mem::Fill(b + y * w + bx, 32, 235);
+    TInt64 ts = gEncoder->TsNowUs();
+    LatNote(ts, NowMs());
+    gEncoder->Offer(b, n, ts);
+    User::Free(b);
+    return 0;
+}
+
+static void Settle(TInt aMs) { gPump->Run(aMs, NULL); }
+
+static void SweepReset(TInt aEncToDec)
+{
+    StopPipeline();
+    Settle(400);
+    ResetStats();
+    gDecOpt.iUid = 0x10204bfc; gDecOpt.iOutPick = -1; gDecOpt.iPostProc = 0; gDecOpt.iSync = 0; gDecOpt.iBoost = 0;
+    gEncToDec = aEncToDec;
+    gAuNext = 0;
+    gW = 176; gHt = 144; gFps = 15; gKbps = 128;
+}
+
+// result line for a variant (camera/enc/decoder counters since the last mark)
+static TInt gMarkCap, gMarkDec, gMarkUnits;
+static void Mark() { gMarkCap = gSt.iCap; gMarkDec = gSt.iDec; gMarkUnits = gEncoder ? gEncoder->iUnits : 0; }
+static void Result(TInt aId, const char* aSub, const char* aDesc, TInt aDecErr)
+{
+    TInt cam = gSt.iCap - gMarkCap, dec = gSt.iDec - gMarkDec;
+    TInt units = (gEncoder ? gEncoder->iUnits : 0) - gMarkUnits;
+    TBuf8<24> sub; sub.AppendFormat(_L8("%d%s"), aId, aSub);
+    TBuf8<120> desc; desc.Copy(TPtrC8((const TUint8*)aDesc).Left(110));
+    TBuf8<12> flag;
+    if (cam > 0 && dec > 0) flag.Copy(_L8(" BOTH OK"));
+    Log(_L8("order %S: %S: dec init err=%d, cam frames=%d, enc units=%d, decoded=%d%S"), &sub, &desc, aDecErr, cam, units, dec, &flag);
+    if (cam > 0 && dec > 0) {
+        if (aSub[0] == 0 || aSub[0] == 'a') gBothV[aId] = 1;
+        if (gBoth.Length() < 140) { gBoth.Append(sub); gBoth.Append(' '); }
+    }
+}
+
+static TInt NewDec()
+{
+    return BuildDec(TSize(176, 144));
+}
+static TInt OpenCam(TInt aMode)       // aMode 1 video capture, 2 viewfinder; returns first error
+{
+    CCam* c = new CCam;
+    if (!c) return KErrNoMemory;
+    gCam = c;
+    TInt e = c->Open(0, 176, 144, 15);
+    if (e != KErrNone) { Log(_L8("sweep: camera open err=%d"), e); return e; }
+    e = (aMode == 2) ? c->BeginViewFinder() : c->Begin();
+    Log(_L8("sweep: camera begin(mode %d) err=%d"), aMode, e);
+    return e;
+}
+
+static void SweepL()
+{
+    TInt t0 = NowMs();
+    HSet(TGV_W_SWEEP, 1);
+    HSet(TGV_W_STATE, 5);
+    Mem::FillZ(gBothV, sizeof(gBothV));
+    gBoth.Zero();
+    ParseClip();
+    Log(_L8("order sweep start (176x144@15)"));
+    CPeriodic* feed = CPeriodic::NewL(CActive::EPriorityStandard);
+    CleanupStack::PushL(feed);
+    CPeriodic* syn = CPeriodic::NewL(CActive::EPriorityStandard);
+    CleanupStack::PushL(syn);
+    const TInt kClipUs = 66666;
+
+    // 1) decoder alone with the clip
+    if (!gQuit) {
+        SweepReset(0);
+        TInt de = NewDec();
+        Mark();
+        if (!de) { feed->Start(1000, kClipUs, TCallBack(ClipTick, NULL)); Settle(4000); feed->Cancel(); }
+        Result(1, "", "decoder alone, clip", de);
+    }
+    // 2) decoder first, then encoder, then camera video capture; clip keeps feeding
+    if (!gQuit) {
+        SweepReset(0);
+        TInt de = NewDec();
+        TInt ee = BuildEnc(TSize(176, 144));
+        Mark();
+        if (!de) feed->Start(1000, kClipUs, TCallBack(ClipTick, NULL));
+        TInt ce = OpenCam(1);
+        Log(_L8("order 2: enc err=%d cam err=%d"), ee, ce);
+        Settle(4000);
+        feed->Cancel();
+        Result(2, "", "decoder first, encoder, camera video capture, clip fed", de);
+    }
+    // 3) decoder first, camera viewfinder bitmaps (software RGB->YUV) instead of video capture
+    if (!gQuit) {
+        SweepReset(0);
+        TInt de = NewDec();
+        TInt ee = BuildEnc(TSize(176, 144));
+        Mark();
+        if (!de) feed->Start(1000, kClipUs, TCallBack(ClipTick, NULL));
+        TInt ce = OpenCam(2);
+        Log(_L8("order 3: enc err=%d cam err=%d"), ee, ce);
+        Settle(4000);
+        feed->Cancel();
+        Result(3, "", "decoder first, encoder, camera viewfinder bitmaps, clip fed", de);
+    }
+    // 4) camera video + encoder running, decoder created while they run (as the normal path did)
+    if (!gQuit) {
+        SweepReset(1);
+        TInt ee = BuildEnc(TSize(176, 144));
+        TInt ce = OpenCam(1);
+        Log(_L8("order 4: enc err=%d cam err=%d, camera+encoder running"), ee, ce);
+        Settle(1000);
+        Mark();
+        TInt de = NewDec();
+        if (!de && gEncoder) gEncoder->KeyFrame();
+        Settle(de ? 200 : 3500);
+        Result(4, "a", "camera+encoder running, then decoder (default)", de);
+        if (de) {
+            RArray<TUid> u;
+            CleanupClosePushL(u);
+            TInt fe = KErrNoMemory;
+            CDec* tmp = new CDec;
+            if (tmp) {
+                TRAP(fe, { tmp->iPlay = CMMFDevVideoPlay::NewL(*tmp); tmp->iPlay->FindDecodersL(_L8("video/H264"), 0, u, EFalse); });
+                delete tmp;
+            }
+            Log(_L8("order 4b: FindDecodersL err=%d count=%d"), fe, u.Count());
+            for (TInt i = 0; i < u.Count(); i++) Log(_L8("  decoder uid[%d]=0x%08x"), i, u[i].iUid);
+            for (TInt i = 0; i < u.Count() && i < 4 && !gQuit; i++) {
+                if (u[i].iUid == 0x10204bfc) continue;
+                gDecOpt.iUid = u[i].iUid;
+                Mark();
+                TInt d2 = NewDec();
+                Settle(d2 ? 200 : 3000);
+                Result(4, "b", "other decoder uid while camera+encoder run", d2);
+            }
+            gDecOpt.iUid = 0x10204bfc;
+            for (TInt o = 0; o < 3 && !gQuit; o++) {
+                gDecOpt.iOutPick = o; gDecOpt.iPostProc = 1;
+                Mark();
+                TInt d3 = NewDec();
+                Settle(d3 ? 200 : 3000);
+                Result(4, (const char*)"c", "output entry + SetPostProcessTypesL(0)", d3);
+                if (!d3) break;
+            }
+            gDecOpt.iOutPick = -1; gDecOpt.iPostProc = 0;
+            CleanupStack::PopAndDestroy(&u);
+            // retries
+            Mark();
+            TInt d4 = NewDec();
+            TInt waited = 0;
+            if (d4) { Settle(500); waited = 500; Log(_L8("order 4d: retry after 500 ms")); d4 = NewDec(); }
+            if (d4) { Settle(1500); waited = 2000; Log(_L8("order 4d: retry after 2000 ms total")); d4 = NewDec(); }
+            Log(_L8("order 4d: after %d ms wait dec init err=%d"), waited, d4);
+            Settle(d4 ? 200 : 3000);
+            Result(4, "d", "retry decoder after 500/1500 ms", d4);
+        }
+    }
+    // 5) encoder + decoder, synthetic frames, no camera
+    if (!gQuit) {
+        SweepReset(1);
+        TInt de = NewDec();
+        TInt ee = BuildEnc(TSize(176, 144));
+        Mark();
+        SynthFrame = 0;
+        syn->Start(1000, 66666, TCallBack(SynthTick, NULL));
+        Settle(4000);
+        syn->Cancel();
+        Log(_L8("order 5: enc err=%d (no camera: BOTH does not apply)"), ee);
+        Result(5, "", "encoder + decoder, synthetic frames, no camera", de);
+    }
+    // 6) camera capture only (no encoder), decoder created while capturing
+    if (!gQuit) {
+        SweepReset(0);
+        TInt ce = OpenCam(1);
+        Settle(800);
+        Mark();
+        TInt de = NewDec();
+        if (!de) feed->Start(1000, kClipUs, TCallBack(ClipTick, NULL));
+        Settle(de ? 200 : 4000);
+        feed->Cancel();
+        Log(_L8("order 6: cam err=%d"), ce);
+        Result(6, "", "camera capture only, decoder created while capturing, clip", de);
+    }
+    // 7) decoder first, then camera capture, no encoder
+    if (!gQuit) {
+        SweepReset(0);
+        TInt de = NewDec();
+        Mark();
+        if (!de) feed->Start(1000, kClipUs, TCallBack(ClipTick, NULL));
+        TInt ce = OpenCam(1);
+        Log(_L8("order 7: cam err=%d"), ce);
+        Settle(4000);
+        feed->Cancel();
+        Result(7, "", "decoder first, camera capture, no encoder, clip", de);
+    }
+    // 8) camera+encoder running, decoder with SynchronizeDecoding(ETrue) and a higher thread priority
+    if (!gQuit) {
+        SweepReset(1);
+        BuildEnc(TSize(176, 144));
+        OpenCam(1);
+        Settle(1000);
+        gDecOpt.iSync = 1; gDecOpt.iBoost = 1;
+        Mark();
+        TInt de = NewDec();
+        if (!de && gEncoder) gEncoder->KeyFrame();
+        Settle(de ? 200 : 3500);
+        Result(8, "", "camera+encoder running, then decoder with sync + thread priority", de);
+    }
+    CleanupStack::PopAndDestroy(2);
+    SweepReset(1);
+    TInt secs = (NowMs() - t0) / 1000;
+    Log(_L8("order sweep end (%d s)"), secs);
+    if (gBoth.Length() == 0) Log(_L8("order summary: BOTH ok for variants: none"));
+    else Log(_L8("order summary: BOTH ok for variants %S"), &gBoth);
+    // winner: 2 -> decoder first; 3 -> decoder first + viewfinder; 4a -> default order works
+    TInt win = -1;
+    if (gBothV[2]) win = 1; else if (gBothV[3]) win = 2; else if (gBothV[4]) win = 0;
+    if (win >= 0) {
+        gOrder = win;
+        HSet(TGV_W_BLOCKED, 0);
+        Log(_L8("order winner: start order %d (stored in header)"), gOrder);
+    } else {
+        HSet(TGV_W_BLOCKED, 1);
+        Log(_L8("order winner: none: decoder unavailable while capturing"));
+    }
+    HSet(TGV_W_ORDER, gOrder + 1);
+    HSet(TGV_W_SWEEP, 2);
+    HSet(TGV_W_STATE, 2);
+}
+
+static void RunSweep()
+{
+    TInt sw = gW, sh = gHt, sf = gFps, sk = gKbps, sc = gCamIdx;
+    TRAPD(e, SweepL());
+    if (e) { Log(_L8("order sweep leave %d"), e); StopPipeline(); HSet(TGV_W_SWEEP, 2); HSet(TGV_W_STATE, 2); }
+    // back to a running mirror with the best known order
+    if (!gQuit) {
+        StartPipeline(sw, sh, sf, sk, sc);
+    }
 }
 
 // ---------------------------------------------------------------- commands
@@ -891,6 +1291,10 @@ static void Exec(const TDesC8& aCmd)
     case 'C':
         Log(_L8("cmd C %d"), v[0]);
         SwitchCamera(v[0]);
+        break;
+    case 'D':
+        Log(_L8("cmd D (order sweep)"));
+        RunSweep();
         break;
     case 'K':
         Log(_L8("cmd K"));
