@@ -25,7 +25,7 @@ if [ ! -f cert/retrotele_key.pem ]; then
   openssl rsa -in cert/retrotele_key.pem -traditional -out cert/retrotele_key.pem
 fi
 
-MODULES="tgcrypto.py tl.py mtproto.py fileinfo.py tgclient.py tgsrp.py tgui.py callaudio.py filepick.py"
+MODULES="tgcrypto.py tl.py mtproto.py fileinfo.py tgclient.py tgsrp.py tgui.py callaudio.py callvideo.py filepick.py"
 for f in retrotele.py launcher.py videomirror.py $MODULES; do python3 tools/check_py22.py "$f" >/dev/null; done
 python3 tools/check_ints.py retrotele.py launcher.py videomirror.py $MODULES
 
@@ -50,6 +50,16 @@ if [ -f native/tgcallaudio.exe ]; then
   cp native/tgcallaudio.exe build/app/extras/sys/bin/
   EXTRAS="--extrasdir=extras"
   echo "including native/tgcallaudio.exe (calls)"
+fi
+# send-only video in calls: the camera/encoder helper (UID E9, MultimediaDD + UserEnvironment
+# in its own capability set, same binary as the videomirror package) and tgvdisp.pyd (EA, self-view).
+# Both are optional at runtime: without them calls stay voice-only. Installed to the app's
+# drive next to tgcallaudio.exe (--drive=any; rscfix needs nothing extra: no Python UI in them).
+if [ -f native/tgvideo.exe ] && [ -f native/tgvdisp.pyd ]; then
+  mkdir -p build/app/extras/sys/bin
+  cp native/tgvideo.exe native/tgvdisp.pyd build/app/extras/sys/bin/
+  EXTRAS="--extrasdir=extras"
+  echo "including native/tgvideo.exe + native/tgvdisp.pyd (video calls)"
 fi
 if [ -f native/retrotele_rscfix.exe ]; then
   mkdir -p build/app/extras/sys/bin build/app/extras/resource/retrotele

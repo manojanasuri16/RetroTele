@@ -19,6 +19,10 @@ class CallAudio:
         self.route = 1
         self.want_mute = 0
         self.want_route = 1
+        self.want_video = 0
+        self.video_active = 0
+        self.peer_video = -1
+        self.peer_asked = 0
         CallAudio.instances.append(self)
 
     def start_relay(self, key, is_outgoing, connections, on_state, iap=0):
@@ -45,6 +49,10 @@ class CallAudio:
     def set_mute(self, flag):
         self.want_mute = not not flag
         self.sent.append("M%d" % self.want_mute)
+
+    def set_video(self, flag):
+        self.want_video = not not flag
+        self.sent.append("V%d" % self.want_video)
 
     def set_route(self, n):
         self.want_route = n

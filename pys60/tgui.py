@@ -2049,6 +2049,29 @@ class CallView(CanvasView):
             self.app.call_cycle_route()
         elif k == "3" and self.live():
             self.app.call_hangup()
+        elif k == "4" and self.live() and self.app.call_video_ok():
+            self.app.call_toggle_video()
+        elif k == "6" and self.live() and self.app.call_video_on():
+            self.app.call_switch_camera()
+
+    def paint_selfview(self, g, w, h):
+        """Small picture of our own camera (the loopback-decoded frames) in the top right."""
+        cv = self.app.call_video
+        if cv is None:
+            return
+        f = cv.frame()
+        if f is None:
+            return
+        img, iw, ih = f
+        tw = 72
+        th = tw * ih / iw
+        x1 = w - tw - 6
+        y1 = 6
+        try:
+            g.blit(img, target=(x1, y1, x1 + tw, y1 + th), scale=1)
+            g.rectangle((x1 - 1, y1 - 1, x1 + tw + 1, y1 + th + 1), outline=WHITE)
+        except:
+            pass
 
     def elapsed(self):
         cs = self.app.client.cs
@@ -2115,7 +2138,19 @@ class CallView(CanvasView):
             else:
                 rl = u"Audio: Speaker"
                 rb = u"Speaker"
-            for l in [ml, rl]:
+            vcap = app.call_video_ok()
+            vl = u""
+            if vcap:
+                vl = app.call_video_text()
+                if not vl:
+                    vl = u"Video: off (4 = on)"
+                elif app.call_video_on():
+                    vl = vl + u" [4 off, 6 cam]"
+            lines2 = [ml, rl]
+            if vl:
+                lines2.append(vl)
+            for l in lines2:
+                l = fit(g, l, "small", w - 12)
                 y = y + 22
                 g.text(((w - width(g, l, "small")) / 2, y), l, fill=GREY_LIGHT,
                        font=font("small"))
@@ -2146,6 +2181,7 @@ class CallView(CanvasView):
                 lab = fit(g, lab, "small", bw - 8)
                 g.text((x1 + (bw - width(g, lab, "small")) / 2, by + 19), lab,
                        fill=WHITE, font=font("small"))
+            self.paint_selfview(g, w, h)
         if app.busy:
             b = fit(g, app.busy, "small", w - 16)
             g.text(((w - width(g, b, "small")) / 2, h - 36), b, fill=GREY_LIGHT,

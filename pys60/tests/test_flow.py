@@ -908,6 +908,64 @@ f277.on_signal("out1")
 assert state["sigs"][-1] == (4242, "out1"), state["sigs"]
 app.call_signaling("late")
 assert f277.signals[-1] == "late"
+# send-only video: menu entries, key 4 / 6, status line, clean stop with the call
+class FakeCV:
+    made = []
+    def __init__(self, audio, on_change, log):
+        self.audio = audio; self.on_change = on_change; self.live = 0; self.cam = 1; self.stopped = 0
+        self.sw = 0; self.txt = u"video on, camera: front"
+        FakeCV.made.append(self)
+    def start(self, cam):
+        self.live = 1; self.audio.set_video(1); return 1
+    def active(self): return self.live
+    def status_text(self): return self.txt
+    def stop(self):
+        self.live = 0; self.stopped = self.stopped + 1; self.audio.set_video(0)
+    def switch_camera(self): self.sw = self.sw + 1; return 1
+    def frame(self): return None
+import types as _types
+_fake_mod = _types.ModuleType("callvideo")
+_fake_mod.CallVideo = FakeCV
+_fake_mod.CAM_FRONT = 1
+sys.modules["callvideo"] = _fake_mod
+app.client.cs = cs277
+cs277["state"] = "connected"
+cs277["key"] = "u42"
+cs277["text"] = u""
+app.audio_state = "connected"
+app.call_ready(cs277)
+app.audio_state = "connected"
+fv = callaudio_fake.CallAudio.instances[-1]
+saved_menu_view = app.view
+app.screen = "call"
+app.view = retrotele.tgui.CallView(app)
+app.view.canvas = saved_view.canvas
+app.call_menu()
+labels = [m[0] for m in appuifw.app.menu]
+assert u"Video: turn on" in labels and u"Switch camera (front/rear)" not in labels, labels
+_t0 = screen_text()
+assert u"Video: off (4 = on)" in _t0, _t0
+app.view.key("4")
+cvf = FakeCV.made[-1]
+assert cvf.live and fv.want_video and fv.sent[-1] == "V1", fv.sent
+labels = [m[0] for m in appuifw.app.menu]
+assert u"Video: turn off" in labels and u"Switch camera (front/rear)" in labels, labels
+t = screen_text()
+assert t.find(u"video on, camera: front") >= 0 and t.find(u"[4 off, 6 cam]") >= 0, t
+app.view.key("6")
+assert cvf.sw == 1
+app.stop_call_audio()                 # hang up / app exit: video stops before the audio helper
+assert cvf.stopped >= 1 and not fv.want_video and app.call_video is None
+# voice-only call: no video entries when the call is not 2.7.7
+app.client.set_call_version("2.4.4")
+cs277["state"] = "connected"
+app.call_ready(cs277)
+app.call_menu()
+labels = [m[0] for m in appuifw.app.menu]
+assert not [l for l in labels if l.startswith(u"Video") or l.startswith(u"Switch")], labels
+t = screen_text()
+assert t.find(u"Video") < 0, t
+del sys.modules["callvideo"]
 app.client.set_call_version("2.4.4")
 app.stop_call_audio()
 app.client.cs = None

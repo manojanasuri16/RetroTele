@@ -72,6 +72,10 @@ class CallAudio:
         self.on_signal = None
         self.helper_ready = 0
         self.sig_queue = []
+        self.want_video = 0       # 1: tgvideo.exe feeds us encoder units, announce video to the peer
+        self.video_active = 0     # helper says our video is announced (RemoteMediaState Active)
+        self.peer_video = -1      # peer's RemoteMediaState video: 0 inactive 1 paused 2 active
+        self.peer_asked = 0       # times the peer sent RequestVideo
 
     def relay_config(self, key, is_outgoing, connections):
         """Text for the helper: out=, key= (hex) and up to 4 ep=ip,port,tag
@@ -330,6 +334,21 @@ class CallAudio:
                 except:
                     self.route = 2
                 self._info()
+            elif data[:2] == "P ":
+                try:
+                    self.peer_video = int(data[2:].strip())
+                except:
+                    pass
+                self._info()
+            elif data[:2] == "X ":
+                try:
+                    self.peer_asked = int(data[2:].strip())
+                except:
+                    pass
+                self._info()
+            elif data[:2] == "A ":
+                self.video_active = (data[2:].strip() == "1")
+                self._info()
         else:
             self.rx = self.rx + 1
             try:
@@ -351,6 +370,18 @@ class CallAudio:
         # the helper may have started after the wishes were set: re-send
         self._sendto("R%d" % self.want_route)
         self._sendto("M%d" % self.want_mute)
+        if self.want_video:
+            self._sendto("V1")
+
+    def set_video(self, flag):
+        """Video send on/off for a 2.7.7 call: the helper announces it to the peer and
+        packetizes the units tgvideo.exe sends it."""
+        if flag:
+            self.want_video = 1
+        else:
+            self.want_video = 0
+            self.video_active = 0
+        self._sendto("V%d" % self.want_video)
 
     def set_mute(self, flag):
         if flag:
@@ -397,3 +428,7 @@ class CallAudio:
         self.state = ""
         self.muted = 0
         self.route = 1
+        self.want_video = 0
+        self.video_active = 0
+        self.peer_video = -1
+        self.peer_asked = 0

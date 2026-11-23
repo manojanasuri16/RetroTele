@@ -3,7 +3,7 @@
 set -e
 cd "$(dirname "$0")/.."
 PY2=../tools/mamba/py27/bin/python2
-for f in retrotele.py launcher.py tgcrypto.py tl.py mtproto.py tgclient.py tgsrp.py tgui.py callaudio.py fileinfo.py filepick.py videomirror.py; do
+for f in retrotele.py launcher.py tgcrypto.py tl.py mtproto.py tgclient.py tgsrp.py tgui.py callaudio.py callvideo.py fileinfo.py filepick.py videomirror.py; do
   python3 tools/check_py22.py "$f"
 done
 python3 tools/check_ints.py *.py
@@ -11,6 +11,7 @@ python3 tools/check_ints.py *.py
 "$PY2" tests/test_tl.py
 "$PY2" tests/test_flow.py
 "$PY2" tests/test_videomirror.py
+"$PY2" tests/test_callvideo.py
 if [ "$LIVE" = 1 ]; then
   "$PY2" -u tests/live_dh.py
   FUNC=help.getConfig "$PY2" -u tests/live_dh.py | tail -1 | cut -c1-200
