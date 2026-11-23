@@ -951,7 +951,7 @@ public:
     TInt Begin()
     {
         Log(_L8("step cam%d: PrepareVideoCaptureL"), iIdx);
-        TRAPD(pe, iCam->PrepareVideoCaptureL(CCamera::EFormatYUV420Planar, iSIdx, iRIdx, 4, 1));
+        TRAPD(pe, iCam->PrepareVideoCaptureL(CCamera::EFormatYUV420Planar, iSIdx, iRIdx, 2, 1));
         Log(_L8("cam%d prepare err=%d"), iIdx, pe);
         if (pe) return pe;
         Log(_L8("step cam%d: StartVideoCapture"), iIdx);
