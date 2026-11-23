@@ -84,7 +84,7 @@ v.tick()                                   # helper silent: nothing sent yet
 assert SENT == []
 v.on_status("T hello")
 v.tick()
-assert SENT[-1] == ("S 176 144 15 100 1 0", ("127.0.0.1", 47012)), SENT
+assert SENT[-1] == ("S 176 144 15 128 1 0 80", ("127.0.0.1", 47012)), SENT
 assert SENT[-2][0] == "L 0"                # no loopback decoder (QCIF-only, not needed)
 assert v.state == cv.S_WAIT_RUN
 assert ca.sent == []                       # nothing announced before the camera runs
@@ -111,34 +111,62 @@ for i in range(12):
     v.tick()
 assert SENT[-1][0] == "K", SENT                        # extra IDR request after the switch
 assert v.status_text() == u"Video on - rear camera"
-# ---- adaptive quality: slow encoder / peer loss / drops step down to the lower rate
+# ---- adaptive quality: down on slow encoder / drops / over budget / loss, up after clean seconds
 ca8 = callaudio_fake.CallAudio()
 v8 = cv.CallVideo(ca8, None, LOG.append)
 v8.start(cv.CAM_FRONT)
 v8.on_status("T 2"); v8.tick()
 v8.on_status("T 1 1 176 144 150 150 0 12 7500 0 0 1 0"); v8.tick()
 assert v8.state == cv.S_RUNNING and v8.level == 0
-GOOD = "T 1 1 176 144 150 130 0 40 20000 0 %d 1 0"
-SLOW = "T 1 1 176 144 150 60 0 40 9000 0 %d 1 0"
-for i in range(60):                          # warm-up is not judged
+GOOD = "T 1 1 176 144 130 125 0 40 12000 0 %d 1 0"       # 12.5 fps, 96 kbit/s
+SLOW = "T 1 1 176 144 150 60 0 40 6000 0 %d 1 0"         # encoder 9 fps behind the camera
+BIG = "T 1 1 176 144 130 125 0 40 30000 0 %d 1 0"        # 240 kbit/s: over budget
+for i in range(60):                                      # warm-up is not judged
     v8.tick()
 for i in range(20):
     v8.on_status(GOOD % 0)
-assert v8.level == 0                         # healthy: stays
+assert v8.level == 0
 for i in range(cv.BAD_LIMIT - 1):
     v8.on_status(SLOW % 0)
 assert v8.level == 0
 del SENT[:]
 v8.on_status(SLOW % 0)
-assert v8.level == 1 and SENT[-1][0] == "S 176 144 15 56 1 0", (v8.level, SENT)
+assert v8.level == 1 and SENT[-1][0] == "S 176 144 15 90 1 0 65", (v8.level, SENT)
 assert v8.status_text().find(u"adjusting") >= 0
 for i in range(120):
     v8.tick()
-assert v8.status_text() == u"Video on - front camera (low rate)", v8.status_text()
-ca8.loss = 200
-for i in range(30):                          # bottom of the ladder
-    v8.on_status(GOOD % 0)
+assert v8.status_text() == u"Video on - front camera (reduced quality)", v8.status_text()
+# a camera that is slow by itself (encoder keeps up) is not a reason to step down
+for i in range(10):
+    v8.on_status("T 1 1 176 144 80 80 0 40 5000 0 0 1 0")
 assert v8.level == 1
+# over budget steps down again, to the bottom of the ladder
+del SENT[:]
+for i in range(cv.BAD_LIMIT):
+    v8.on_status(BIG % 0)
+assert v8.level == 2 and SENT[-1][0] == "S 176 144 12 56 1 0 50", (v8.level, SENT)
+for i in range(120):
+    v8.tick()
+v8.audio.loss = 200
+for i in range(30):
+    v8.on_status(GOOD % 0)
+assert v8.level == 2                         # bottom of the ladder
+# clean seconds step up one level; a failure soon after bans that level
+v8.audio.loss = 0
+del SENT[:]
+for i in range(cv.UP_SECONDS):
+    v8.on_status("T 1 1 176 144 130 125 0 40 5000 0 0 1 0")
+assert v8.level == 1 and SENT[-1][0] == "S 176 144 15 90 1 0 65", (v8.level, SENT)
+for i in range(120):
+    v8.tick()
+for i in range(cv.BAD_LIMIT):
+    v8.on_status(BIG % 0)
+assert v8.level == 2 and v8.ceiling == 2, (v8.level, v8.ceiling)
+for i in range(120):
+    v8.tick()
+for i in range(3 * cv.UP_SECONDS):
+    v8.on_status("T 1 1 176 144 130 125 0 40 5000 0 0 1 0")
+assert v8.level == 2                         # never tried again
 # peer loss alone steps down
 v10 = cv.CallVideo(callaudio_fake.CallAudio(), None, None)
 v10.start(cv.CAM_REAR); v10.on_status("T 2"); v10.tick()
@@ -160,8 +188,24 @@ for i in range(cv.BAD_LIMIT):
     n = n + 5
     v9.on_status(GOOD % n)
 assert v9.level == 1
-assert cv.parse_stats("T 1 1 320 240 150 130 0 40 20000 0 7 1 0") == (130, 20000, 7)
+assert cv.parse_stats("T 1 1 320 240 150 130 0 40 20000 0 7 1 0") == (130, 20000, 7, 150)
 assert cv.parse_stats("T hello") is None
+# own picture: shown about every other tick, can be hidden
+vs = cv.CallVideo(callaudio_fake.CallAudio(), None, None)
+vs.start(cv.CAM_FRONT); vs.on_status("T 2"); vs.tick()
+vs.on_status("T 1 1 176 144 130 125 0 40 5000 0 0 1 0"); vs.tick()
+HDR[11] = 9; HDR[12] = 176; HDR[13] = 144
+del RENDERS[:]
+for i in range(10):
+    vs.tick()
+assert 3 <= len([r for r in RENDERS if r[0] == 1]) <= 6, RENDERS      # not on every 0.2 s tick
+assert vs.frame() is not None
+assert vs.toggle_self() == 0 and vs.frame() is None
+del RENDERS[:]
+for i in range(10):
+    vs.tick()
+assert RENDERS == []                       # hidden: no work at all
+assert vs.toggle_self() == 1
 # camera error while running: video stops, helper released, call (audio) untouched
 v.on_status("T 3 0 0 0 0 0 0 0 0 0 0 0 0")
 v.tick()
@@ -177,7 +221,7 @@ del SENT[:]
 v2.start(cv.CAM_REAR)
 v2.on_status("T 2")
 v2.tick()
-assert SENT[-1][0] == "S 176 144 15 100 0 0"
+assert SENT[-1][0] == "S 176 144 15 128 0 0 80"
 v2.on_status("T 1 0 176 144 0 0 0 0 0 0 0 1 1")
 v2.tick()
 assert v2.state == cv.S_RUNNING
@@ -283,7 +327,7 @@ HDR[28] = 2
 del STARTED[:], SENT[:]
 assert vr.start(cv.CAM_FRONT) == 1 and STARTED == [] and vr.state == cv.S_STARTING and vr.active()
 vr.tick()
-assert [d for d, a in SENT] == ["L 0", "S 176 144 15 100 1 0"], SENT
+assert [d for d, a in SENT] == ["L 0", "S 176 144 15 128 1 0 80"], SENT
 vr.on_status("T 1 1 176 144 150 150 0 12 7500 0 0 1 0")
 vr.tick()
 assert vr.state == cv.S_RUNNING and cax.sent[-1] == "V1"
@@ -323,7 +367,7 @@ del STARTED[:], SENT[:]
 vw.stop_send()                              # not active: nothing happens
 assert vw.start(cv.CAM_FRONT) == 1 and STARTED == [] and vw.state == cv.S_STARTING
 vw.tick()
-assert [d for d, a in SENT][-2:] == ["L 0", "S 176 144 15 100 1 0"], SENT
+assert [d for d, a in SENT][-2:] == ["L 0", "S 176 144 15 128 1 0 80"], SENT
 # a helper that is known to be running is reused when started again
 vq = cv.CallVideo(callaudio_fake.CallAudio(), None, None)
 vq.hstate = 2

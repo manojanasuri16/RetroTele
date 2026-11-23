@@ -46,7 +46,7 @@ static RFs gFs;
 static TFileName gLogPath[3];
 static TInt gLogN = 0;
 static TBool gLogOk = EFalse;
-#define TGV_HELPER_VERSION "0.14.5"
+#define TGV_HELPER_VERSION "0.14.6"
 
 static void Log(TRefByValue<const TDesC8> aFmt, ...)
 {
@@ -156,6 +156,7 @@ struct TStats
 {
     TInt iCap, iEnc, iDec, iBytes, iErrors, iDrops, iLat;
     TInt iCapPrev, iEncPrev, iDecPrev, iBytesPrev, iKeys;
+    TInt iEncLatSum, iEncLatN, iDropsPrev, iKeysPrev, iLastTickMs;
     TInt iT0;
 };
 static TStats gSt;
@@ -313,6 +314,8 @@ static void ScanNal(const TDesC8& d, TBool& aVcl, TBool& aIdr, TBool& aSps, TBoo
     }
     if (!start) aVcl = ETrue;
 }
+
+static TInt gQuality = 50;          // encoder "picture quality" 0..100 (command S, 7th number)
 
 // latency ring: capture timestamp (us, unique) -> NowMs at capture
 struct TLat { TInt64 iTs; TInt iMs; };
@@ -762,8 +765,8 @@ public:
         CleanupStack::PopAndDestroy(info);
         Log(_L8("step enc: SetSourceMemoryL %d fps const=1 realtime=1"), aFps);
         iRec->SetSourceMemoryL((TReal)aFps, ETrue, ETrue);
-        Log(_L8("step enc: SetMinRandomAccessRate 0.4 (IDR about every 2.5 s)"));
-        iRec->SetMinRandomAccessRate(0.4);
+        Log(_L8("step enc: SetMinRandomAccessRate 0.2 (IDR about every 5 s, more on PLI)"));
+        iRec->SetMinRandomAccessRate(0.2);
         Log(_L8("step enc: Initialize"));
         iRec->Initialize();
         gPump->Run(10000, &iInitDone);
@@ -775,11 +778,11 @@ public:
         Mem::FillZ(&ro, sizeof(ro));
         ro.iControl = EBrControlStream;
         ro.iBitrate = aBitrateK * 1000;
-        ro.iPictureQuality = 50;
+        ro.iPictureQuality = gQuality;
         ro.iPictureRate = (TReal)aFps;
         ro.iQualityTemporalTradeoff = 0.5;
         ro.iLatencyQualityTradeoff = 0.0;
-        Log(_L8("step enc: SetRateControlOptions %d kbit/s"), aBitrateK);
+        Log(_L8("step enc: SetRateControlOptions %d kbit/s, picture quality %d, picture rate %d, quality/temporal 0.5, latency 0.0"), aBitrateK, (TInt)ro.iPictureQuality, aFps);
         iRec->SetRateControlOptions(0, ro);
         Log(_L8("step enc: CommitL"));
         TRAPD(e2, iRec->CommitL());
@@ -838,7 +841,11 @@ public:
             if (iUnits <= 6)
                 Log(_L8("enc unit %d: %d bytes vcl=%d idr=%d sps=%d pps=%d"), iUnits, b->iData.Length(), (TInt)vcl,
                     (TInt)idr, (TInt)sps, (TInt)pps);
-            if (vcl) gSt.iEnc++;
+            if (vcl) {
+                gSt.iEnc++;
+                TInt cm = LatFind(b->iCaptureTimestamp.Int64());
+                if (cm >= 0) { gSt.iEncLatSum += NowMs() - cm; gSt.iEncLatN++; }
+            }
             if (idr) { gSt.iKeys++; HSet(TGV_W_KEYS, gSt.iKeys); }
             if (sps || pps) {
                 if (sps && !vcl) gParams.Zero();
@@ -908,6 +915,9 @@ public:
         Log(_L8("cam%d auto exposure err=%d, auto white balance err=%d, flash off err=%d"), aIdx, x1, x2, x3);
         TCameraInfo ci;
         iCam->CameraInfo(ci);
+        Log(_L8("cam%d info: options=0x%x exposure modes=0x%x white balance=0x%x flash=0x%x zoom %d..%d digital zoom max %d"), aIdx,
+            (TInt)ci.iOptionsSupported, (TInt)ci.iExposureModesSupported, (TInt)ci.iWhiteBalanceModesSupported,
+            (TInt)ci.iFlashModesSupported, ci.iMinZoom, ci.iMaxZoom, ci.iMaxDigitalZoom);
         // size: exact match, else the largest one not bigger than requested
         TInt best = -1, bestArea = 0, exact = -1;
         for (TInt s = 0; s < ci.iNumVideoFrameSizesSupported; s++) {
@@ -941,7 +951,7 @@ public:
     TInt Begin()
     {
         Log(_L8("step cam%d: PrepareVideoCaptureL"), iIdx);
-        TRAPD(pe, iCam->PrepareVideoCaptureL(CCamera::EFormatYUV420Planar, iSIdx, iRIdx, 2, 1));
+        TRAPD(pe, iCam->PrepareVideoCaptureL(CCamera::EFormatYUV420Planar, iSIdx, iRIdx, 4, 1));
         Log(_L8("cam%d prepare err=%d"), iIdx, pe);
         if (pe) return pe;
         Log(_L8("step cam%d: StartVideoCapture"), iIdx);
@@ -1573,6 +1583,7 @@ static void Exec(const TDesC8& aCmd)
     case 'S':
         Log(_L8("cmd S (%d args)"), n);
         gRotation = (n >= 6) ? v[5] : 0;
+        gQuality = (n >= 7 && v[6] >= 10 && v[6] <= 100) ? v[6] : 50;
         if (gRotation != 0) Log(_L8("cmd S: rotation %d not implemented, sending landscape"), gRotation);
         if (n >= 5) StartPipeline(v[0], v[1], v[2], v[3], n >= 5 ? v[4] : 0);
         else Log(_L8("cmd S: need 5 numbers"));
@@ -1665,6 +1676,15 @@ static TInt StatTick(TAny*)
            gSt.iErrors, gSt.iDrops, H ? (TInt)H[TGV_W_ENC_OK] : 0, H ? (TInt)H[TGV_W_DEC_OK] : 0);
     if (gExport && gSecs % 5 == 4)
         Log(_L8("export: units=%d drops=%d"), gExpUnits, gExpDrops);
+    if (H && H[TGV_W_STATE] == 1) {
+        // one line per second, also without the capture flag: what limits the picture rate next time
+        TInt dd = gSt.iDrops - gSt.iDropsPrev, kk = gSt.iKeys - gSt.iKeysPrev;
+        gSt.iDropsPrev = gSt.iDrops; gSt.iKeysPrev = gSt.iKeys;
+        TInt encms = gSt.iEncLatN ? gSt.iEncLatSum / gSt.iEncLatN : 0;
+        gSt.iEncLatSum = 0; gSt.iEncLatN = 0;
+        Log(_L8("vstat cam=%d.%d enc=%d.%d B/s=%d idr=%d offerdrops=%d encms=%d tickms=%d export=%d expdrops=%d size=%dx%d q=%d kbps=%d"),
+            capF / 10, capF % 10, encF / 10, encF % 10, bps, kk, dd, encms, el, gExpUnits, gExpDrops, gW, gHt, gQuality, gKbps);
+    }
     if (gRxFrags > 0)
         Log(_L8("rx: fragments=%d units=%d fed=%d decoded=%d (%d.%d fps) state=%d uid=%d err=%d"), gRxFrags, gRxAuIn, gRxFed,
             H ? (TInt)H[TGV_W_DEC_COUNT] - gRxPicBase : 0, decF / 10, decF % 10, H ? (TInt)H[TGV_W_RX_STATE] : 0,

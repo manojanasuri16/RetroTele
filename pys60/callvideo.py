@@ -20,12 +20,15 @@ HOST = "127.0.0.1"
 PORT_CMD = 47012
 PORT_STATUS = 47011
 
-# Quality ladder (width, height, fps, kbit/s). The software encoder (uid 0x20001c13) only reaches
-# 3-6 fps at 320x240 next to the call audio on the N79 (measured 0.14.2), but 11-13 fps at
-# QCIF, so QCIF 176x144 is the top level; it steps down to a lower rate when the encoder drops
-# frames or the peer reports loss.
-LEVELS = [(176, 144, 15, 100), (176, 144, 15, 56)]
-LEVEL_NAMES = [u"", u" (low rate)"]
+# Quality ladder (width, height, fps, kbit/s, encoder picture quality 0..100). The software encoder
+# (uid 0x20001c13) only reaches 3-6 fps at 320x240 next to the call audio on the N79 (measured
+# 0.14.2), but keeps up with the camera at QCIF. The 0.14.5 logs show it spends only ~50 kbit/s
+# whatever the target is (bitrate 128 and 256 gave the same output in the bench), so the "picture
+# quality" number is what can buy sharpness (UNTESTED guess: 80); steps down to cheaper settings
+# when it drops frames, exceeds its budget or the peer reports loss, and up again after 30 clean
+# seconds (never back to a level that already failed).
+LEVELS = [(176, 144, 15, 128, 80), (176, 144, 15, 90, 65), (176, 144, 12, 56, 50)]
+LEVEL_NAMES = [u"", u" (reduced quality)", u" (low rate)"]
 VIDEO_W = LEVELS[0][0]
 VIDEO_H = LEVELS[0][1]
 VIDEO_FPS = LEVELS[0][2]
@@ -33,7 +36,9 @@ VIDEO_KBPS = LEVELS[0][3]
 WARMUP_S = 8            # seconds after the pipeline runs before judging it
 BAD_LIMIT = 6           # bad seconds in a row that trigger a step down
 LOSS_BAD = 40           # RTCP loss fraction (of 256) counted as a bad second (about 16 percent)
-SLOW_FPS10 = 85         # encoder output below 8.5 fps at the top level counts as a bad second
+SLOW_FPS10 = 85         # encoder output below 8.5 fps AND more than 2 fps behind the camera: bad second
+UP_SECONDS = 30         # clean seconds before a step up
+OVER_BUDGET = 130       # percent of the target bit rate that counts as a bad second
 # Degrees clockwise baked into the pixels before encoding. The 2.7.7 protocol (V0) has no
 # rotation extension, so a portrait picture would need rotating by us. Only 0 (landscape,
 # the sensor's natural QCIF 176x144) is implemented in tgvideo.exe; others are logged there.
@@ -105,15 +110,15 @@ def _dispatch(res):
 
 
 def parse_stats(line):
-    """'T st cam w h capfps10 encfps10 decfps10 lat bps err drops enc dec' -> (encfps10, bps,
-    drops) or None."""
+    """'T st cam w h capfps10 encfps10 decfps10 lat bps err drops enc dec' -> (encfps10, bytes/s,
+    drops, capfps10) or None."""
     if line[:2] != "T ":
         return None
     parts = line.split()
     if len(parts) < 13:
         return None
     try:
-        return (int(parts[6]), int(parts[9]), int(parts[11]))
+        return (int(parts[6]), int(parts[9]), int(parts[11]), int(parts[5]))
     except:
         return None
 
@@ -165,6 +170,9 @@ class CallVideo:
         self.t_level = 0
         self.last_drops = 0
         self.steps = 0
+        self.ceiling = 0
+        self.t_up = 0
+        self.show_self = 1
         self.last_flags = -1
         self.rx_on = 0          # the helper also shows the peer's picture
         self.fwd_on = 0         # told the engine to forward the peer's access units
@@ -269,10 +277,9 @@ class CallVideo:
             return 0
 
     def judge(self, sts):
-        """Once a second while running: step down the quality ladder when the encoder cannot
-        keep up (drops, low fps) or the peer reports loss. Never steps up on its own."""
-        if self.level >= len(LEVELS) - 1:
-            return
+        """Once a second while running: step down when the encoder cannot keep up (drops, lagging
+        behind the camera), spends more than its budget or the peer reports loss; step up after
+        UP_SECONDS clean seconds, but never to a level that failed shortly after a step up."""
         if self.t_switch and self.ticks - self.t_switch < 60:
             return
         if self.t_level and self.ticks - self.t_level < WARMUP_S * 5:
@@ -281,30 +288,49 @@ class CallVideo:
         if self.t_run and self.ticks - self.t_run < WARMUP_S * 5:
             self.last_drops = sts[2]
             return
-        fps10, bps, drops = sts
+        fps10, bps, drops, cap10 = sts
         newdrops = drops - self.last_drops
         self.last_drops = drops
+        loss = self.peer_loss()
         bad = 0
-        if self.level == 0 and fps10 < SLOW_FPS10:
+        if fps10 < SLOW_FPS10 and cap10 - fps10 > 20:
             bad = 1
         if newdrops >= 3:
             bad = 1
-        if self.peer_loss() >= LOSS_BAD:
+        if loss >= LOSS_BAD:
             bad = 1
+        if bps * 8 > LEVELS[self.level][3] * 10 * OVER_BUDGET:
+            bad = 1
+        last = len(LEVELS) - 1
         if bad:
+            self.good_s = 0
             self.bad = self.bad + 1
-            if self.bad >= BAD_LIMIT:
-                self.step_down(fps10, newdrops)
-        elif self.bad > 0:
-            self.bad = self.bad - 1
+            if self.bad >= BAD_LIMIT and self.level < last:
+                self.move_level(1, fps10, newdrops)
+        else:
+            if self.bad > 0:
+                self.bad = self.bad - 1
+            if newdrops == 0 and loss < 10:
+                self.good_s = self.good_s + 1
+            else:
+                self.good_s = 0
+            if self.good_s >= UP_SECONDS and self.level > self.ceiling:
+                self.move_level(-1, fps10, newdrops)
 
-    def step_down(self, fps10, newdrops):
-        self.level = self.level + 1
+    def move_level(self, d, fps10, newdrops):
+        if d > 0:
+            if self.t_up and self.ticks - self.t_up < 60 * 5:
+                self.ceiling = self.level + 1          # that level failed right after a step up
+        else:
+            self.t_up = self.ticks
+        self.level = self.level + d
         self.steps = self.steps + 1
         self.bad = 0
+        self.good_s = 0
         self.t_level = self.ticks
-        self.log("quality down -> level %d %s (fps10 %d, drops +%d, peer loss %d)" % (
-            self.level, str(LEVELS[self.level]), fps10, newdrops, self.peer_loss()))
+        self.log("quality %s -> level %d %s (fps10 %d, drops +%d, peer loss %d, ceiling %d)" % (
+            d > 0 and "down" or "up", self.level, str(LEVELS[self.level]), fps10, newdrops,
+            self.peer_loss(), self.ceiling))
         try:
             self.audio.loss = 0
         except:
@@ -335,6 +361,8 @@ class CallVideo:
         self.t_level = 0
         self.last_drops = 0
         self.steps = 0
+        self.ceiling = 0
+        self.t_up = 0
 
     def launch(self, newstate):
         """Start tgvideo.exe (it waits for commands; the camera is only used after "S"). A helper
@@ -504,6 +532,13 @@ class CallVideo:
             except:
                 self.errors = self.errors + 1
 
+    def toggle_self(self):
+        """Show / hide our own picture (hiding saves the repaints)."""
+        self.show_self = not self.show_self
+        self.last_dec = -1
+        self.changed()
+        return self.show_self
+
     def switch_camera(self):
         """Front <-> rear. The helper restarts the encoder: new SPS/PPS + IDR; RTP seq, SSRC
         and timestamps continue (they live in tgcallaudio.exe)."""
@@ -518,8 +553,8 @@ class CallVideo:
 
     # ------------------------------------------------------------ progress
     def params(self):
-        w, h, fps, kbps = LEVELS[self.level]
-        return "S %d %d %d %d %d %d" % (w, h, fps, kbps, self.cam, VIDEO_ROTATION_DEG)
+        w, h, fps, kbps, q = LEVELS[self.level]
+        return "S %d %d %d %d %d %d %d" % (w, h, fps, kbps, self.cam, VIDEO_ROTATION_DEG, q)
 
     def tick(self):
         if self.state == S_IDLE or self.state == S_FAILED or self.stopping:
@@ -613,8 +648,8 @@ class CallVideo:
         self.inf = inf
         if inf is None:
             return
-        if self.state == S_RUNNING:
-            self.update_self(inf)
+        if self.state == S_RUNNING and self.show_self and self.ticks % 2 == 0:
+            self.update_self(inf)       # about 2.5 pictures per second: each one repaints the screen
         if self.rx_on and inf[I_RX_STATE] == 2:
             self.update_peer(inf)
         if self.rx_on and inf[I_RX_STATE] >= 3 and self.fwd_on:
@@ -732,6 +767,6 @@ class CallVideo:
 
     def frame(self):
         """(image, w, h) of the self-view or None."""
-        if self.state != S_RUNNING or self.img is None or self.last_dec < 0:
+        if self.state != S_RUNNING or not self.show_self or self.img is None or self.last_dec < 0:
             return None
         return (self.img, self.img_size[0], self.img_size[1])

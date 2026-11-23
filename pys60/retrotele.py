@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.14.5"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.14.6"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -2079,6 +2079,18 @@ class App:
         self.call_menu()
         self.redraw()
 
+    def call_toggle_self(self):
+        cv = self.call_video
+        f = getattr(cv, "toggle_self", None)
+        if f is not None and cv.active():
+            f()
+        self.call_menu()
+        self.redraw()
+
+    def call_self_shown(self):
+        cv = self.call_video
+        return cv is None or getattr(cv, "show_self", 1)
+
     def call_switch_camera(self):
         cv = self.call_video
         if cv is not None and cv.active():
@@ -2187,6 +2199,10 @@ class App:
                     if self.call_video_on():
                         m.append((u"Turn video off", self.call_toggle_video))
                         m.append((u"Switch camera", self.call_switch_camera))
+                        if self.call_self_shown():
+                            m.append((u"Hide my picture", self.call_toggle_self))
+                        else:
+                            m.append((u"Show my picture", self.call_toggle_self))
                     else:
                         m.append((u"Turn video on", self.call_toggle_video))
             m.append((u"Hang up", self.call_hangup))

@@ -2065,6 +2065,8 @@ class CallView(CanvasView):
             self.app.call_toggle_video()
         elif k == "6" and self.live() and self.app.call_video_on():
             self.app.call_switch_camera()
+        elif k == "7" and self.live() and self.app.call_video_on():
+            self.app.call_toggle_self()
 
     def elapsed(self):
         cs = self.app.client.cs
@@ -2123,6 +2125,8 @@ class CallView(CanvasView):
             l = u"Camera starting..."
             if cv is not None and not cv.active():
                 l = u"No picture"
+            elif cv is not None and not getattr(cv, "show_self", 1):
+                l = u"[7] show me"
             l = fit(g, l, "small", tw - 6)
             g.text((x1 + (tw - width(g, l, "small")) / 2, y1 + th / 2 + 4), l,
                    fill=GREY_LIGHT, font=font("small"))
@@ -2309,7 +2313,9 @@ class CallView(CanvasView):
             for n in notes:
                 if n != vt:
                     lines = lines + wrap(g, n, "small", cw, 4)
-            for l in lines[:6]:
+            if app.call_video_on():
+                lines.append(u"[7] hide/show my picture")
+            for l in lines[:7]:
                 g.text((10, ly), l, fill=GREY_LIGHT, font=font("small"))
                 ly = ly + 14
         else:
