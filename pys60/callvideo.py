@@ -174,6 +174,7 @@ class CallVideo:
         self.pimg = None
         self.pimg_size = (0, 0)
         self.p_last = -1
+        self.rx_at_s = 0
 
     # ------------------------------------------------------------ helpers
     def log(self, msg):
@@ -554,6 +555,7 @@ class CallVideo:
                 self.set_fwd(self.rx_on)
                 self.send(self.params())
                 self.t_s = self.ticks
+                self.rx_at_s = self.rx_lines
                 self.state = S_WAIT_RUN
                 self.log("sent " + self.params())
             elif self.ticks > 60:
@@ -572,7 +574,10 @@ class CallVideo:
                 self.resent_s = 1                    # the helper still idles: S was lost
                 self.send(self.params())
             elif self.ticks - self.t_s > 100:
-                self.fail(u"Camera did not start")
+                if self.rx_lines == self.rx_at_s:
+                    self.fail(u"Video helper is not responding")
+                else:
+                    self.fail(u"Camera did not start")
         elif self.state == S_RUNNING:
             if hs == 3:
                 self.fail(u"Camera error, video stopped")
@@ -612,6 +617,17 @@ class CallVideo:
             self.update_self(inf)
         if self.rx_on and inf[I_RX_STATE] == 2:
             self.update_peer(inf)
+        if self.rx_on and inf[I_RX_STATE] >= 3 and self.fwd_on:
+            # no decoder can show this stream: stop receiving it (no CPU, no PLI/REMB traffic)
+            self.log("peer video cannot be decoded (state %d, error %d): receiving stopped" % (
+                inf[I_RX_STATE], inf[I_RX_ERR]))
+            self.set_fwd(0)
+            au = self.audio
+            if au is not None:
+                try:
+                    au.set_rx(0)
+                except:
+                    self.errors = self.errors + 1
 
     def update_self(self, inf):
         td = self.tgvdisp

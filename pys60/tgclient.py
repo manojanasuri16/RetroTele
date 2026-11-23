@@ -1208,9 +1208,7 @@ class Client:
                                     % 2147483647),
                    "g_a_hash": tgcrypto.sha256(gab),
                    "protocol": self.protocol_for(cs)}
-            if self.vcap_on():
-                req["video"] = 1
-                self.vcap_log("requestCall with video flag set")
+            # a normal call is always a voice call; video is turned on during the call
             self.call(req, sent, fail)
         self.get_dh_config(have, fail)
         return 1

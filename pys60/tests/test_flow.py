@@ -477,6 +477,18 @@ app.view.canvas.keys[ord("2")]()
 assert fa.sent[-1] == "R1" and screen_text().find(u"[2] Sound | Speaker") >= 0
 sub[1][1]()
 assert fa.sent[-1] == "R0"
+# Options menu opened and cancelled (also its Sound output submenu): no menu callback runs and the
+# call goes on. If the right softkey fires with the Cancel (some S60 builds), it asks first.
+assert app.client.cs["state"] == "connected" and fa.running
+state["discard"] = None
+answers[:] = [None]                     # "End the call?" -> No / Cancel
+appuifw.app.exit_key_handler(); app.net.run()
+assert app.client.cs["state"] == "connected" and state["discard"] is None and fa.running and not notes[-1:] == [u"x"]
+assert "End the call?" in qlog[-1] or u"End the call?" == qlog[-1], qlog[-1]
+answers[:] = [0]
+appuifw.app.exit_key_handler(); app.net.run()
+assert app.client.cs["state"] == "connected" and state["discard"] is None
+assert [m[0] for m in appuifw.app.menu][-1] == u"Hang up"      # the menu is intact
 fa.helper_info(1, 0)
 # timer tick keeps going, then hang up with centre
 app.call_tick(); app.net.run()
@@ -532,7 +544,10 @@ incoming_req(557, ga)
 upd({"_": "phoneCallDiscarded", "id": 557, "reason": {"_": "phoneCallDiscardReasonMissed"}})
 assert app.client.cs["text"] == "Call ended (missed)"
 app.close_call()
+app.client.vcap_on = lambda: 1          # the capture flag file exists: it only turns the log on
 app.telegram_call("u42"); app.net.run()
+assert "video" not in state["req"] and not state["req"].get("video"), state["req"]    # always a voice call
+del app.client.vcap_on
 state["discard"] = None
 appuifw.app.exit_key_handler(); app.net.run()
 assert state["discard"][:2] == (777, "phoneCallDiscardReasonHangup"), state["discard"]
@@ -905,6 +920,7 @@ app.client.set_call_version("2.7.7")
 app.call_ready(cs277)
 f277 = callaudio_fake.CallAudio.instances[-1]
 assert f277.v277 and f277.signals == ["e1", "e2"], f277.signals
+assert not f277.want_rx, "receiving the peer's video is off by default"
 f277.on_signal("out1")
 assert state["sigs"][-1] == (4242, "out1"), state["sigs"]
 app.call_signaling("late")

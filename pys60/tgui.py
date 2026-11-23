@@ -2223,9 +2223,9 @@ class CallView(CanvasView):
             self.paint_selfview(g, w - pw - 6, ay + ah - ph - 6, pw, ph)
         if not self.full:
             self.paint_buttons(g, w, top + 4, vid, row2)
-        hint = u"8: show buttons    Right: Hang up"
+        hint = u"8: show buttons    Right: End call"
         if not self.full:
-            hint = u"8: full screen    Right: Hang up"
+            hint = u"8: full screen    Right: End call"
         if self.full:
             g.rectangle((0, h - 20, w, h), fill=CALL_BG)
             hint = fit(g, hint, "small", w - 10)
@@ -2342,7 +2342,7 @@ class CallView(CanvasView):
         elif st == "ended":
             hint = u"OK: Close"
         else:
-            hint = u"Left: Options     Right: Hang up"
+            hint = u"Left: Options     Right: End call"
         hint = fit(g, hint, "small", w - 10)
         g.text(((w - width(g, hint, "small")) / 2, h - 6), hint, fill=GREY_LIGHT,
                font=font("small"))

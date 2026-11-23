@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.14.4"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.14.5"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -1886,9 +1886,11 @@ class App:
         else:
             ok = ca.start_relay(cs["kb"], cs["out"], cs["conns"], self.audio_changed, iap)
         ca.on_info = self.audio_info
-        if self.client.call_version == "2.7.7" and self.cfg.get("video_rx") != "0":
+        if self.client.call_version == "2.7.7" and self.cfg.get("video_rx") == "1":
             try:
-                ca.set_rx(1)             # ask the peer for its video (shown if the phone can decode it)
+                # experiment only (config video_rx = 1): ask the peer for its video. Off by default:
+                # the N79's decoders cannot decode the High profile the official apps send.
+                ca.set_rx(1)
             except:
                 self.log("set_rx: " + err_text())
         if self.client.call_version == "2.7.7":
@@ -2189,7 +2191,25 @@ class App:
                         m.append((u"Turn video on", self.call_toggle_video))
             m.append((u"Hang up", self.call_hangup))
             appuifw.app.menu = m
-            appuifw.app.exit_key_handler = self.call_hangup
+            appuifw.app.exit_key_handler = self.call_exit_key
+
+    def call_exit_key(self):
+        """Right softkey during a connected call. On some S60 builds it also fires when Cancel/Back
+        closes the Options menu or a submenu, which must not end the call: ask first."""
+        cs = self.client.cs
+        if cs is None:
+            return
+        if cs["state"] == "connected":
+            try:
+                ok = appuifw.query(u"End the call?", "query")
+            except:
+                ok = None
+            if not ok:
+                self.redraw()
+                return
+            if self.client.cs is None or self.client.cs["state"] == "ended":
+                return
+        self.call_hangup()
 
     def call_primary(self):
         cs = self.client.cs

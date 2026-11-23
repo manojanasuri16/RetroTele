@@ -617,7 +617,7 @@ public:
             _LIT(KFlag, "E:\\retrotele_videocap.flag");
             TEntry ent;
             if (iFs.Entry(KFlag, ent) == KErrNone) {
-                c277_session_capture(iS, 1, 1);
+                c277_session_capture(iS, 1, 0);      /* the flag only turns the log on: it never makes us announce video */
                 iCap = ETrue;
                 CapWrite(_L8("--- v277 call, video capture on (no key, no peer IPs logged)\n"));
                 Write(_L8("step: video capture flag present\n"));

@@ -268,6 +268,10 @@ HDR[28] = 4
 vr.tick()
 assert vr.peer_failed() and vr.peer_frame() is None
 assert vr.peer_status() == u"Peer video: decoder cannot decode this stream (High profile)"
+HDR[28] = 4
+vr.tick()
+assert vr.fwd_on == 0 and cax.sent[-2:] == ["H0", "W0"], cax.sent[-3:]       # receiving stops for good
+vr.set_fwd(1)
 HDR[28] = 3; HDR[29] = -44
 vr.tick()
 assert vr.peer_status().find(u"decoder setup failed (error -44") >= 0

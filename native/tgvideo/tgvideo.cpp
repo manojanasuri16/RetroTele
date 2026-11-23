@@ -46,7 +46,7 @@ static RFs gFs;
 static TFileName gLogPath[3];
 static TInt gLogN = 0;
 static TBool gLogOk = EFalse;
-#define TGV_HELPER_VERSION "0.14.4"
+#define TGV_HELPER_VERSION "0.14.5"
 
 static void Log(TRefByValue<const TDesC8> aFmt, ...)
 {
@@ -535,7 +535,11 @@ static CDec* gDecoder;
 // tgcallaudio.exe sends "I profile constraints level w h" when the peer's SPS changes and every
 // access unit (Annex-B, SPS+PPS before an IDR) as fragments 'R' id idx cnt idr data[<=1200].
 static CDec* gRxDec = NULL;
+// Only the software decoder is used. The hardware decoder 0x10204bfc ends in a fatal error with the
+// peer's High profile and then hangs the helper (0.14.4 phone log: no "cmd S" was ever executed after
+// it), so it is no longer tried. KRxUidCount can be raised to 2 for experiments.
 static const TUint KRxUids[2] = { 0x102073ef, 0x10204bfc };
+static const TInt KRxUidCount = 1;
 static TInt gRxUidIdx = 0, gRxProfile = 0, gRxLevel = 0, gRxW = 0, gRxH = 0, gRxRebuild = 0;
 static TInt gRxFrags = 0, gRxAuIn = 0, gRxFed = 0, gRxPicBase = 0, gRxDead = 0;
 static const TInt KRxMax = 1300, KRxFragSz = 1200, KRxFragMax = 40;
@@ -578,8 +582,10 @@ static TInt BuildRxDec()
 static void RxDecoderFailed(const TDesC8& aWhy)
 {
     Log(_L8("rx: decoder 0x%08x FAILED: %S (peer profile %d level %d %dx%d)"), KRxUids[gRxUidIdx], &aWhy, gRxProfile, gRxLevel, gRxW, gRxH);
-    delete gRxDec; gRxDec = NULL;
-    if (gRxUidIdx + 1 < 2) {
+    // the failed decoder is deliberately NOT deleted (stopping a decoder that failed can block this thread);
+    // it simply gets no more data and is released when the helper quits
+    gRxDec = NULL;
+    if (gRxUidIdx + 1 < KRxUidCount) {
         gRxUidIdx++;
         Log(_L8("rx: trying decoder 0x%08x"), KRxUids[gRxUidIdx]);
         return;
