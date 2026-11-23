@@ -1,6 +1,7 @@
 #!/bin/sh
-# Builds the native S60 3rd Edition app (needs Python for S60 1.4.5 on the
-# phone). Run ../tools/setup.sh once first. One package, dist/RetroTele.sis:
+# Builds the native S60 3rd Edition app (Python for S60 1.4.5 app; the runtime is bundled in the
+# phone). Run ../tools/setup.sh once first. One package, dist/RetroTele.sis (bundles the
+# Python for S60 runtime and Nokia's VoIP Audio Services, see the end of this file):
 # the installer asks for phone memory or the memory card, and it works on
 # either, wherever Python for S60 is installed: retrotele_rscfix.exe, run once
 # by the installer, puts appuifw's resource file on the app's drive (see
@@ -48,6 +49,7 @@ fi
 if [ -f native/tgcallaudio.exe ]; then
   mkdir -p build/app/extras/sys/bin
   cp native/tgcallaudio.exe build/app/extras/sys/bin/
+  [ -f native/tgbtroute.exe ] && cp native/tgbtroute.exe build/app/extras/sys/bin/   # Bluetooth routing
   EXTRAS="--extrasdir=extras"
   echo "including native/tgcallaudio.exe (calls)"
 fi
@@ -74,10 +76,11 @@ OPTS="--uid=0xE7A3D5C2 --appname=RetroTele --version=$VERSION \
   --caps=NetworkServices+LocalServices+ReadUserData+WriteUserData+UserEnvironment \
   --heapsize=4k,24M --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem $EXTRAS"
 rm -f dist/RetroTele-card.sis
-$PY tools/py2sis_rscfix.py "$(dirname $ENS)" $OPTS --drive=any build/app dist/RetroTele.sis \
+rm -f dist/RetroTele-full.sis
+$PY tools/py2sis_rscfix.py "$(dirname $ENS)" $OPTS --drive=any build/app dist/RetroTele-app-only.sis \
   </dev/null >build/py2sis.log
 grep "rscfix" build/py2sis.log || true
-echo "built dist/RetroTele.sis"
+echo "built dist/RetroTele-app-only.sis (debugging only: needs Python for S60 + VoIP Audio Services installed)"
 ls -la dist
 
 # Video hardware probe (E:\retrotele_videoprobe.txt). Own package, own UID; not part of RetroTele.sis.
@@ -296,13 +299,20 @@ if [ -f native/tgvideo.exe ] && [ -f native/tgvdisp.pyd ]; then
   echo "built dist/RetroTele-videomirror.sis"
 fi
 
-# LOCAL-ONLY bundle: embeds Nokia's VoIP Audio Services (VoIPAudioSrvc SISX) so
-# one file installs everything. Nokia's licence forbids distributing that file,
-# so this package is NOT published (dist/ is git-ignored and never uploaded).
-# Set VOIP_SIS=/path/to/VoIPAudioSrvc_3132_0x10207b9e.SISX to enable.
+# THE package: dist/RetroTele.sis = RetroTele + the Python for S60 1.4.5 runtime + Nokia's VoIP
+# Audio Services, merged by ensymble mergesis (each embedded package keeps its own UID, version
+# and signatures; the installer skips an embedded package that is already installed in the same
+# version). This one file goes on the card and into releases. The embedded components belong to
+# their owners (Python for S60: Nokia, Apache 2.0; VoIP Audio Services: Nokia, from the S60 3rd
+# FP2 API Plug-In Pack) and are included for convenience; they are removed if a rights holder
+# asks. Not bundled: PythonScriptShell (not needed by an app built with py2sis). dist/ is
+# git-ignored: release files are uploaded with gh, never committed.
+PYS60_SIS=${PYS60_SIS:-$(cd .. && pwd)/phone-installs/PythonForS60_1_4_5_3rdEd.sis}
 VOIP_SIS=${VOIP_SIS:-$(cd .. && pwd)/../symbian-sdk/apipack/x/voip/InstallToDevice/VoIPAudioSrvc_3132_0x10207b9e.SISX}
-if [ -f "$VOIP_SIS" ]; then
-  $PY $ENS mergesis --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
-    dist/RetroTele.sis "$VOIP_SIS" dist/RetroTele-full.sis </dev/null >build/mergesis.log 2>&1
-  echo "built dist/RetroTele-full.sis (local only: contains Nokia's VoIP service)"
-fi
+[ -f "$PYS60_SIS" ] || { echo "missing $PYS60_SIS (Python for S60 1.4.5 runtime, set PYS60_SIS)"; exit 1; }
+[ -f "$VOIP_SIS" ] || { echo "missing $VOIP_SIS (VoIP Audio Services, set VOIP_SIS)"; exit 1; }
+$PY $ENS mergesis --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem \
+  dist/RetroTele-app-only.sis "$PYS60_SIS" "$VOIP_SIS" dist/RetroTele.sis </dev/null >build/mergesis.log 2>&1 ||
+  { cat build/mergesis.log; exit 1; }
+echo "built dist/RetroTele.sis (app + Python for S60 runtime + VoIP Audio Services):"
+$PY ../tools/sisinfo.py dist/RetroTele.sis

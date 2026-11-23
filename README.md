@@ -56,8 +56,7 @@ There's no secret chats, file/video download or playback of GIFs or animated sti
 ## Install
 
 0. Make sure the phone is hacked and **Open4All rp+** is on (see [Requirements](#requirements-a-hacked-unlocked-phone)).
-1. Install **Python for S60 1.4.5** (`PythonForS60_1_4_5_3rdEd.sis`) if it's not on the phone yet.
-2. Install `RetroTele.sis` and choose **phone memory or memory card**: either works, wherever Python for S60 is installed, on a hacked phone (Open4All on, see Requirements). A Python for S60 1.4.5 app on a different drive from Python normally closes at once, because Python's `appuifw` looks for its resource file `appuifwmodule.rsc` on the app's drive. The package includes that file and a tiny native program that the installer runs once to put it in place (see [pys60/rscfix/README.md](pys60/rscfix/README.md)). Tested on a Nokia N79 with RetroTele on the memory card and Python in phone memory. On a phone that isn't unlocked, install RetroTele on the same drive as Python.
+1. Install `RetroTele.sis`. It is one file with everything: the app, the **Python for S60 1.4.5** runtime and Nokia's **VoIP Audio Services** (see [What's in RetroTele.sis](#whats-in-retrotelesis)). If Python for S60 1.4.5 or VoIP Audio Services are already on the phone (for example for RetroSend or RetroTorch), the installer keeps them. Choose **phone memory or memory card**: either works, wherever Python for S60 is installed, on a hacked phone (Open4All on, see Requirements). A Python for S60 1.4.5 app on a different drive from Python normally closes at once, because Python's `appuifw` looks for its resource file `appuifwmodule.rsc` on the app's drive. The package includes that file and a tiny native program that the installer runs once to put it in place (see [pys60/rscfix/README.md](pys60/rscfix/README.md)). Tested on a Nokia N79 with RetroTele on the memory card and Python in phone memory. On a phone that isn't unlocked, install RetroTele on the same drive as Python.
 3. On a computer, open <https://my.telegram.org>, go to **API development tools** and create an app. Note your own **api_id** and **api_hash**: RetroTele ships none, you enter yours.
 4. Open RetroTele and enter your api_id and api_hash once. Choose an access point (Wi-Fi or packet data), then log in.
 
@@ -100,7 +99,13 @@ Like this app, both are Python for S60 1.4.5 apps that install to phone memory o
 
 ## What's in RetroTele.sis
 
-One file, `RetroTele.sis`, installs everything: the app, the native crypto module, the call audio helper (Opus, full-duplex VoIP audio, Telegram call protocol 2.7.7), the memory-card fix and Nokia's *VoIP Audio Services* system component (needed by the phone for two-way call audio; (c) Nokia, from the S60 3rd Edition FP2 API Plug-In Pack, included unmodified).
+One file, `RetroTele.sis`, installs everything:
+
+- the app, the native crypto module, the call audio helper (Opus, full-duplex VoIP audio, Telegram call protocol 2.7.7), the video helpers (camera/H.264 encoder, the software H.264 decoder for the other person's video), the Bluetooth routing helper and the memory-card fix;
+- the **Python for S60 1.4.5** runtime (Nokia, Apache License 2.0), embedded unmodified (UID 0x2000b1a0, version 1.4.5, its own signatures);
+- Nokia's **VoIP Audio Services** system component (needed for two-way call audio; (c) Nokia, from the S60 3rd Edition FP2 API Plug-In Pack), embedded unmodified (UID 0x10207b9e).
+
+The two Nokia components belong to their owners and are included only for convenience; if a rights holder asks, they will be removed from the package. Already-installed copies in the same version are kept by the installer. The phone hack (Open4All, see Requirements) is still needed: bundling cannot grant the helpers' capabilities. Not bundled: the Python script shell (not needed). `pys60/build_sis.sh` builds it with `ensymble mergesis` (it also makes `RetroTele-app-only.sis`, for debugging only) and lists the embedded packages with `tools/sisinfo.py`.
 
 ## Credits
 
@@ -120,4 +125,4 @@ The full list is on the [RetroArchive Open source page](https://manojanasuri16.g
 
 ## License
 
-MIT, see [LICENSE](LICENSE). Third-party components (for example Opus, Nokia's VoIP Audio Services, which is not redistributed here) keep their own licences. The H.264 decoder in `native/third_party/ffmpeg-0.6.7/` (FFmpeg's, used to show the other person's video) is LGPL 2.1; see its NOTICE for the source and how to rebuild with a changed copy.
+MIT, see [LICENSE](LICENSE). Third-party components keep their own licences (for example Opus: BSD; Python for S60: Apache 2.0; Nokia's VoIP Audio Services: Nokia's terms; both Nokia components are bundled in RetroTele.sis for convenience and are removed on a rights holder's request). The H.264 decoder in `native/third_party/ffmpeg-0.6.7/` (FFmpeg's, used to show the other person's video) is LGPL 2.1; see its NOTICE for the source and how to rebuild with a changed copy.

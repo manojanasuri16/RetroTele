@@ -68,6 +68,7 @@ class CallAudio:
         self.want_agc = 1         # mic boost: 0 off, 1 normal (AGC), 2 high
         self.route_failed = -1    # the helper could not switch to this route (it kept the old one)
         self.bt_links = -1        # connected Bluetooth links the helper sees (-1 unknown)
+        self.tel_out = -1         # telephony audio output reported by tgbtroute.exe (5 = Bluetooth)
         self.route_user = 0       # the user picked a sound output in this call (no automatic switch)
         self.on_info = None
         self.sent_init = 0
@@ -360,6 +361,12 @@ class CallAudio:
                     pass
             elif data[:2] == "A ":
                 self.video_active = (data[2:].strip() == "1")
+                self._info()
+            elif data[:2] == "T ":
+                try:
+                    self.tel_out = int(data[2:].strip())
+                except:
+                    self.tel_out = -1
                 self._info()
             elif data[:2] == "B ":
                 try:

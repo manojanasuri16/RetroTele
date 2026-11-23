@@ -227,9 +227,12 @@ public:
         c277_agc_init(&iAgc, C277_AGC_NORMAL);    /* mic boost: the VoIP uplink's max gain is 1 on the N79 */
         iActualRoute = -1;
         iBtLinks = -2;
+        iBtWant = -1;
+        iBtOut = -1;
     }
     ~CRunner()
     {
+        if (iBtProcOpen) iBtProc.Close();
         delete iTimer;
         delete iTimer20;
         delete iRelayRecv;
@@ -454,6 +457,10 @@ public:
                 SendInfo('M', iMuted ? 1 : 0);
                 return ETrue;
             }
+            if (n >= 3 && aData[0] == 'b' && aData[1] == ' ') {
+                BtRouteReport(aData);            /* tgbtroute.exe answers here */
+                return ETrue;
+            }
             if (n == 2 && aData[0] == 'R' && aData[1] >= '0' && aData[1] <= '2') {
                 SetRoute(aData[1] - '0');
                 return ETrue;
@@ -513,6 +520,7 @@ public:
         b.AppendNum(aVal);
         SendTo(iSock, iDest, b.Ptr(), b.Length());
     }
+    typedef CVoIPAudioDownlinkStream::TVoIPOutputDevice TVoIPOutputDeviceAlias;
     static CVoIPAudioDownlinkStream::TVoIPOutputDevice RouteDev(TInt aRoute)
     {
         if (aRoute == 0) return CVoIPAudioDownlinkStream::EHandset;
@@ -522,12 +530,89 @@ public:
     // Sound output: 0 earpiece, 1 loudspeaker, 2 auto (no preference: the phone's audio policy
     // picks a connected Bluetooth headset or wired headset). An error never ends the call: the
     // previous route is restored and Python is told (info 'O' = failed route).
+    // ---- Bluetooth headset routing through tgbtroute.exe (Telephony Audio Routing API) ----
+    // With a headset connected, the VoIP stream's private route ("handset") does not open the
+    // headset's audio link by itself (0.15.1: no sound and no mic in "earpiece" and "auto").
+    // tgbtroute.exe asks the phone's telephony audio routing for the Bluetooth accessory or the
+    // handset explicitly. It is a separate process because its API has no ARM library in the SDK
+    // (it finds the entry point at run time and may crash on a wrong guess): we restart it a few
+    // times and the call never depends on it.
+    void BtSend(const TDesC8& aCmd)
+    {
+        if (!iNetOk) return;
+        TInetAddr to(INET_ADDR(127, 0, 0, 1), 47016);
+        TRequestStatus st;
+        iSock.SendTo(aCmd, to, 0, st);
+        User::WaitForRequest(st);
+    }
+    TBool BtAlive() { return iBtProcOpen && iBtProc.ExitType() == EExitPending; }
+    void BtStart()
+    {
+        if (BtAlive()) return;
+        if (iBtProcOpen) {
+            TExitCategoryName cat = iBtProc.ExitCategory();
+            TBuf8<KMaxExitCategoryName> c8; c8.Copy(cat);
+            TBuf8<128> lb;
+            lb.Format(_L8("route: tgbtroute.exe ended (type %d %S %d)\n"), (TInt)iBtProc.ExitType(), &c8, iBtProc.ExitReason());
+            Write(lb);
+            iBtProc.Close();
+            iBtProcOpen = EFalse;
+        }
+        if (iBtStarts >= 5 || iBtUnavailable) return;
+        iBtStarts++;
+        TInt e = iBtProc.Create(_L("tgbtroute.exe"), KNullDesC);
+        TBuf8<80> lb;
+        lb.Format(_L8("route: starting tgbtroute.exe (%d) err %d\n"), iBtStarts, e);
+        Write(lb);
+        if (e == KErrNone) { iBtProc.Resume(); iBtProcOpen = ETrue; iBtReady = EFalse; }
+    }
+    void BtWant(TInt aRoute)
+    {
+        // 0 handset, 1 loudspeaker, 2 Bluetooth/auto: only when a headset is connected
+        iBtWant = aRoute;
+        if (iBtLinks <= 0 && !BtAlive()) return;
+        BtStart();
+        if (iBtReady) BtApply();
+    }
+    void BtApply()
+    {
+        if (iBtWant < 0) return;
+        TBuf8<8> c;
+        c.Format(_L8("R %c"), iBtWant == 2 ? 'b' : (iBtWant == 1 ? 'l' : 'h'));
+        BtSend(c);
+        TBuf8<64> lb;
+        lb.Format(_L8("route: asked tgbtroute for %S\n"), &c);
+        Write(lb);
+    }
+    void BtRouteReport(const TDesC8& aData)
+    {
+        TBuf8<96> lb;
+        lb.Format(_L8("route: tgbtroute %S\n"), &aData);
+        Write(lb);
+        TLex8 lx(aData.Mid(2));
+        TPtrC8 what = lx.NextToken();
+        TInt out = -1;
+        lx.SkipSpace();
+        lx.Val(out);
+        if (what == _L8("ready")) { iBtReady = ETrue; BtApply(); }
+        else if (what == _L8("unavailable")) { iBtUnavailable = ETrue; SendInfo('O', 2); }
+        // telephony outputs: 2 handset, 3 loudspeaker, 4 wired, 5 Bluetooth accessory
+        if (out >= 0) {
+            iBtOut = out;
+            SendInfo('T', out);
+        }
+    }
     void SetRoute(TInt aRoute)
     {
         TInt prev = iWantRoute;
         iWantRoute = aRoute;
         TInt rerr = KErrNone;
-        if (iStarted && iDn) rerr = iDn->SetAudioDevice(RouteDev(iWantRoute));
+        // with a headset: "Bluetooth" and "earpiece" are both private (handset) on the VoIP stream,
+        // tgbtroute picks the accessory or the handset
+        TVoIPOutputDeviceAlias dev = RouteDev(iWantRoute);
+        if (iBtLinks > 0 && iWantRoute == 2) dev = CVoIPAudioDownlinkStream::EHandset;
+        if (iStarted && iDn) rerr = iDn->SetAudioDevice(dev);
+        BtWant(iWantRoute);
         TBuf8<96> lb;
         lb.Format(_L8("route: request %d -> err %d (uplink frames %d in the last second)\n"), aRoute, rerr, iUpLastSec);
         Write(lb);
@@ -554,8 +639,10 @@ public:
     void CheckBt()
     {
         TInt n = BtLinks();
+        if (iBtProcOpen && !BtAlive() && iBtWant >= 0) BtWant(iBtWant);   /* it crashed: try again */
         if (n == iBtLinks) return;
         iBtLinks = n;
+        if (n > 0 && iStarted) BtWant(iWantRoute);
         TBuf8<160> lb;
         lb.Format(_L8("route: outputs earpiece(0) loudspeaker(1) auto(2)%S, bluetooth links %d, wanted %d actual %d\n"),
                   n > 0 ? &_L8(" bluetooth=auto") : &_L8(""), n, iWantRoute, iActualRoute);
@@ -580,6 +667,7 @@ public:
     }
     void FinalStatus()
     {
+        BtSend(_L8("Q"));
         if (iVideoEver && iNetOk) {      // never leave the camera reserved: ask tgvideo.exe to quit
             TRequestStatus qs;
             TBuf8<2> q(_L8("Q"));
@@ -1696,6 +1784,9 @@ private:
     TInt iLastUpMs, iLastDnMs, iUpFrames, iUpLastSec, iUpFixAt, iUpFixes, iDnFixAt, iSilFrames, iRouteAt;
     TBool iUpBroken, iDnBroken, iUpReopen;
     TInt iActualRoute, iBtLinks;
+    RProcess iBtProc;
+    TBool iBtProcOpen, iBtReady, iBtUnavailable;
+    TInt iBtStarts, iBtWant, iBtOut;
     // v277
     TBool iV277;
     c277_session* iS;

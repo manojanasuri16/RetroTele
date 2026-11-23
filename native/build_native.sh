@@ -45,6 +45,13 @@ OUT="$EPOCROOT/epoc32/release/gcce/urel/tgvoiptest.exe"
 OUT="$EPOCROOT/epoc32/release/gcce/urel/tgcallaudio.exe"
 [ -f "$OUT" ] && cp "$OUT" "$HERE/../pys60/native/tgcallaudio.exe"
 
+# tgbtroute.exe: Bluetooth headset / handset routing for calls (started by tgcallaudio.exe)
+cd "$HERE/btroute/group"
+bldmake bldfiles >/dev/null 2>&1
+abld build gcce urel 2>&1 | grep -iE "error" || true
+OUT="$EPOCROOT/epoc32/release/gcce/urel/tgbtroute.exe"
+[ -f "$OUT" ] && cp "$OUT" "$HERE/../pys60/native/tgbtroute.exe"
+
 # tgvprobe.exe: video hardware/codec/camera probe (separate package)
 cd "$HERE/vidprobe/group"
 bldmake bldfiles >/dev/null 2>&1

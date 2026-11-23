@@ -1,0 +1,12 @@
+// tgbtroute.exe: Bluetooth headset / handset routing for RetroTele calls (see btroute.cpp)
+TARGET        tgbtroute.exe
+TARGETTYPE    exe
+UID           0x0 0xE7A3D5EE
+CAPABILITY    MultimediaDD ReadDeviceData WriteDeviceData UserEnvironment LocalServices NetworkServices
+VENDORID      0
+EPOCSTACKSIZE 0x5000
+SYSTEMINCLUDE \epoc32\include
+USERINCLUDE   ..
+SOURCEPATH    ..
+SOURCE        btroute.cpp
+LIBRARY       euser.lib efsrv.lib esock.lib insock.lib

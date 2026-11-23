@@ -408,6 +408,8 @@ a.set_rxfwd(1); assert sent[-1] == "H1"
 a.set_agc(2); assert sent[-1] == "A2" and a.want_agc == 2
 a.set_agc(7); assert sent[-1] == "A1"                  # bad value: normal
 a._handle("O 2"); assert a.route_failed == 2
+a._handle("B 1"); assert a.bt_links == 1
+a._handle("T 5"); assert a.tel_out == 5           # tgbtroute: Bluetooth accessory active
 del sent[:]
 a._send_controls()
 assert "W1" in sent and "H1" in sent    # resent when the helper starts late

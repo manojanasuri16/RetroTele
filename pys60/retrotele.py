@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.15.1"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.15.2"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -2028,7 +2028,11 @@ class App:
         if r == 1:
             return u"Speaker"
         if self.call_bt():
-            return u"Bluetooth"
+            ca = self.call_audio
+            to = getattr(ca, "tel_out", -1)
+            if to == 5 or to == -1:
+                return u"Bluetooth"
+            return u"Bluetooth?"            # asked for, not (yet) confirmed by the phone
         return u"Auto"
 
     def call_pick_route(self, n):
