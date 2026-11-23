@@ -334,6 +334,22 @@ void c277_session_rx_enable(c277_session *s, int want, int fwd, u32 remb_kbps)
     s->rx_remb_bps = remb_kbps * 1000UL;
 }
 
+/* the decoder (tgvideo.exe) fell behind or failed: drop everything up to the next IDR and ask
+ * the peer for one (PLI, repeated every 2.5 s while waiting) */
+void c277_session_rx_request_idr(c277_session *s)
+{
+    if (!s->rx_fwd) return;
+    s->vrx.need_idr = 1;
+    s->rx_pli_due = 1;
+    s->rx_idr_req_n++;
+}
+
+/* bitrate the peer is told it may send us (REMB), kbps; 0 = no REMB */
+void c277_session_rx_set_remb(c277_session *s, u32 remb_kbps)
+{
+    s->rx_remb_bps = remb_kbps * 1000UL;
+}
+
 int c277_session_vrx_take(c277_session *s, const u8 **au, u32 *len, int *idr)
 {
     if (!s->vrx.ready) return 0;

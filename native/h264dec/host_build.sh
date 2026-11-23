@@ -5,7 +5,7 @@ set -e
 H=$(cd "$(dirname "$0")" && pwd)
 FF="$H/../third_party/ffmpeg-0.6.7"
 O=${OUT:-${TMPDIR:-/tmp}/h264dec_host}; mkdir -p "$O/obj"
-CF="-O2 -std=gnu99 -w -fno-strict-aliasing -DHAVE_AV_CONFIG_H -DH264DEC_HOOKS -I$H/config -I$FF -I$H $*"
+CF="-O2 -std=gnu99 -w -fno-strict-aliasing -DHAVE_AV_CONFIG_H -DH264DEC_HOOKS -I$H/config/catch -I$H/config -I$FF -I$H $*"
 CF="$CF -Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-function-declaration"
 OBJS=""
 for s in $(cat "$H/sources.txt"); do

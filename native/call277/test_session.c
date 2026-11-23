@@ -837,6 +837,22 @@ static void test_rx_forward(void)
         c277_session_vrx_done(s);
     }
     CHECK(s->vrx.n_lost == 0 && s->vrx.n_drop_au == 0);
+    /* the decoder asks for an IDR: P frames are dropped until it comes, a PLI is due; REMB settable */
+    s->rx_pli_due = 0;
+    c277_session_rx_request_idr(s);
+    CHECK(s->vrx.need_idr == 1 && s->rx_pli_due == 1 && s->rx_idr_req_n == 1);
+    {
+        u8 p3[20];
+        memset(p3, 5, sizeof(p3)); p3[0] = 0x41;
+        c277_vrx_put(&s->vrx, 16, 2790, 1, 3, p3, sizeof(p3), 400);
+        CHECK(c277_session_vrx_take(s, &au, &len, &is_idr) == 0);
+        CHECK(c277_vrx_put(&s->vrx, 17, 2880, 0, 3, stap, k, 401) == 0);
+        CHECK(c277_vrx_put(&s->vrx, 18, 2880, 1, 3, idr, sizeof(idr), 402) == 1);
+        CHECK(c277_session_vrx_take(s, &au, &len, &is_idr) == 1 && is_idr == 1);
+        c277_session_vrx_done(s);
+    }
+    c277_session_rx_set_remb(s, 100);
+    CHECK(s->rx_remb_bps == 100000UL);
     free(s);
 }
 

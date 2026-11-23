@@ -26,6 +26,8 @@ extern "C" {
 #define H264DEC_ERR_TOOBIG  -2   /* the stream's picture is larger than max_w x max_h */
 #define H264DEC_ERR_NOMEM   -3   /* out of memory */
 #define H264DEC_ERR_ARG     -4   /* bad argument */
+#define H264DEC_ERR_FATAL   -5   /* internal decoder failure (assert/abort caught): it was reset,
+                                    feed the next IDR (with SPS/PPS) */
 
 typedef struct h264dec h264dec;
 
@@ -56,7 +58,9 @@ int h264dec_decode(h264dec *d, const unsigned char *au, int len, h264dec_frame *
 /* Drop all references and state (e.g. after a long loss); wait for the next IDR. */
 void h264dec_reset(h264dec *d);
 
-/* Number of pictures decoded, and decode errors seen, since create. */
+/* Number of pictures decoded, and decode errors seen, since create. A failed internal assertion
+ * or abort() in the FFmpeg code is caught (one decoding thread per process: the jump target is
+ * process-wide) and counts as an error. */
 int h264dec_stats(h264dec *d, int *frames, int *errors);
 
 void h264dec_destroy(h264dec *d);

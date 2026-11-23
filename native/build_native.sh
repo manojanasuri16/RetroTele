@@ -59,6 +59,10 @@ abld build gcce urel 2>&1 | grep -iE "error" || true
 OUT="$EPOCROOT/epoc32/release/gcce/urel/tgvbench.exe"
 [ -f "$OUT" ] && cp "$OUT" "$HERE/../pys60/native/tgvbench.exe"
 
+# h264dec.lib: software H.264 decoder for the peer video (FFmpeg 0.6.7 h264, LGPL, see
+# native/third_party/ffmpeg-0.6.7/NOTICE), linked into tgvideo.exe; tgh264bench.exe: its benchmark
+sh "$HERE/h264dec/build_h264dec.sh"
+
 # tgvideo.exe: video helper (camera -> H.264 encode -> decode -> shared chunk) and
 # tgvdisp.pyd: draws its frames into a PyS60 graphics.Image (RetroTele-videomirror.sis)
 cd "$HERE/tgvideo/group"
@@ -71,7 +75,3 @@ bldmake bldfiles >/dev/null 2>&1
 abld build gcce urel 2>&1 | grep -iE "error" || true
 OUT="$EPOCROOT/epoc32/release/gcce/urel/tgvdisp.pyd"
 [ -f "$OUT" ] && cp "$OUT" "$HERE/../pys60/native/tgvdisp.pyd"
-
-# h264dec.lib: software H.264 decoder (FFmpeg 0.6.7 h264, LGPL, see native/third_party/ffmpeg-0.6.7/NOTICE)
-# and tgh264bench.exe: its benchmark (separate package, RetroTele-h264bench.sis)
-sh "$HERE/h264dec/build_h264dec.sh"

@@ -28,6 +28,8 @@ PC: `sh host_build.sh` builds `h264dec_test`; `sh tests/conformance.sh` encodes 
 like a WebRTC sender and compares the output with the system ffmpeg byte for byte
 (`ASAN=1` for an AddressSanitizer build of the robustness cases).
 
+Used by tgvideo.exe (peer video in calls, see docs/CALL-VIDEO-SPEC.md section 8).
+
 Benchmark: `tests/make_bench_clips.sh` generates `bench/gen/h264bench_clips.h` (x264 clips +
 the PC's per-picture checksums; git-ignored), `tgh264bench.exe` (UID 0xE7A3D5EC) in
 `RetroTele-h264bench.sis` (wrapper app 0xE7A3D5ED, built by `pys60/build_sis.sh`) decodes them on

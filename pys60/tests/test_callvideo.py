@@ -64,6 +64,8 @@ mod("tgvdisp", **dict([(n, getattr(disp, n)) for n in ("attach", "detach", "info
 sys.path.insert(0, os.path.join(HERE, "fake_s60"))
 import callaudio_fake
 import callvideo as cv
+DEAD = cv.DEAD_TICKS
+cv.DEAD_TICKS = 1000000      # most tests tick without status lines; the watchdog is tested at the end
 
 # ---- status parsing
 assert cv.parse_status("T hello") == 2
@@ -304,24 +306,26 @@ HDR[28] = 2; HDR[4] = 3; HDR[5] = 176; HDR[6] = 320
 vr.tick()
 f = vr.peer_frame()
 assert f is not None and f[1:] == (176, 320) and (0, 0, -1) in RENDERS, (f, RENDERS)
-assert vr.peer_status() == u"Peer video: receiving 176x320" and not vr.peer_failed()
+assert vr.peer_status() == u"Peer video 176x320" and not vr.peer_failed()
 n = len(CHANGES)
 vr.tick()
 assert len(CHANGES) == n                    # same frame counter: no redraw
 HDR[4] = 4; HDR[5] = 528; HDR[6] = 960      # big peer picture: drawn at half size
 vr.tick()
 assert vr.peer_frame()[1:] == (264, 480)
-HDR[28] = 4
+HDR[28] = 4                                 # too large for now: keeps receiving, no picture
+vr.tick()
+assert not vr.peer_failed() and vr.peer_frame() is None and vr.fwd_on == 1
+assert vr.peer_status().startswith(u"Peer video too large for this phone"), vr.peer_status()
+HDR[28] = 5                                 # resyncing: the last picture stays
+vr.tick()
+assert vr.peer_frame() is not None and vr.fwd_on == 1
+HDR[28] = 3; HDR[29] = -4                   # decoder unavailable for good: receiving stops
 vr.tick()
 assert vr.peer_failed() and vr.peer_frame() is None
-assert vr.peer_status() == u"Peer video: decoder cannot decode this stream (High profile)"
-HDR[28] = 4
-vr.tick()
-assert vr.fwd_on == 0 and cax.sent[-2:] == ["H0", "W0"], cax.sent[-3:]       # receiving stops for good
+assert vr.peer_status().find(u"decoder not available (error -4") >= 0, vr.peer_status()
+assert vr.fwd_on == 0 and cax.sent[-2:] == ["H0", "W0"], cax.sent[-3:]
 vr.set_fwd(1)
-HDR[28] = 3; HDR[29] = -44
-vr.tick()
-assert vr.peer_status().find(u"decoder setup failed (error -44") >= 0
 HDR[28] = 5; HDR[29] = -1
 assert vr.peer_status() or 1
 vr.tick()
@@ -412,4 +416,50 @@ a._send_controls()
 assert "V1" not in sent                 # voice-only calls send no video control
 a.stop()
 assert a.peer_video == -1 and a.peer_asked == 0
+# ---- watchdog: the helper dies (status lines stop) -> started again, peer picture resumes
+cv.DEAD_TICKS = DEAD
+cwd = callaudio_fake.CallAudio()
+vd = cv.CallVideo(cwd, None, LOG.append)
+del STARTED[:], SENT[:]
+assert vd.start_rx() == 1 and STARTED == ["tgvideo.exe"]
+vd.on_status("T hello"); vd.tick()
+assert vd.state == cv.S_RXIDLE and vd.fwd_on == 1
+for i in range(cv.DEAD_TICKS):
+    if i % 5 == 0:
+        vd.on_status("T 2 0 0 0 0 0 0 0 0 0 0 0 0")       # alive: one line a second
+    vd.tick()
+assert vd.state == cv.S_RXIDLE and STARTED == ["tgvideo.exe"]
+for i in range(cv.DEAD_TICKS + 2):
+    vd.tick()                                              # silent: presumed dead
+assert STARTED == ["tgvideo.exe", "tgvideo.exe"] and vd.state == cv.S_RXSTART and vd.restarts == 1
+assert vd.fwd_on == 0 and cwd.sent[-1] == "H0"
+vd.on_status("T hello"); vd.tick()
+assert vd.state == cv.S_RXIDLE and vd.fwd_on == 1 and cwd.sent[-1] == "H1"   # the engine asks for an IDR again
+# while sending: back to the camera start
+vd.start(cv.CAM_FRONT); vd.tick()
+vd.on_status("T 1 1 176 144 150 150 0 12 7500 0 0 1 0"); vd.tick()
+assert vd.state == cv.S_RUNNING
+for i in range(cv.DEAD_TICKS + 2):
+    vd.tick()
+assert vd.state == cv.S_STARTING and vd.restarts == 2 and len(STARTED) == 3
+vd.on_status("T hello"); vd.tick()
+assert vd.state == cv.S_WAIT_RUN
+vd.on_status("T 1 1 176 144 150 150 0 12 7500 0 0 1 0"); vd.tick()
+assert vd.state == cv.S_RUNNING and SENT[-1][0] == "E 1"
+# a helper that keeps dying: give up after HELPER_RESTARTS, the call goes on
+vd.restarts = cv.HELPER_RESTARTS
+for i in range(cv.DEAD_TICKS + 2):
+    vd.tick()
+assert vd.state == cv.S_FAILED and len(STARTED) == 3
+# peer status texts (0.15.0 software decoder)
+HDR[28] = 4; HDR[30] = 352; HDR[31] = 640
+vq2 = cv.CallVideo(callaudio_fake.CallAudio(), None, None)
+vq2.start_rx(); vq2.on_status("T hello"); vq2.tick()
+vq2.inf = tuple(HDR)
+assert vq2.peer_status() == u"Peer video too large for this phone (352x640), waiting for a smaller size", vq2.peer_status()
+assert not vq2.peer_failed()
+HDR[28] = 5
+vq2.inf = tuple(HDR)
+assert vq2.peer_status() == u"Peer video: decoder error, resyncing"
+HDR[28] = 2
 print "test_callvideo OK"

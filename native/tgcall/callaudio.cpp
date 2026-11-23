@@ -219,7 +219,7 @@ class CRunner : public CBase, public MVoIPDownlinkObserver,
                 public MVoIPUplinkObserver, public MVoIPFormatObserver
 {
 public:
-    CRunner(TInt aSeconds, TBool aRelay) : iSeconds(aSeconds), iRelayMode(aRelay), iWantRoute(1) {}
+    CRunner(TInt aSeconds, TBool aRelay) : iSeconds(aSeconds), iRelayMode(aRelay), iWantRoute(1), iRembKbps(100) {}
     ~CRunner()
     {
         delete iTimer;
@@ -704,6 +704,30 @@ public:
     // ---- video send
     void VideoUnit(const TDesC8& aData)
     {
+        if (iV277 && iS && aData.Length() >= 1 && aData[0] == 'P') {
+            /* tgvideo.exe's decoder needs a fresh IDR (backlog dropped, decode error) */
+            c277_session_rx_request_idr(iS);
+            iRxIdrReqs++;
+            if (iRxIdrReqs <= 5 || iRxIdrReqs % 20 == 0) {
+                TBuf8<64> lb;
+                lb.Format(_L8("rx: keyframe request %d from tgvideo's decoder\n"), iRxIdrReqs);
+                Write(lb);
+            }
+            return;
+        }
+        if (iV277 && iS && aData.Length() >= 2 && aData[0] == 'B') {
+            /* REMB bitrate for the peer's video, ASCII kbps */
+            TInt kb = 0;
+            for (TInt i = 1; i < aData.Length() && aData[i] >= '0' && aData[i] <= '9'; i++) kb = kb * 10 + (aData[i] - '0');
+            if (kb >= 30 && kb <= 2000) {
+                iRembKbps = kb;
+                c277_session_rx_set_remb(iS, (u32)kb);
+                TBuf8<64> lb;
+                lb.Format(_L8("rx: REMB set to %d kbit/s by tgvideo\n"), kb);
+                Write(lb);
+            }
+            return;
+        }
         iVUnits++;
         if (iVUnits == 1 || iVUnits == 50) {
             TBuf8<64> lb;
@@ -725,7 +749,7 @@ public:
     }
     void ApplyRx()
     {
-        if (iV277 && iS) c277_session_rx_enable(iS, iRxWant, iRxFwd, 150);
+        if (iV277 && iS) c277_session_rx_enable(iS, iRxWant, iRxFwd, (u32)iRembKbps);
     }
     // peer video -> tgvideo.exe (port 47015). 'I' text line "I profile level w h" when the peer's SPS
     // changes, then each access unit as fragments: 'R', id, index, count, idr, up to 1200 bytes.
@@ -1514,7 +1538,8 @@ private:
     RSocket iVSock;
     CVRecv* iVRecv;
     TBool iVNet, iVideoEver;
-    TInt iRxWant, iRxFwd, iRxId, iRxAu;
+    TInt iRxWant, iRxFwd, iRxId, iRxAu, iRxIdrReqs;
+    TInt iRembKbps;           /* REMB for the peer video: 100 kbit/s keeps it at 176x320 (tgvideo may raise it) */
     TInetAddr iTgvRx;
     TInetAddr iTgv;
     TInt iVUnits, iKeyReqs, iLastPeerVid, iLastReqVid, iLastVidAct;

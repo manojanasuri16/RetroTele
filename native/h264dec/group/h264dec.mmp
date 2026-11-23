@@ -6,6 +6,7 @@ OPTION GCCE   -O2 -mcpu=arm1136j-s -fomit-frame-pointer -fno-strict-aliasing -Wi
 MACRO         HAVE_AV_CONFIG_H
 MACRO         H264DEC_HOOKS
 
+SYSTEMINCLUDE ..\config\catch
 SYSTEMINCLUDE ..\config\symbian
 SYSTEMINCLUDE \epoc32\include
 SYSTEMINCLUDE \epoc32\include\libc

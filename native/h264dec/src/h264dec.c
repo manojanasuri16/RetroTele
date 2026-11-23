@@ -9,8 +9,34 @@
 #include "libavcodec/avcodec.h"
 #include "libavcodec/h264.h"
 #include "h264dec.h"
+#include <stdlib.h>
+#undef abort
 
 extern AVCodec h264_decoder;
+
+/* Jump target of h264dec_fail()/h264dec_abort() while a decode call runs (process-wide: one
+ * decoding thread). __builtin_setjmp needs no libc support (estlib on Symbian). */
+static void **g_jump = NULL;
+static const char *g_fail_file = NULL;
+static int g_fail_line = 0;
+
+void h264dec_fail(const char *file, int line, const char *what)
+{
+    (void)what;
+    g_fail_file = file;
+    g_fail_line = line;
+    if (g_jump != NULL) {
+        void **j = g_jump;
+        g_jump = NULL;
+        __builtin_longjmp(j, 1);
+    }
+    abort();
+}
+
+void h264dec_abort(void)
+{
+    h264dec_fail("abort", 0, "abort");
+}
 
 #define PAD FF_INPUT_BUFFER_PADDING_SIZE
 
@@ -21,7 +47,7 @@ struct h264dec {
     int buf_size;
     int max_area, max_side;
     int too_big;              /* the last access unit was refused by the size hook */
-    int frames, errors;
+    int frames, errors, fatal;
     h264dec_log_fn log_fn;
     void *log_user;
 };
@@ -136,7 +162,27 @@ int h264dec_decode(h264dec *d, const unsigned char *au, int len, h264dec_frame *
     pkt.size = len;
     d->too_big = 0;
     avcodec_get_frame_defaults(&d->pic);
-    r = avcodec_decode_video2(d->ctx, &d->pic, &got, &pkt);
+    {
+        void *jb[5];
+        if (__builtin_setjmp(jb)) {
+            /* an assert/abort inside FFmpeg: its state is suspect, start over */
+            g_jump = NULL;
+            d->errors++;
+            d->fatal++;
+            if (d->log_fn) {
+                char m[96];
+                snprintf(m, sizeof(m), "internal failure at %s:%d, decoder reset\n",
+                         g_fail_file ? g_fail_file : "?", g_fail_line);
+                d->log_fn(d->log_user, m);
+            }
+            close_codec(d);
+            open_codec(d);
+            return d->ctx ? H264DEC_ERR_FATAL : H264DEC_ERR_NOMEM;
+        }
+        g_jump = jb;
+        r = avcodec_decode_video2(d->ctx, &d->pic, &got, &pkt);
+        g_jump = NULL;
+    }
     if (d->too_big) {
         d->errors++;
         return H264DEC_ERR_TOOBIG;

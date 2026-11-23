@@ -5,12 +5,16 @@ UID           0x0 0xE7A3D5E9
 CAPABILITY    MultimediaDD ReadDeviceData WriteDeviceData UserEnvironment LocalServices NetworkServices ReadUserData WriteUserData
 VENDORID      0
 EPOCSTACKSIZE 0x10000
-EPOCHEAPSIZE  0x40000 0x800000
+// heap: camera/encoder + the software decoder of the peer video (about 1 MB at 240x480)
+EPOCHEAPSIZE  0x80000 0x1400000
 
 SYSTEMINCLUDE \epoc32\include
+SYSTEMINCLUDE \epoc32\include\libc
 USERINCLUDE   ..
+USERINCLUDE   ..\..\h264dec
 
 SOURCEPATH    ..
 SOURCE        tgvideo.cpp
 
-LIBRARY       euser.lib efsrv.lib devvideo.lib ecam.lib mmfcontrollerframework.lib bafl.lib hal.lib fbscli.lib esock.lib insock.lib
+STATICLIBRARY h264dec.lib
+LIBRARY       euser.lib efsrv.lib devvideo.lib ecam.lib mmfcontrollerframework.lib bafl.lib hal.lib fbscli.lib esock.lib insock.lib estlib.lib

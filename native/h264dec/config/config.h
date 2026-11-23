@@ -10,6 +10,10 @@
 #define CC_TYPE "gcc"
 #define CC_VERSION __VERSION__
 #define restrict __restrict
+/* abort() inside the decoder (e.g. "picture buffer overflow" in mpegvideo.c) jumps back to
+ * h264dec_decode() like a failed assert (config/catch/assert.h), see src/h264dec.c */
+void h264dec_abort(void);
+#define abort h264dec_abort
 /* glibc has the C99 math functions; Symbian estlib does not (libavutil/libm.h fills in) */
 #ifdef __SYMBIAN32__
 #define HOST_LIBM 0

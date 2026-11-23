@@ -40,13 +40,16 @@
 #include <mmf/devvideo/devvideorecord.h>
 #include "tgvshared.h"
 #include "clip_data.h"
+#include <sys/reent.h>            // CloseSTDLIB (the decode thread uses estlib through h264dec)
+#include "h264dec.h"
+#include "symbian/h264dec_thread.h"
 
 // ---------------------------------------------------------------- log
 static RFs gFs;
 static TFileName gLogPath[3];
 static TInt gLogN = 0;
 static TBool gLogOk = EFalse;
-#define TGV_HELPER_VERSION "0.14.6"
+#define TGV_HELPER_VERSION "0.15.0"
 
 static void Log(TRefByValue<const TDesC8> aFmt, ...)
 {
@@ -191,6 +194,39 @@ private:
     TInetAddr iTo;
 };
 static CSend* gSend;
+
+// small control datagrams to tgcallaudio.exe (127.0.0.1:47014): 'P' keyframe request for the
+// peer's video, 'B<kbps>' REMB bitrate
+class CCtlSend : public CActive
+{
+public:
+    CCtlSend() : CActive(CActive::EPriorityStandard), iPtr(iBuf, 0, 16) { CActiveScheduler::Add(this); }
+    ~CCtlSend() { Cancel(); }
+    TBool Send(const TDesC8& aMsg)
+    {
+        if (IsActive() || !gSockOk) return EFalse;
+        iPtr.Copy(aMsg.Left(16));
+        iTo.SetAddress(INET_ADDR(127, 0, 0, 1));
+        iTo.SetPort(47014);
+        gTxSock.SendTo(iPtr, iTo, 0, iStatus);
+        SetActive();
+        return ETrue;
+    }
+    void RunL() {}
+    void DoCancel() { gTxSock.CancelSend(); }
+private:
+    TUint8 iBuf[16];
+    TPtr8 iPtr;
+    TInetAddr iTo;
+};
+static CCtlSend* gCtl[2];
+static void SendCtl(const TDesC8& aMsg)
+{
+    for (TInt i = 0; i < 2; i++) {
+        if (!gCtl[i]) gCtl[i] = new CCtlSend;
+        if (gCtl[i] && gCtl[i]->Send(aMsg)) return;
+    }
+}
 static void Status(TRefByValue<const TDesC8> aFmt, ...)
 {
     if (!gSend) return;
@@ -537,96 +573,354 @@ static CDec* gDecoder;
 // ---------------------------------------------------------------- peer video (UDP 127.0.0.1:47015)
 // tgcallaudio.exe sends "I profile constraints level w h" when the peer's SPS changes and every
 // access unit (Annex-B, SPS+PPS before an IDR) as fragments 'R' id idx cnt idr data[<=1200].
-static CDec* gRxDec = NULL;
-// Only the software decoder is used. The hardware decoder 0x10204bfc ends in a fatal error with the
-// peer's High profile and then hangs the helper (0.14.4 phone log: no "cmd S" was ever executed after
-// it), so it is no longer tried. KRxUidCount can be raised to 2 for experiments.
-static const TUint KRxUids[2] = { 0x102073ef, 0x10204bfc };
-static const TInt KRxUidCount = 1;
-static TInt gRxUidIdx = 0, gRxProfile = 0, gRxLevel = 0, gRxW = 0, gRxH = 0, gRxRebuild = 0;
-static TInt gRxFrags = 0, gRxAuIn = 0, gRxFed = 0, gRxPicBase = 0, gRxDead = 0;
+//
+// 0.15.0: the peer's H.264 High stream is decoded in software (native/h264dec: FFmpeg 0.6.7's
+// H.264 decoder, bit-exact with the PC, 18.6 ms per 176x320 frame on the N79) on a worker thread
+// (H264DecCreateThread: <= 80 KB stack, shared heap) one priority step below this thread, so
+// the camera/encoder active objects here and the call audio (other process) come first.
+//   - sizes above 240x480 are refused (352x640 needs 62 ms per frame): state 4, no CPU spent
+//     until the peer's SPS gets smaller (REMB 100 kbit/s from the start pushes it to 176x320;
+//     raised to 150 after 20 s of smooth 176x320, back to 100 on trouble)
+//   - at most KRxQ access units wait; on overflow everything queued is dropped, decoding waits
+//     for the next IDR and a keyframe request ('P' to tgcallaudio.exe -> PLI) goes out
+//   - decoder errors: after 2 in a row (or an internal failure) the decoder is reset and a
+//     keyframe requested (state 5 "resyncing"); the worker thread dying is logged and it is
+//     restarted (state 6) at most KRxRestarts times
+//   - pictures go to the chunk as planar 4:2:0 (decimated 2x above 240x320) at most every
+//     KRxPubMs; tgvdisp.pyd converts them to RGB
+static const TInt KRxMaxW = 240, KRxMaxH = 480;
+static const TInt KRxQ = 4, KRxPubMs = 90, KRxRestarts = 3;
+static TInt gRxProfile = 0, gRxLevel = 0, gRxW = 0, gRxH = 0;
+static TInt gRxFrags = 0, gRxAuIn = 0;
 static const TInt KRxMax = 1300, KRxFragSz = 1200, KRxFragMax = 40;
 struct TRxFrag { TUint8 iAu[KRxFragMax * KRxFragSz]; TUint8 iGot[KRxFragMax]; TInt iId, iCnt, iNGot, iLast, iIdr; };
 static TRxFrag* gRxFrag = NULL;
 static RSocket gRxSock;
 static TInt ParseInts(const TDesC8& aS, TInt* aOut, TInt aMax);
 
-static void RxSetState(TInt aSt) { HSet(TGV_W_RX_STATE, aSt); }
-static TInt BuildRxDec()
+struct TRxAu { TUint8* iData; TInt iLen; TInt iIdr; };
+struct TRxShared
 {
-    delete gRxDec; gRxDec = NULL;
-    HSet(TGV_W_RX_DEC, gRxUidIdx + 1);
-    RxSetState(1);
-    CDec* d = new CDec;
-    if (!d) return KErrNoMemory;
-    d->iRx = ETrue;
-    d->iRxUid = KRxUids[gRxUidIdx];
-    TInt w = gRxW > 0 ? gRxW : 176, h = gRxH > 0 ? gRxH : 320;
-    Log(_L8("rx: building decoder 0x%08x for the peer stream profile=%d level=%d size=%dx%d (send pipeline running: %d)"), d->iRxUid,
-        gRxProfile, gRxLevel, w, h, H ? (TInt)H[TGV_W_ENC_OK] : 0);
-    gRxDec = d;
-    TRAPD(e, d->SetupL(TSize(w, h), 30));
-    Log(_L8("rx: decoder 0x%08x setup err=%d"), d->iRxUid, e);
-    if (e) {
-        Err();
-        HSet(TGV_W_RX_ERR, e);
-        delete gRxDec; gRxDec = NULL;
-        if (e == KErrHardwareNotAvailable) Log(_L8("rx: decoder unavailable while the camera captures (-44)"));
-        return e;
+    RCriticalSection iLock;
+    RSemaphore iSem;
+    TRxAu iQ[KRxQ];
+    TInt iHead, iCount;
+    volatile TInt iQuit;
+    // written by the worker
+    volatile TInt iDecoded, iErrors, iFatal, iTooBig, iPublished, iDecUs, iDecN, iMaxUs;
+    volatile TInt iW, iH, iWantIdr, iState, iUp, iCreateErr, iStack, iLastKey;
+};
+static TRxShared* gRx = NULL;
+static RThread gRxThread;
+static TBool gRxThreadOpen = EFalse;
+static TRequestStatus gRxThreadSt;
+static TInt gRxRestarts = 0, gRxWaitIdr = 1, gRxDropped = 0, gRxQueued = 0, gRxKeyReqs = 0, gRxKeyReqAt = -100000;
+static TInt gRxSmoothS = 0, gRxRemb = 0, gRxTooBigLogged = 0, gRxStarted = 0;
+static TInt gRxPrevDec = 0, gRxPrevIn = 0, gRxPrevDrop = 0, gRxPrevErr = 0;
+static void SendCtl(const TDesC8& aMsg);
+
+static void RxSetState(TInt aSt) { HSet(TGV_W_RX_STATE, aSt); }
+
+static void RxFlushQueue()
+{
+    if (!gRx) return;
+    gRx->iLock.Wait();
+    while (gRx->iCount > 0) {
+        User::Free(gRx->iQ[gRx->iHead].iData);
+        gRx->iQ[gRx->iHead].iData = NULL;
+        gRx->iHead = (gRx->iHead + 1) % KRxQ;
+        gRx->iCount--;
     }
-    gRxPicBase = H ? (TInt)H[TGV_W_DEC_COUNT] : 0;
-    gRxFed = 0;
-    RxSetState(2);
-    HSet(TGV_W_RX_ERR, 0);
+    gRx->iLock.Signal();
+}
+
+// publish a decoded picture to the chunk as planar 4:2:0, decimated 2x when it is bigger than
+// the screen (240x320); seqlock as in tgvshared.h
+static void RxPublish(const h264dec_frame& f)
+{
+    if (!H || !gDec) return;
+    TInt step = (f.width > 240 || f.height > 320) ? 2 : 1;
+    TInt w = (f.width / step) & ~1, h = (f.height / step) & ~1;
+    TInt len = w * h * 3 / 2;
+    if (w < 2 || h < 2 || w > TGV_MAX_W || h > TGV_MAX_H || len > TGV_DEC_CAP) return;
+    H[TGV_W_DEC_SEQ]++;                 // odd: writing
+    TUint8* o = gDec;
+    TInt y, x;
+    for (y = 0; y < h; y++) {
+        const TUint8* s = f.y + y * step * f.stride_y;
+        if (step == 1) Mem::Copy(o, s, w); else for (x = 0; x < w; x++) o[x] = s[x * 2];
+        o += w;
+    }
+    for (TInt pl = 0; pl < 2; pl++) {
+        const TUint8* b = pl ? f.v : f.u;
+        for (y = 0; y < h / 2; y++) {
+            const TUint8* s = b + y * step * f.stride_uv;
+            if (step == 1) Mem::Copy(o, s, w / 2); else for (x = 0; x < w / 2; x++) o[x] = s[x * 2];
+            o += w / 2;
+        }
+    }
+    H[TGV_W_DEC_W] = w;
+    H[TGV_W_DEC_H] = h;
+    H[TGV_W_DEC_PATTERN] = 1;           // EYuv420Chroma1
+    H[TGV_W_DEC_LAYOUT] = 1;            // EYuvDataPlanar
+    H[TGV_W_DEC_LEN] = len;
+    H[TGV_W_DEC_SEQ]++;                 // even: done
+    H[TGV_W_DEC_COUNT]++;
+}
+
+static TInt RxNowMs() { return (TInt)(((TInt64)User::NTickCount() * gTickUs) / 1000); }
+
+// the worker: takes access units from the queue, decodes, publishes
+static TInt RxThreadFn(TAny*)
+{
+    CTrapCleanup* tc = CTrapCleanup::New();
+    TRxShared& r = *gRx;
+    h264dec* d = h264dec_create(KRxMaxW, KRxMaxH);
+    if (!d) { r.iCreateErr = KErrNoMemory; r.iState = 3; r.iUp = 0; delete tc; CloseSTDLIB(); return KErrNoMemory; }
+    r.iUp = 1;
+    TInt lastPub = -100000, errRun = 0;
+    for (;;) {
+        r.iSem.Wait();
+        if (r.iQuit) break;
+        TRxAu a;
+        a.iData = NULL;
+        r.iLock.Wait();
+        if (r.iCount > 0) {
+            a = r.iQ[r.iHead];
+            r.iQ[r.iHead].iData = NULL;
+            r.iHead = (r.iHead + 1) % KRxQ;
+            r.iCount--;
+        }
+        r.iLock.Signal();
+        if (!a.iData) continue;
+        h264dec_frame f;
+        TUint32 t0 = User::FastCounter();
+        TInt t0ms = RxNowMs();
+        TInt rc = h264dec_decode(d, a.iData, a.iLen, &f);
+        TInt us = (RxNowMs() - t0ms) * 1000;
+        (void)t0;
+        User::Free(a.iData);
+        r.iDecUs += us; r.iDecN++;
+        if (us > r.iMaxUs) r.iMaxUs = us;
+        if (rc == H264DEC_FRAME) {
+            errRun = 0;
+            r.iDecoded++;
+            r.iW = f.width; r.iH = f.height;
+            if (f.key) r.iLastKey = r.iDecoded;
+            if (r.iState != 2) r.iState = 2;
+            TInt now = RxNowMs();
+            if (now - lastPub >= KRxPubMs || f.key) { lastPub = now; RxPublish(f); r.iPublished++; }
+        } else if (rc == H264DEC_ERR_TOOBIG) {
+            r.iTooBig++;
+            r.iState = 4;
+        } else if (rc < 0) {
+            r.iErrors++;
+            errRun++;
+            if (rc == H264DEC_ERR_FATAL) { r.iFatal++; errRun = 2; }
+            if (errRun >= 2) {
+                if (rc != H264DEC_ERR_FATAL) h264dec_reset(d);
+                errRun = 0;
+                r.iState = 5;
+                r.iWantIdr = 1;
+            }
+        }
+    }
+    h264dec_destroy(d);
+    r.iUp = 0;
+    delete tc;
+    CloseSTDLIB();
     return KErrNone;
 }
 
-// the current decoder produced nothing / failed: try the next one, else give up (and say so)
-static void RxDecoderFailed(const TDesC8& aWhy)
+static void RxThreadLog(TInt aStack, TInt aErr)
 {
-    Log(_L8("rx: decoder 0x%08x FAILED: %S (peer profile %d level %d %dx%d)"), KRxUids[gRxUidIdx], &aWhy, gRxProfile, gRxLevel, gRxW, gRxH);
-    // the failed decoder is deliberately NOT deleted (stopping a decoder that failed can block this thread);
-    // it simply gets no more data and is released when the helper quits
-    gRxDec = NULL;
-    if (gRxUidIdx + 1 < KRxUidCount) {
-        gRxUidIdx++;
-        Log(_L8("rx: trying decoder 0x%08x"), KRxUids[gRxUidIdx]);
-        return;
+    Log(_L8("rx: create decode thread, stack %d KB: %d"), aStack / 1024, aErr);
+}
+
+// start (or restart) the decode thread; the shared block lives as long as the helper
+static TInt RxStartThread()
+{
+    if (!gRx) {
+        gRx = (TRxShared*)User::AllocZ(sizeof(TRxShared));
+        if (!gRx) return KErrNoMemory;
+        TInt e = gRx->iLock.CreateLocal();
+        if (e == KErrNone) e = gRx->iSem.CreateLocal(0);
+        if (e != KErrNone) { Log(_L8("rx: lock/semaphore err=%d"), e); User::Free(gRx); gRx = NULL; return e; }
     }
-    gRxDead = 1;
-    RxSetState(4);
-    Log(_L8("rx: no decoder can decode this stream (profile %d level %d): peer video not shown"), gRxProfile, gRxLevel);
+    gRx->iQuit = 0;
+    gRx->iState = 1;
+    RxSetState(1);
+    TBuf<24> name;
+    name.Format(_L("tgvdec%d"), gRxRestarts);
+    TInt stack = 0;
+    TInt e = H264DecCreateThread(gRxThread, name, RxThreadFn, NULL, &stack, RxThreadLog);
+    if (e != KErrNone) {
+        gRx->iState = 3;
+        RxSetState(3);
+        HSet(TGV_W_RX_ERR, e);
+        return e;
+    }
+    gRx->iStack = stack;
+    gRxThread.SetPriority(EPriorityLess);
+    gRxThread.Logon(gRxThreadSt);
+    gRxThread.Resume();
+    gRxThreadOpen = ETrue;
+    gRxWaitIdr = 1;
+    gRxStarted = 1;
+    Log(_L8("rx: software H.264 decoder thread up (stack %d KB, priority less, limit %dx%d)"), stack / 1024, KRxMaxW, KRxMaxH);
+    return KErrNone;
+}
+
+static void RxStopThread()
+{
+    if (!gRxThreadOpen) return;
+    gRx->iQuit = 1;
+    gRx->iSem.Signal();
+    if (gRxThreadSt == KRequestPending) {
+        RTimer t;
+        if (t.CreateLocal() == KErrNone) {
+            TRequestStatus ts;
+            t.After(ts, 2000000);
+            User::WaitForRequest(gRxThreadSt, ts);
+            if (gRxThreadSt == KRequestPending) { gRxThread.LogonCancel(gRxThreadSt); User::WaitForRequest(gRxThreadSt); gRxThread.Kill(0); }
+            else { t.Cancel(); User::WaitForRequest(ts); }
+            t.Close();
+        }
+    }
+    gRxThread.Close();
+    gRxThreadOpen = EFalse;
+    RxFlushQueue();
+}
+
+// keyframe request to tgcallaudio.exe (PLI to the peer), at most every 800 ms
+static void RxKeyRequest(const TDesC8& aWhy)
+{
+    TInt now = NowMs();
+    gRxWaitIdr = 1;
+    if (now - gRxKeyReqAt < 800) return;
+    gRxKeyReqAt = now;
+    gRxKeyReqs++;
+    SendCtl(_L8("P"));
+    if (gRxKeyReqs <= 10 || gRxKeyReqs % 20 == 0) Log(_L8("rx: keyframe request %d (%S)"), gRxKeyReqs, &aWhy);
+}
+
+// the decode thread ended on its own (panic, out of memory): log, restart a few times
+static void RxCheckThread()
+{
+    if (!gRxThreadOpen || gRxThreadSt == KRequestPending) return;
+    TExitType et = gRxThread.ExitType();
+    TExitCategoryName cat = gRxThread.ExitCategory();
+    TBuf8<KMaxExitCategoryName> c8;
+    c8.Copy(cat);
+    Log(_L8("rx: decode thread ended: type %d %S %d (restart %d of %d)"), (TInt)et, &c8, gRxThread.ExitReason(), gRxRestarts + 1, KRxRestarts);
+    gRxThread.Close();
+    gRxThreadOpen = EFalse;
+    RxFlushQueue();
+    if (gRxRestarts < KRxRestarts) {
+        gRxRestarts++;
+        RxSetState(6);
+        if (RxStartThread() == KErrNone) { TBuf8<24> w(_L8("decoder restarted")); RxKeyRequest(w); }
+    } else {
+        RxSetState(3);
+        HSet(TGV_W_RX_ERR, gRxThread.ExitReason());
+        Log(_L8("rx: decoder gave up after %d restarts: peer video not shown"), KRxRestarts);
+    }
+}
+
+static TBool RxTooBig(TInt aW, TInt aH)
+{
+    TInt big = aW > aH ? aW : aH, small = aW > aH ? aH : aW;
+    return big > KRxMaxH || small > KRxMaxW;
 }
 
 static void RxUnit(const TUint8* aAu, TInt aLen, TInt aIdr)
 {
     gRxAuIn++;
     HSet(TGV_W_RX_AU, gRxAuIn);
-    if (gRxAuIn <= 10 || gRxAuIn % 50 == 0) Log(_L8("rx: unit %d, %d bytes, idr=%d (decoder %s, fed %d, pictures %d)"), gRxAuIn, aLen, aIdr, gRxDec ? "up" : "not built", gRxFed, H ? (TInt)H[TGV_W_DEC_COUNT] - gRxPicBase : 0);
-    if (gRxDead) return;
-    if (gRxDec && gRxRebuild && aIdr) { gRxRebuild = 0; Log(_L8("rx: peer stream changed, rebuilding the decoder")); delete gRxDec; gRxDec = NULL; }
-    if (!gRxDec) {
-        if (!aIdr) return;
-        if (BuildRxDec() != KErrNone) {
-            TBuf8<40> why(_L8("setup error"));
-            RxDecoderFailed(why);
-            return;
-        }
+    if (gRxAuIn <= 5) Log(_L8("rx: unit %d, %d bytes, idr=%d"), gRxAuIn, aLen, aIdr);
+    if (!gRxThreadOpen) {
+        if (gRxStarted && gRxRestarts >= KRxRestarts) return;     // gave up
+        if (!gRxStarted && RxStartThread() != KErrNone) { gRxStarted = 1; gRxRestarts = KRxRestarts; return; }
+        RxCheckThread();
+        if (!gRxThreadOpen) return;
     }
-    if (gRxDec->iFatal) {
-        HSet(TGV_W_RX_ERR, (TInt)gRxDec->iFatal);
-        TBuf8<40> why(_L8("fatal error from the decoder"));
-        RxDecoderFailed(why);
+    if (gRx->iWantIdr) {
+        gRx->iWantIdr = 0;
+        TBuf8<24> w(_L8("decoder error"));
+        RxKeyRequest(w);
+    }
+    if (gRxW > 0 && RxTooBig(gRxW, gRxH)) {
+        // refused before decoding: wait for the peer to step down (REMB is low already)
+        gRxDropped++;
+        RxSetState(4);
+        if (!gRxTooBigLogged) { gRxTooBigLogged = 1; Log(_L8("rx: peer picture %dx%d is above %dx%d: not decoded, waiting for a smaller size"), gRxW, gRxH, KRxMaxW, KRxMaxH); }
+        gRxWaitIdr = 1;
         return;
     }
-    TPtrC8 p(aAu, aLen);
-    gRxDec->Write(p, (TInt64)NowMs() * 1000);
-    gRxFed++;
-    HSet(TGV_W_RX_FED, gRxFed);
-    if (gRxFed == 30 && H && (TInt)H[TGV_W_DEC_COUNT] - gRxPicBase == 0) {
-        TBuf8<48> why(_L8("no picture after 30 units"));
-        RxDecoderFailed(why);
+    if (gRxWaitIdr && !aIdr) { gRxDropped++; return; }
+    TUint8* copy = (TUint8*)User::Alloc(aLen);
+    if (!copy) { gRxDropped++; TBuf8<24> w(_L8("out of memory")); RxKeyRequest(w); return; }
+    Mem::Copy(copy, aAu, aLen);
+    TBool overflow = EFalse;
+    gRx->iLock.Wait();
+    if (gRx->iCount >= KRxQ - 1) {
+        // the decoder fell behind: throw the backlog away, restart at an IDR
+        while (gRx->iCount > 0) {
+            User::Free(gRx->iQ[gRx->iHead].iData);
+            gRx->iQ[gRx->iHead].iData = NULL;
+            gRx->iHead = (gRx->iHead + 1) % KRxQ;
+            gRx->iCount--;
+            gRxDropped++;
+        }
+        overflow = ETrue;
     }
+    TBool take = !overflow || aIdr;
+    if (take) {
+        TInt slot = (gRx->iHead + gRx->iCount) % KRxQ;
+        gRx->iQ[slot].iData = copy; gRx->iQ[slot].iLen = aLen; gRx->iQ[slot].iIdr = aIdr;
+        gRx->iCount++;
+    }
+    gRx->iLock.Signal();
+    if (take) { gRxQueued++; gRxWaitIdr = 0; gRx->iSem.Signal(); }
+    else { User::Free(copy); gRxDropped++; }
+    if (overflow && !aIdr) { TBuf8<24> w(_L8("decoder behind")); RxKeyRequest(w); }
+}
+
+// once a second from StatTick: chunk words, REMB policy, the "rx:" log line
+static void RxSecond(TInt aTickMs)
+{
+    if (!gRxStarted) return;
+    RxCheckThread();
+    if (!gRx) return;
+    TInt dec = gRx->iDecoded, in = gRxAuIn, drop = gRxDropped, err = gRx->iErrors;
+    TInt dDec = dec - gRxPrevDec, dIn = in - gRxPrevIn, dDrop = drop - gRxPrevDrop, dErr = err - gRxPrevErr;
+    gRxPrevDec = dec; gRxPrevIn = in; gRxPrevDrop = drop; gRxPrevErr = err;
+    TInt n = gRx->iDecN, us = gRx->iDecUs, mx = gRx->iMaxUs;
+    gRx->iDecN = 0; gRx->iDecUs = 0; gRx->iMaxUs = 0;
+    TInt avg = n ? us / n : 0;
+    if (gRxThreadOpen && H && H[TGV_W_RX_STATE] != 4) RxSetState(gRx->iState);
+    if (gRxW > 0 && !RxTooBig(gRxW, gRxH) && H && H[TGV_W_RX_STATE] == 4) RxSetState(gRx->iState == 4 ? 1 : gRx->iState);
+    HSet(TGV_W_RX_FED, gRxQueued);
+    HSet(TGV_W_RX_ERR, err);
+    HSet(TGV_W_RX_DEC, 3);              // 3 = software decoder (h264dec)
+    // REMB: 100 kbit/s keeps the peer small; 150 after 20 smooth seconds at <= 176x320
+    TBool smooth = dDec >= 8 && dDrop == 0 && dErr == 0 && avg > 0 && avg < 35000 && gRx->iW * gRx->iH <= 176 * 320;
+    gRxSmoothS = smooth ? gRxSmoothS + 1 : 0;
+    TInt want = gRxRemb;
+    if (gRxRemb == 0) want = 100;
+    if (gRxSmoothS >= 20) want = 150;
+    if (dDrop > 3 || (gRxW > 0 && gRxW * gRxH > 176 * 320) || avg > 50000) want = 100;
+    if (want != gRxRemb) {
+        gRxRemb = want;
+        TBuf8<8> b;
+        b.Format(_L8("B%d"), want);
+        SendCtl(b);
+        Log(_L8("rx: REMB %d kbit/s"), want);
+    }
+    if (dIn > 0 || dDec > 0 || dDrop > 0)
+        Log(_L8("rx: in=%d dec=%d drop=%d err=%d ms/frame=%d.%d max=%d pub=%d size=%dx%d sps=%dx%d state=%d q=%d keyreq=%d fatal=%d tickms=%d remb=%d"),
+            dIn, dDec, dDrop, dErr, avg / 1000, (avg % 1000) / 100, mx / 1000, gRx->iPublished, gRx->iW, gRx->iH, gRxW, gRxH,
+            H ? (TInt)H[TGV_W_RX_STATE] : 0, gRx->iCount, gRxKeyReqs, gRx->iFatal, aTickMs, gRxRemb);
 }
 
 static void RxPacket(const TDesC8& aD)
@@ -636,10 +930,12 @@ static void RxPacket(const TDesC8& aD)
         TInt v[5];
         Mem::FillZ(v, sizeof(v));
         if (ParseInts(aD.Mid(1), v, 5) < 5) return;
-        Log(_L8("rx: peer SPS profile=%d constraints=0x%02x level=%d size=%dx%d"), v[0], v[1], v[2], v[3], v[4]);
-        if (gRxDec && (v[3] != gRxW || v[4] != gRxH || v[0] != gRxProfile)) gRxRebuild = 1;
+        TPtrC8 note(RxTooBig(v[3], v[4]) ? _L8(" (too large for this phone)") : _L8(""));
+        Log(_L8("rx: peer SPS profile=%d constraints=0x%02x level=%d size=%dx%d%S"), v[0], v[1], v[2], v[3], v[4], &note);
+        if (v[3] != gRxW || v[4] != gRxH) gRxTooBigLogged = 0;
         gRxProfile = v[0]; gRxLevel = v[2]; gRxW = v[3]; gRxH = v[4];
         HSet(TGV_W_RX_PROFILE, v[0]); HSet(TGV_W_RX_LEVEL, v[2]); HSet(TGV_W_RX_W, v[3]); HSet(TGV_W_RX_H, v[4]);
+        if (!RxTooBig(v[3], v[4]) && H && H[TGV_W_RX_STATE] == 4) RxSetState(1);
         return;
     }
     if (aD[0] != 'R' || aD.Length() < 6 || !gRxFrag) return;
@@ -649,6 +945,7 @@ static void RxPacket(const TDesC8& aD)
     TRxFrag& f = *gRxFrag;
     if (cnt < 1 || cnt > KRxFragMax || idx >= cnt || n > KRxFragSz) return;
     if (id != f.iId) {
+        if (f.iId >= 0 && f.iNGot > 0) { gRxDropped++; gRxWaitIdr = 1; }   // a unit lost fragments
         f.iId = id; f.iCnt = cnt; f.iNGot = 0; f.iLast = 0; f.iIdr = idr;
         Mem::FillZ(f.iGot, sizeof(f.iGot));
     }
@@ -1685,10 +1982,7 @@ static TInt StatTick(TAny*)
         Log(_L8("vstat cam=%d.%d enc=%d.%d B/s=%d idr=%d offerdrops=%d encms=%d tickms=%d export=%d expdrops=%d size=%dx%d q=%d kbps=%d"),
             capF / 10, capF % 10, encF / 10, encF % 10, bps, kk, dd, encms, el, gExpUnits, gExpDrops, gW, gHt, gQuality, gKbps);
     }
-    if (gRxFrags > 0)
-        Log(_L8("rx: fragments=%d units=%d fed=%d decoded=%d (%d.%d fps) state=%d uid=%d err=%d"), gRxFrags, gRxAuIn, gRxFed,
-            H ? (TInt)H[TGV_W_DEC_COUNT] - gRxPicBase : 0, decF / 10, decF % 10, H ? (TInt)H[TGV_W_RX_STATE] : 0,
-            gRxUidIdx + 1, H ? (TInt)H[TGV_W_RX_ERR] : 0);
+    RxSecond(el);
     if (++gSecs % 5 == 0)
         Log(_L8("stats: cap=%d.%d enc=%d.%d dec=%d.%d fps lat=%d ms %d B/s err=%d drops=%d keys=%d"), capF / 10, capF % 10,
             encF / 10, encF % 10, decF / 10, decF % 10, gSt.iLat, bps, gSt.iErrors, gSt.iDrops, gSt.iKeys);
@@ -1755,7 +2049,8 @@ static void RunL()
     tick->Cancel();
     CleanupStack::PopAndDestroy(3);          // tick, rx, gSend
     if (rxv) { CleanupStack::PopAndDestroy(rxv); }
-    delete gRxDec; gRxDec = NULL;
+    RxStopThread();
+    for (TInt ci = 0; ci < 2; ci++) { delete gCtl[ci]; gCtl[ci] = NULL; }
     gRxSock.Close();
     User::Free(gRxFrag); gRxFrag = NULL;
     gSend = NULL;

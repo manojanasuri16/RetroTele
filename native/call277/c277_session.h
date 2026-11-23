@@ -108,7 +108,7 @@ typedef struct {
     c277_sps rx_sps;                             /* parsed from the peer's newest SPS */
     int rx_sps_new;                              /* rx_sps changed: tell the display helper */
     int rx_pli_due;                              /* send a PLI at the next chance */
-    u32 rx_pli_at, rx_rr_next, rx_remb_bps;
+    u32 rx_pli_at, rx_rr_next, rx_remb_bps, rx_idr_req_n;
     u32 rx_pli_sent, rx_rr_sent, rx_nack_rtx, rx_ready_n, rx_nofwd, rx_nack_sent, rx_nack_at;
     /* the last 64 video packets for NACK retransmission */
     struct { u16 seq, len; u8 d[1040]; } vhist[64];
@@ -149,6 +149,10 @@ u32  c277_session_cap_take(c277_session *s, char *out, u32 cap);
  * access units (turning it on asks the peer for an IDR). remb_kbps: bitrate the peer is told it
  * may send (0 = no REMB). */
 void c277_session_rx_enable(c277_session *s, int want, int fwd, u32 remb_kbps);
+/* the receiving decoder asks for a fresh IDR (drops until then, PLI to the peer) */
+void c277_session_rx_request_idr(c277_session *s);
+/* change the REMB bitrate (kbps) told to the peer */
+void c277_session_rx_set_remb(c277_session *s, u32 remb_kbps);
 /* A complete access unit (Annex-B, parameter sets before an IDR) if one is ready: 1 and the
  * pointer/length/idr flag, else 0. Call c277_session_vrx_done afterwards. */
 int  c277_session_vrx_take(c277_session *s, const u8 **au, u32 *len, int *idr);

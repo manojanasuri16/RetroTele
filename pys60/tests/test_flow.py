@@ -920,7 +920,7 @@ app.client.set_call_version("2.7.7")
 app.call_ready(cs277)
 f277 = callaudio_fake.CallAudio.instances[-1]
 assert f277.v277 and f277.signals == ["e1", "e2"], f277.signals
-assert not f277.want_rx, "receiving the peer's video is off by default"
+assert f277.want_rx, "receiving the peer's video is on by default (0.15.0, config video_rx = 0 turns it off)"
 f277.on_signal("out1")
 assert state["sigs"][-1] == (4242, "out1"), state["sigs"]
 app.call_signaling("late")

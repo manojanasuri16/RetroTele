@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.14.8"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.15.0"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -1887,10 +1887,11 @@ class App:
         else:
             ok = ca.start_relay(cs["kb"], cs["out"], cs["conns"], self.audio_changed, iap)
         ca.on_info = self.audio_info
-        if self.client.call_version == "2.7.7" and self.cfg.get("video_rx") == "1":
+        if self.client.call_version == "2.7.7" and self.cfg.get("video_rx") != "0":
             try:
-                # experiment only (config video_rx = 1): ask the peer for its video. Off by default:
-                # the N79's decoders cannot decode the High profile the official apps send.
+                # receive the peer's video (on by default since 0.15.0: software H.264 decoder in
+                # tgvideo.exe; config video_rx = 0 turns it off). The decoder helper only starts
+                # when the peer's video is actually on.
                 ca.set_rx(1)
             except:
                 self.log("set_rx: " + err_text())

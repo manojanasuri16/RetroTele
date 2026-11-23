@@ -58,6 +58,12 @@ S_FAILED = 4
 S_RXSTART = 5       # helper launched only to show the peer's picture (no camera), waiting for hello
 S_RXIDLE = 6        # helper up, camera off: the peer's picture is decoded and shown
 
+# Watchdog: tgvideo.exe sends a status line every second. Silent this long (ticks) while it is
+# running means it died (e.g. the peer-video decoder crashed the process): it is started again,
+# at most HELPER_RESTARTS times per call; the call and its audio are not affected.
+DEAD_TICKS = 25
+HELPER_RESTARTS = 3
+
 # tgvdisp.info() word indexes (native/tgvideo/tgvshared.h)
 I_STATE = 2
 I_DEC_COUNT = 4
@@ -66,7 +72,9 @@ I_DEC_H = 6
 I_PREV_COUNT = 11
 I_PREV_W = 12
 I_PREV_H = 13
-I_RX_STATE = 28     # 0 none, 1 decoder starting, 2 decoding, 3 setup failed, 4 no picture, 5 fatal
+I_RX_STATE = 28     # 0 none, 1 decoder starting, 2 decoding, 3 decoder unavailable (for good),
+                    # 4 picture too large (waiting for a smaller one), 5 decoder error (resyncing),
+                    # 6 decoder thread restarting
 I_RX_ERR = 29
 I_RX_W = 30
 I_RX_H = 31
@@ -183,6 +191,8 @@ class CallVideo:
         self.pimg_size = (0, 0)
         self.p_last = -1
         self.rx_at_s = 0
+        self.t_heard = 0
+        self.restarts = 0
 
     # ------------------------------------------------------------ helpers
     def log(self, msg):
@@ -258,6 +268,7 @@ class CallVideo:
 
     def on_status(self, data):
         self.rx_lines = self.rx_lines + 1
+        self.t_heard = self.ticks
         st = parse_status(data)
         if self.rx_lines <= 3 or (st is not None and st != self.hstate):
             self.log("helper status #%d: %s" % (self.rx_lines, data[:90]))
@@ -570,7 +581,53 @@ class CallVideo:
             self.errors = self.errors + 1
             self.log("tick error: " + str(sys.exc_info()[1]))
 
+    def watchdog(self):
+        """The helper went silent while running: start it again (camera video and/or the peer's
+        picture resume; tgcallaudio.exe and the call carry on). Returns 1 if it acted."""
+        if self.state != S_RUNNING and self.state != S_RXIDLE:
+            return 0
+        if self.ticks - self.t_heard <= DEAD_TICKS:
+            return 0
+        if self.restarts >= HELPER_RESTARTS:
+            self.log("helper silent again after %d restarts: giving up" % self.restarts)
+            self.rx_on = 0
+            self.fail(u"Video helper stopped")
+            return 1
+        self.restarts = self.restarts + 1
+        sending = self.state == S_RUNNING
+        self.log("helper silent for %d s: restarting it (%d of %d, camera %d, peer picture %d)" % (
+            (self.ticks - self.t_heard) / 5, self.restarts, HELPER_RESTARTS, sending, self.rx_on))
+        if self.attached and self.tgvdisp is not None:
+            try:
+                self.tgvdisp.detach()        # the new helper must be able to create the chunk again
+            except:
+                pass
+        self.attached = 0
+        self.img = None
+        self.img_size = (0, 0)
+        self.pimg = None
+        self.pimg_size = (0, 0)
+        self.p_last = -1
+        self.inf = None
+        self.set_fwd(0)                      # sent again when it is up: the engine asks for an IDR
+        self.hstate = -1
+        self.ticks = 0
+        self.t_heard = 0
+        try:
+            e32.start_exe(u"tgvideo.exe", u"")
+        except:
+            self.rx_on = 0
+            return self.fail(u"Video helper tgvideo.exe is missing")
+        if sending:
+            self.state = S_STARTING
+        else:
+            self.state = S_RXSTART
+        self.changed()
+        return 1
+
     def step(self):
+        if self.watchdog():
+            return
         hs = self.hstate
         if hs == -1 and self.ticks > 0 and self.ticks % 10 == 0 and (
                 self.state == S_RXSTART or self.state == S_STARTING):
@@ -655,8 +712,9 @@ class CallVideo:
             self.update_self(inf)       # about 2.5 pictures per second: each one repaints the screen
         if self.rx_on and inf[I_RX_STATE] == 2:
             self.update_peer(inf)
-        if self.rx_on and inf[I_RX_STATE] >= 3 and self.fwd_on:
-            # no decoder can show this stream: stop receiving it (no CPU, no PLI/REMB traffic)
+        if self.rx_on and inf[I_RX_STATE] == 3 and self.fwd_on:
+            # the decoder cannot run at all: stop receiving (no CPU, no PLI/REMB traffic). States 4
+            # (too large), 5 (resyncing) and 6 (restarting) are temporary: keep receiving.
             self.log("peer video cannot be decoded (state %d, error %d): receiving stopped" % (
                 inf[I_RX_STATE], inf[I_RX_ERR]))
             self.set_fwd(0)
@@ -734,8 +792,8 @@ class CallVideo:
     def peer_frame(self):
         """(image, w, h) of the peer's newest decoded picture, or None."""
         inf = self.inf
-        if (not self.rx_on or inf is None or inf[I_RX_STATE] != 2 or self.pimg is None or
-                self.p_last < 0):
+        if (not self.rx_on or inf is None or self.pimg is None or self.p_last < 0 or
+                inf[I_RX_STATE] not in (2, 5, 6)):
             return None
         return (self.pimg, self.pimg_size[0], self.pimg_size[1])
 
@@ -750,23 +808,25 @@ class CallVideo:
         prof = PROFILE_NAMES.get(inf[I_RX_PROFILE], u"profile %d" % inf[I_RX_PROFILE])
         if st == 2:
             if inf[I_DEC_COUNT] > 0 and self.p_last >= 0:
-                return u"Peer video: receiving %dx%d" % (w, h)
+                return u"Peer video %dx%d" % (w, h)
             return u"Peer video: waiting for the first picture"
         if st == 1:
             return u"Peer video: starting decoder (%dx%d, %s)" % (w, h, prof)
         if st == 3:
-            return u"Peer video: decoder setup failed (error %d, %s profile)" % (inf[I_RX_ERR], prof)
+            return u"Peer video: decoder not available (error %d)" % inf[I_RX_ERR]
         if st == 4:
-            return u"Peer video: decoder cannot decode this stream (%s profile)" % prof
+            return u"Peer video too large for this phone (%dx%d), waiting for a smaller size" % (w, h)
         if st == 5:
-            return u"Peer video: decoder error %d" % inf[I_RX_ERR]
+            return u"Peer video: decoder error, resyncing"
+        if st == 6:
+            return u"Peer video: decoder restarting"
         if inf[I_RX_AU] > 0:
             return u"Peer video: starting..."
         return u""
 
     def peer_failed(self):
         inf = self.inf
-        return inf is not None and self.rx_on and inf[I_RX_STATE] >= 3
+        return inf is not None and self.rx_on and inf[I_RX_STATE] == 3
 
     def frame(self):
         """(image, w, h) of the self-view or None."""

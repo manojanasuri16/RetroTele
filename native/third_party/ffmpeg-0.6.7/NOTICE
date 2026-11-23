@@ -28,7 +28,9 @@ Changes (all marked "RetroTele h264dec" in the code, full diff in retrotele-h264
 - libavcodec/h264idct.c: clip with av_clip_uint8() instead of the crop table (no out of bounds
   read on corrupt coefficients).
 The configuration (native/h264dec/config/config.h) disables all assembler and every codec
-except the H.264 decoder.
+except the H.264 decoder. The build also maps assert() (native/h264dec/config/catch/assert.h) and
+abort() to a handler that jumps back to h264dec_decode(), which resets the decoder instead of
+ending the process.
 
 Relinking (LGPL 2.1 section 6): the complete source of this library, the modifications, the
 build files and the code that uses it are in this repository. To use a modified FFmpeg:
