@@ -44,6 +44,9 @@
 extern "C" {
 #include "callproto.h"
 #include "c277_session.h"
+#include "c277_agc.h"
+#include <e32property.h>
+#include <bt_subscribe.h>     /* KPropertyKeyBluetoothGetPHYCount: connected Bluetooth links */
 }
 
 const TInt KFrameBytes = 320;
@@ -219,7 +222,12 @@ class CRunner : public CBase, public MVoIPDownlinkObserver,
                 public MVoIPUplinkObserver, public MVoIPFormatObserver
 {
 public:
-    CRunner(TInt aSeconds, TBool aRelay) : iSeconds(aSeconds), iRelayMode(aRelay), iWantRoute(1), iRembKbps(100) {}
+    CRunner(TInt aSeconds, TBool aRelay) : iSeconds(aSeconds), iRelayMode(aRelay), iWantRoute(1), iRembKbps(100)
+    {
+        c277_agc_init(&iAgc, C277_AGC_NORMAL);    /* mic boost: the VoIP uplink's max gain is 1 on the N79 */
+        iActualRoute = -1;
+        iBtLinks = -2;
+    }
     ~CRunner()
     {
         delete iTimer;
@@ -385,6 +393,13 @@ public:
         Check(_L8("SetGain"), iUp->SetGain(mg));
         if (!Check(_L8("DnStart"), iDn->Start())) return;
         Check(_L8("UpStart"), iUp->Start());
+        iLastUpMs = iLastDnMs = NowMs();
+        TBuf8<64> gl;
+        gl.Format(_L8("audio: uplink max gain %d, downlink max volume %d\n"), mg, mv);
+        Write(gl);
+        iBtLinks = -2;
+        CheckBt();
+        ReportRoute();
     }
     // ---- network receive; returns ETrue to re-arm the receive at once
     TBool Received(TInt aKind, TInt aErr, const TDesC8& aData, const TInetAddr& aFrom)
@@ -440,13 +455,14 @@ public:
                 return ETrue;
             }
             if (n == 2 && aData[0] == 'R' && aData[1] >= '0' && aData[1] <= '2') {
-                iWantRoute = aData[1] - '0';
-                TInt rerr = KErrNone;
-                if (iStarted && iDn) rerr = iDn->SetAudioDevice(RouteDev(iWantRoute));
-                TBuf8<64> lb;
-                lb.Format(_L8("control: route %d err %d\n"), iWantRoute, rerr);
+                SetRoute(aData[1] - '0');
+                return ETrue;
+            }
+            if (n == 2 && aData[0] == 'A' && aData[1] >= '0' && aData[1] <= '2') {
+                c277_agc_set_mode(&iAgc, aData[1] - '0');
+                TBuf8<48> lb;
+                lb.Format(_L8("control: mic boost %d\n"), aData[1] - '0');
                 Write(lb);
-                if (iStarted) ReportRoute();
                 return ETrue;
             }
             if (!iRelayMode && n > 0 && n <= KMaxPkt) {
@@ -503,6 +519,49 @@ public:
         if (aRoute == 1) return CVoIPAudioDownlinkStream::ELoudSpeaker;
         return CVoIPAudioDownlinkStream::ENoPreference;
     }
+    // Sound output: 0 earpiece, 1 loudspeaker, 2 auto (no preference: the phone's audio policy
+    // picks a connected Bluetooth headset or wired headset). An error never ends the call: the
+    // previous route is restored and Python is told (info 'O' = failed route).
+    void SetRoute(TInt aRoute)
+    {
+        TInt prev = iWantRoute;
+        iWantRoute = aRoute;
+        TInt rerr = KErrNone;
+        if (iStarted && iDn) rerr = iDn->SetAudioDevice(RouteDev(iWantRoute));
+        TBuf8<96> lb;
+        lb.Format(_L8("route: request %d -> err %d (uplink frames %d in the last second)\n"), aRoute, rerr, iUpLastSec);
+        Write(lb);
+        if (rerr != KErrNone) {
+            iWantRoute = prev;
+            TInt e2 = (iStarted && iDn) ? iDn->SetAudioDevice(RouteDev(prev)) : KErrNone;
+            lb.Format(_L8("route: back to %d (err %d)\n"), prev, e2);
+            Write(lb);
+            SendInfo('O', aRoute);
+        }
+        if (iStarted) ReportRoute();
+        iRouteAt = NowMs();
+    }
+    // Connected Bluetooth links (0 none, -1 unknown). The S60 3.2 SDK has no ARM library for the
+    // Telephony Audio Routing API, so this public Bluetooth P&S key tells Python whether a
+    // headset can take the call audio: the VoIP stream's "no preference" route (2) then lets the
+    // phone's audio policy use it, microphone included.
+    static TInt BtLinks()
+    {
+        TInt v = 0;
+        if (RProperty::Get(KPropertyUidBluetoothCategory, KPropertyKeyBluetoothGetPHYCount, v) != KErrNone) return -1;
+        return v;
+    }
+    void CheckBt()
+    {
+        TInt n = BtLinks();
+        if (n == iBtLinks) return;
+        iBtLinks = n;
+        TBuf8<160> lb;
+        lb.Format(_L8("route: outputs earpiece(0) loudspeaker(1) auto(2)%S, bluetooth links %d, wanted %d actual %d\n"),
+                  n > 0 ? &_L8(" bluetooth=auto") : &_L8(""), n, iWantRoute, iActualRoute);
+        Write(lb);
+        SendInfo('B', n);
+    }
     void ReportRoute()
     {
         if (!iDn) return;
@@ -513,9 +572,10 @@ public:
             if (d == CVoIPAudioDownlinkStream::EHandset) v = 0;
             else if (d == CVoIPAudioDownlinkStream::ELoudSpeaker) v = 1;
         }
-        TBuf8<64> lb;
-        lb.Format(_L8("audio route now %d (err %d)\n"), v, e);
+        TBuf8<96> lb;
+        lb.Format(_L8("route: actual %d (0 earpiece, 1 loudspeaker, 2 other/auto; err %d), wanted %d\n"), v, e, iWantRoute);
         Write(lb);
+        iActualRoute = v;
         SendInfo('D', v);
     }
     void FinalStatus()
@@ -715,6 +775,15 @@ public:
             }
             return;
         }
+        if (aData.Length() >= 2 && aData[0] == 'T') {
+            /* a log line from tgvideo.exe (its per-second "rx:" decoder line) */
+            TBuf8<240> lb;
+            lb.Copy(_L8("tgvideo "));
+            lb.Append(aData.Mid(1).Left(220));
+            lb.Append('\n');
+            Write(lb);
+            return;
+        }
         if (iV277 && iS && aData.Length() >= 2 && aData[0] == 'B') {
             /* REMB bitrate for the peer's video, ASCII kbps */
             TInt kb = 0;
@@ -837,6 +906,7 @@ public:
     void Tick277()
     {
         if (!iS) return;
+        KeepAlive277();
         c277_session_tick(iS, NowMs());
         PollOpus277();
         Drain277();
@@ -869,6 +939,82 @@ public:
         }
     }
     TBool Media277() { return iV277 && iS && iRelayOk && c277_session_ice_connected(iS); }
+    // The microphone stopped delivering (Bluetooth headset connecting, a route change, the camera
+    // starting: 0.15.0 logs show "sent" frozen and the other side ending the call ~20 s later):
+    // keep sending encoded silence every 20 ms tick so the call stays up while the watchdog
+    // (MicWatchdog, once a second) restarts the uplink.
+    void KeepAlive277()
+    {
+        if (!iStarted || !iEnc || iMuted || !Media277()) return;
+        TInt now = NowMs();
+        if (now - iLastUpMs < 300) return;
+        TInt16 z[KFrameSamples];
+        Mem::FillZ(z, sizeof(z));
+        iSilFrames++;
+        Up277(z);
+    }
+    // one 20 ms frame of the microphone (or silence) into the 60 ms Opus packets of a 2.7.7 call
+    void Up277(const TInt16* aFrame)
+    {
+        Mem::Copy(iUpAcc + iUpN * KFrameSamples, aFrame, KFrameBytes);
+        iUpN++;
+        if (iUpN < 3) return;
+        iUpN = 0;
+        TUint8 pkt[KJbPkt];
+        TInt t0 = NowUs();
+        TInt r = opus_encode(iEnc, iUpAcc, KRelayFrame, pkt, KJbPkt);
+        iEncUs += NowUs() - t0;
+        if (r > 0) {
+            iEncFrames++;
+            if (c277_session_send_opus(iS, pkt, (u32)r, NowMs()) == C277_SESS_OK) iSentPkts++;
+            Drain277();
+        } else {
+            Check(_L8("Encode"), r ? r : -1);
+        }
+    }
+    void MicWatchdog()
+    {
+        TInt now = NowMs();
+        iUpLastSec = iUpFrames;
+        iUpFrames = 0;
+        if (!iStarted || !iUp) return;
+        TInt gap = now - iLastUpMs;
+        if (gap > 1500 && now - iUpFixAt > 3000) {
+            iUpFixAt = now;
+            iUpFixes++;
+            TBuf8<128> lb;
+            if (iUpFixes % 3 != 0) {
+                TInt e1 = iUp->Stop();
+                TInt e2 = iUp->Start();
+                lb.Format(_L8("audio: microphone silent for %d ms: uplink restart %d (stop %d start %d)\n"), gap, iUpFixes, e1, e2);
+                Write(lb);
+            } else {
+                // stop/start did not help: close and open the uplink stream again
+                lb.Format(_L8("audio: microphone silent for %d ms: re-opening the uplink (%d)\n"), gap, iUpFixes);
+                Write(lb);
+                iUp->Stop();
+                iUp->Close();
+                delete iUpFmt; iUpFmt = NULL;
+                delete iUp; iUp = NULL;
+                iUpOpen = EFalse;
+                TInt e = iFactory ? iFactory->CreateUplinkStream(TVersion(1, 0, 0), CVoIPUtilityFactory::EVoIPCall, iUp) : KErrNotReady;
+                if (e == KErrNone && iUp) e = iUp->SetFormat(EPCM16, iUpFmt);
+                if (e == KErrNone && iUpFmt) iUpFmt->SetObserver(*this);
+                if (e == KErrNone && iUp) { iUpReopen = ETrue; e = iUp->Open(*this); }
+                lb.Format(_L8("audio: uplink re-open err %d\n"), e);
+                Write(lb);
+            }
+        }
+        TInt dgap = now - iLastDnMs;
+        if (iDn && dgap > 1500 && now - iDnFixAt > 3000) {
+            iDnFixAt = now;
+            TInt e1 = iDn->Stop();
+            TInt e2 = iDn->Start();
+            TBuf8<96> lb;
+            lb.Format(_L8("audio: speaker silent for %d ms: downlink restart (stop %d start %d)\n"), dgap, e1, e2);
+            Write(lb);
+        }
+    }
     TBool ReadConfig()
     {
         _LIT(KC, "C:\\Data\\retrotele_call.cfg");
@@ -1226,6 +1372,7 @@ public:
         p.SetLength(n);
         TInt16* pcm = (TInt16*)p.Ptr();
         TInt samples = n / 2;
+        iLastDnMs = NowMs();
         if (samples > KFrameSamples) samples = KFrameSamples;
         Mem::FillZ(pcm, n);
         if (iV277) {
@@ -1287,10 +1434,14 @@ public:
         if (aType == MVoIPDownlinkObserver::KOpenComplete) {
             if (aErr == KErrNone) iDnOpen = ETrue; else Check(_L8("DnOpenComplete"), aErr);
             MaybeStart();
-        } else if (aType == MVoIPDownlinkObserver::KDownlinkError) {
-            Check(_L8("DnError"), aErr ? aErr : -1);
-        } else if (aType == MVoIPDownlinkObserver::KAudioDeviceChanged) {
-            if (iStarted) ReportRoute();
+        } else {
+            // every other event is logged (a Bluetooth headset connecting, audio policy pre-emption)
+            TBuf8<80> lb;
+            lb.Format(_L8("audio: downlink event %d err %d\n"), aType, aErr);
+            Write(lb);
+            if (aType == MVoIPDownlinkObserver::KDownlinkError) Check(_L8("DnError"), aErr ? aErr : -1);
+            if (aType == MVoIPDownlinkObserver::KAudioDeviceChanged) { if (iStarted) ReportRoute(); }
+            if (aType == MVoIPDownlinkObserver::KDownlinkError || aType == MVoIPDownlinkObserver::KDownlinkClosed) iDnBroken = ETrue;
         }
     }
     // ---- MVoIPUplinkObserver
@@ -1304,24 +1455,14 @@ public:
             TInt a = s[i] < 0 ? -s[i] : s[i];
             if (a > iPeakIn) iPeakIn = a;
         }
+        iLastUpMs = NowMs();
+        iUpFrames++;
+        if (iUpBroken) { iUpBroken = EFalse; Write(_L8("audio: microphone delivers again\n")); }
+        // mic boost (AGC + limiter) before Opus; the buffer is ours until BufferEmptied
+        if (n >= 2 && n / 2 <= 960) c277_agc_process(&iAgc, (short*)p.Ptr(), n / 2);
         if (iV277) {
             if (n >= KFrameBytes && iEnc && Media277() && !iMuted) {
-                Mem::Copy(iUpAcc + iUpN * KFrameSamples, s, KFrameBytes);
-                iUpN++;
-                if (iUpN >= 3) {
-                    iUpN = 0;
-                    TUint8 pkt[KJbPkt];
-                    TInt t0 = NowUs();
-                    TInt r = opus_encode(iEnc, iUpAcc, KRelayFrame, pkt, KJbPkt);
-                    iEncUs += NowUs() - t0;
-                    if (r > 0) {
-                        iEncFrames++;
-                        if (c277_session_send_opus(iS, pkt, (u32)r, NowMs()) == C277_SESS_OK) iSentPkts++;
-                        Drain277();
-                    } else {
-                        Check(_L8("Encode"), r ? r : -1);
-                    }
-                }
+                Up277(s);
             } else {
                 iUpN = 0;
             }
@@ -1372,9 +1513,26 @@ public:
     {
         if (aType == MVoIPUplinkObserver::KOpenComplete) {
             if (aErr == KErrNone) iUpOpen = ETrue; else Check(_L8("UpOpenComplete"), aErr);
+            if (iStarted && iUpReopen) {
+                // a re-opened uplink (microphone watchdog): gain + start, the call never stopped
+                iUpReopen = EFalse;
+                TInt mg = 0;
+                if (iUp) {
+                    iUp->GetMaxGain(mg);
+                    iUp->SetGain(mg);
+                }
+                TInt e = (aErr == KErrNone && iUp) ? iUp->Start() : aErr;
+                TBuf8<64> lb;
+                lb.Format(_L8("audio: uplink re-opened, start err %d\n"), e);
+                Write(lb);
+            }
             MaybeStart();
-        } else if (aType == MVoIPUplinkObserver::KUplinkError) {
-            Check(_L8("UpError"), aErr ? aErr : -1);
+        } else {
+            TBuf8<80> lb;
+            lb.Format(_L8("audio: uplink event %d err %d\n"), aType, aErr);
+            Write(lb);
+            if (aType == MVoIPUplinkObserver::KUplinkError) Check(_L8("UpError"), aErr ? aErr : -1);
+            iUpBroken = ETrue;          /* error or closed: the watchdog restarts the microphone */
         }
     }
     void Event(const CVoIPFormatIntfc&, TInt) {}
@@ -1397,6 +1555,18 @@ public:
                         iSentPkts, iRecvPkts, iLostPkts, iPlcFrames, iUnderruns, iSigOut,
                         iErrors, iLast);
             Write(line);
+            MicWatchdog();
+            CheckBt();
+            {
+                TInt pi, ri, po, gd, gt, lim;
+                c277_agc_stats(&iAgc, &pi, &ri, &po, &gd, &gt, &lim);
+                TBuf8<200> ml;
+                ml.Format(_L8("mic %d peak %d rms %d out_peak %d gain %d.%d dB boost %d gated %d limited %d frames %d silence_sent %d spk_peak %d route %d\n"),
+                          iTicks, pi, ri, po, gd / 10, (gd < 0 ? -gd : gd) % 10, iAgc.mode, gt, lim, iUpLastSec, iSilFrames, iPeakOut, iActualRoute);
+                Write(ml);
+                iPeakIn = 0;
+                iPeakOut = 0;
+            }
             if (iVideoEver && iS) {
                 TBuf8<400> vl;
                 vl.Format(_L8("v %d on %d fps10 %d bps %d au %d pk %d idr %d drop %d units %d pli %d fir %d nack %d "
@@ -1522,6 +1692,10 @@ private:
     TInt iEncFrames, iSentPkts, iDecFrames, iRecvPkts;
     TInt iPlcFrames, iUnderruns, iEncUs, iDecUs, iLastEnc;
     TInt iPeakIn, iPeakOut;
+    c277_agc iAgc;                 /* mic boost */
+    TInt iLastUpMs, iLastDnMs, iUpFrames, iUpLastSec, iUpFixAt, iUpFixes, iDnFixAt, iSilFrames, iRouteAt;
+    TBool iUpBroken, iDnBroken, iUpReopen;
+    TInt iActualRoute, iBtLinks;
     // v277
     TBool iV277;
     c277_session* iS;

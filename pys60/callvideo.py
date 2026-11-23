@@ -193,6 +193,8 @@ class CallVideo:
         self.rx_at_s = 0
         self.t_heard = 0
         self.restarts = 0
+        self.peer_box = None    # (w, h) the call screen shows the peer's picture in
+        self.self_box = None    # (w, h) of our picture in the corner
 
     # ------------------------------------------------------------ helpers
     def log(self, msg):
@@ -414,6 +416,11 @@ class CallVideo:
         decoded and drawn. Returns 1 if the helper could be started."""
         if self.helper_up():
             self.rx_on = 1
+            if self.state == S_RUNNING or self.state == S_WAIT_RUN or self.state == S_RXIDLE:
+                # the helper already runs (our camera video): just let the engine forward the
+                # peer's access units to it (H1, the engine asks the peer for an IDR)
+                self.log("peer video on: helper already running (state %d), forwarding on" % self.state)
+                self.set_fwd(1)
             return 1
         self.rx_on = 1
         self.want_send = 0
@@ -510,6 +517,9 @@ class CallVideo:
         self.msg = u""
         self.err = u""
         self.timer = None
+        # never "reuse" a helper we just told to quit (0.15.0: the peer picture after our video
+        # off waited for a helper that was gone); a new start pings it and starts a new one
+        self.hstate = -1
         self.changed()
 
     def stop_send(self):
@@ -733,7 +743,12 @@ class CallVideo:
         h = inf[I_PREV_H]
         if w <= 0 or h <= 0:
             return
-        if w >= 300:
+        fit = 0
+        if self.self_box is not None:
+            w = self.self_box[0]          # drawn at the corner's size by tgvdisp (flag 8)
+            h = self.self_box[1]
+            fit = 8
+        elif w >= 300:
             w = w / 2
             h = h / 2
         if self.img is None or self.img_size != (w, h):
@@ -745,9 +760,9 @@ class CallVideo:
             except:
                 self.img = None
                 return
-        flags = 0
+        flags = fit
         if self.cam == CAM_FRONT:
-            flags = 4
+            flags = flags | 4
         if flags != self.last_flags:
             self.last_flags = flags
             self.last_dec = -1
@@ -768,7 +783,20 @@ class CallVideo:
         h = inf[I_DEC_H]
         if w <= 0 or h <= 0:
             return
-        if w >= 320 or h >= 400:
+        flags = 0
+        box = self.peer_box
+        if box is not None and box[0] > 8 and box[1] > 8:
+            # 0.15.1: tgvdisp scales straight to the size it is shown at (flag 8), the call
+            # screen blits it unscaled (a scaled blit of every picture cost a lot of CPU)
+            tw = box[0]
+            th = tw * h / w
+            if th > box[1]:
+                th = box[1]
+                tw = th * w / h
+            w = tw & ~1
+            h = th & ~1
+            flags = 8
+        elif w >= 320 or h >= 400:
             w = w / 2
             h = h / 2
         if self.pimg is None or self.pimg_size != (w, h):
@@ -781,13 +809,26 @@ class CallVideo:
                 self.pimg = None
                 return
         try:
-            rc = td.render(self.pimg, 0, 0, self.p_last)
+            rc = td.render(self.pimg, 0, flags, self.p_last)
         except:
             return
         if rc >= 0 and rc != self.p_last:
             self.p_last = rc
             self.frame_new = 1
             self.changed()
+
+    def set_peer_box(self, box):
+        """The call screen tells the size the peer's picture is shown at: tgvdisp renders at
+        exactly that size."""
+        if box != self.peer_box:
+            self.peer_box = box
+            self.p_last = -1
+
+    def set_self_box(self, box):
+        """Size of our picture in the corner (rendered at exactly that size)."""
+        if box != self.self_box:
+            self.self_box = box
+            self.last_dec = -1
 
     def peer_frame(self):
         """(image, w, h) of the peer's newest decoded picture, or None."""

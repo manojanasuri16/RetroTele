@@ -49,7 +49,7 @@ static RFs gFs;
 static TFileName gLogPath[3];
 static TInt gLogN = 0;
 static TBool gLogOk = EFalse;
-#define TGV_HELPER_VERSION "0.15.0"
+#define TGV_HELPER_VERSION "0.15.1"
 
 static void Log(TRefByValue<const TDesC8> aFmt, ...)
 {
@@ -196,16 +196,16 @@ private:
 static CSend* gSend;
 
 // small control datagrams to tgcallaudio.exe (127.0.0.1:47014): 'P' keyframe request for the
-// peer's video, 'B<kbps>' REMB bitrate
+// peer's video, 'B<kbps>' REMB bitrate, 'T<text>' a line for its log (the per-second rx line)
 class CCtlSend : public CActive
 {
 public:
-    CCtlSend() : CActive(CActive::EPriorityStandard), iPtr(iBuf, 0, 16) { CActiveScheduler::Add(this); }
+    CCtlSend() : CActive(CActive::EPriorityStandard), iPtr(iBuf, 0, KCtlMax) { CActiveScheduler::Add(this); }
     ~CCtlSend() { Cancel(); }
     TBool Send(const TDesC8& aMsg)
     {
         if (IsActive() || !gSockOk) return EFalse;
-        iPtr.Copy(aMsg.Left(16));
+        iPtr.Copy(aMsg.Left(KCtlMax));
         iTo.SetAddress(INET_ADDR(127, 0, 0, 1));
         iTo.SetPort(47014);
         gTxSock.SendTo(iPtr, iTo, 0, iStatus);
@@ -215,7 +215,8 @@ public:
     void RunL() {}
     void DoCancel() { gTxSock.CancelSend(); }
 private:
-    TUint8 iBuf[16];
+    enum { KCtlMax = 240 };
+    TUint8 iBuf[KCtlMax];
     TPtr8 iPtr;
     TInetAddr iTo;
 };
@@ -576,20 +577,23 @@ static CDec* gDecoder;
 //
 // 0.15.0: the peer's H.264 High stream is decoded in software (native/h264dec: FFmpeg 0.6.7's
 // H.264 decoder, bit-exact with the PC, 18.6 ms per 176x320 frame on the N79) on a worker thread
-// (H264DecCreateThread: <= 80 KB stack, shared heap) one priority step below this thread, so
-// the camera/encoder active objects here and the call audio (other process) come first.
+// (H264DecCreateThread: <= 80 KB stack, shared heap) at the same priority as this thread
+// (0.15.0 ran it one step lower and it starved behind the camera/encoder and the UI).
 //   - sizes above 240x480 are refused (352x640 needs 62 ms per frame): state 4, no CPU spent
 //     until the peer's SPS gets smaller (REMB 100 kbit/s from the start pushes it to 176x320;
 //     raised to 150 after 20 s of smooth 176x320, back to 100 on trouble)
-//   - at most KRxQ access units wait; on overflow everything queued is dropped, decoding waits
-//     for the next IDR and a keyframe request ('P' to tgcallaudio.exe -> PLI) goes out
+//   - falling behind (0.15.1): every access unit is still decoded (all are references); with 2 or
+//     more waiting the decoder skips deblocking on P pictures (h264dec_set_fast, ~20% less work)
+//     and only the newest picture is shown. Only a full queue (KRxQ) drops to the next IDR with a
+//     keyframe request ('P' to tgcallaudio.exe -> PLI), at most every KRxKeyGapMs; 0.15.0's
+//     4-slot queue + immediate PLI looped (127 PLIs in 2 minutes, half the units thrown away)
 //   - decoder errors: after 2 in a row (or an internal failure) the decoder is reset and a
 //     keyframe requested (state 5 "resyncing"); the worker thread dying is logged and it is
 //     restarted (state 6) at most KRxRestarts times
 //   - pictures go to the chunk as planar 4:2:0 (decimated 2x above 240x320) at most every
 //     KRxPubMs; tgvdisp.pyd converts them to RGB
 static const TInt KRxMaxW = 240, KRxMaxH = 480;
-static const TInt KRxQ = 4, KRxPubMs = 90, KRxRestarts = 3;
+static const TInt KRxQ = 10, KRxPubMs = 90, KRxRestarts = 3, KRxKeyGapMs = 4000, KRxLossGapMs = 1500;
 static TInt gRxProfile = 0, gRxLevel = 0, gRxW = 0, gRxH = 0;
 static TInt gRxFrags = 0, gRxAuIn = 0;
 static const TInt KRxMax = 1300, KRxFragSz = 1200, KRxFragMax = 40;
@@ -608,15 +612,15 @@ struct TRxShared
     volatile TInt iQuit;
     // written by the worker
     volatile TInt iDecoded, iErrors, iFatal, iTooBig, iPublished, iDecUs, iDecN, iMaxUs;
-    volatile TInt iW, iH, iWantIdr, iState, iUp, iCreateErr, iStack, iLastKey;
+    volatile TInt iW, iH, iWantIdr, iState, iUp, iCreateErr, iStack, iLastKey, iMaxQ, iFastN, iSkipPub;
 };
 static TRxShared* gRx = NULL;
 static RThread gRxThread;
 static TBool gRxThreadOpen = EFalse;
 static TRequestStatus gRxThreadSt;
 static TInt gRxRestarts = 0, gRxWaitIdr = 1, gRxDropped = 0, gRxQueued = 0, gRxKeyReqs = 0, gRxKeyReqAt = -100000;
-static TInt gRxSmoothS = 0, gRxRemb = 0, gRxTooBigLogged = 0, gRxStarted = 0;
-static TInt gRxPrevDec = 0, gRxPrevIn = 0, gRxPrevDrop = 0, gRxPrevErr = 0;
+static TInt gRxSmoothS = 0, gRxRemb = 0, gRxTooBigLogged = 0, gRxStarted = 0, gRxLostFrag = 0;
+static TInt gRxPrevDec = 0, gRxPrevIn = 0, gRxPrevDrop = 0, gRxPrevErr = 0, gRxPrevPub = 0;
 static void SendCtl(const TDesC8& aMsg);
 
 static void RxSetState(TInt aSt) { HSet(TGV_W_RX_STATE, aSt); }
@@ -678,21 +682,28 @@ static TInt RxThreadFn(TAny*)
     h264dec* d = h264dec_create(KRxMaxW, KRxMaxH);
     if (!d) { r.iCreateErr = KErrNoMemory; r.iState = 3; r.iUp = 0; delete tc; CloseSTDLIB(); return KErrNoMemory; }
     r.iUp = 1;
-    TInt lastPub = -100000, errRun = 0;
+    TInt lastPub = -100000, errRun = 0, fast = 0;
     for (;;) {
         r.iSem.Wait();
         if (r.iQuit) break;
         TRxAu a;
         a.iData = NULL;
+        TInt left = 0;
         r.iLock.Wait();
         if (r.iCount > 0) {
             a = r.iQ[r.iHead];
             r.iQ[r.iHead].iData = NULL;
             r.iHead = (r.iHead + 1) % KRxQ;
             r.iCount--;
+            left = r.iCount;
         }
         r.iLock.Signal();
         if (!a.iData) continue;
+        if (left + 1 > r.iMaxQ) r.iMaxQ = left + 1;
+        // behind: cheaper decoding (no deblocking on P pictures) until the queue is empty again
+        if (!fast && left >= 2) { fast = 1; h264dec_set_fast(d, 1); }
+        else if (fast && left == 0) { fast = 0; h264dec_set_fast(d, 0); }
+        if (fast) r.iFastN++;
         h264dec_frame f;
         TUint32 t0 = User::FastCounter();
         TInt t0ms = RxNowMs();
@@ -709,7 +720,10 @@ static TInt RxThreadFn(TAny*)
             if (f.key) r.iLastKey = r.iDecoded;
             if (r.iState != 2) r.iState = 2;
             TInt now = RxNowMs();
-            if (now - lastPub >= KRxPubMs || f.key) { lastPub = now; RxPublish(f); r.iPublished++; }
+            // show the newest picture only: skip the copy while more units wait (unless it is long ago)
+            TBool newest = (r.iCount == 0) || now - lastPub >= 400;
+            if ((now - lastPub >= KRxPubMs && newest) || f.key) { lastPub = now; RxPublish(f); r.iPublished++; }
+            else r.iSkipPub++;
         } else if (rc == H264DEC_ERR_TOOBIG) {
             r.iTooBig++;
             r.iState = 4;
@@ -761,13 +775,13 @@ static TInt RxStartThread()
         return e;
     }
     gRx->iStack = stack;
-    gRxThread.SetPriority(EPriorityLess);
+    gRxThread.SetPriority(EPriorityNormal);
     gRxThread.Logon(gRxThreadSt);
     gRxThread.Resume();
     gRxThreadOpen = ETrue;
     gRxWaitIdr = 1;
     gRxStarted = 1;
-    Log(_L8("rx: software H.264 decoder thread up (stack %d KB, priority less, limit %dx%d)"), stack / 1024, KRxMaxW, KRxMaxH);
+    Log(_L8("rx: software H.264 decoder thread up (stack %d KB, priority normal, queue %d, limit %dx%d)"), stack / 1024, KRxQ, KRxMaxW, KRxMaxH);
     return KErrNone;
 }
 
@@ -792,12 +806,13 @@ static void RxStopThread()
     RxFlushQueue();
 }
 
-// keyframe request to tgcallaudio.exe (PLI to the peer), at most every 800 ms
-static void RxKeyRequest(const TDesC8& aWhy)
+// keyframe request to tgcallaudio.exe (PLI to the peer): at most every aGapMs (KRxKeyGapMs for
+// overload, KRxLossGapMs after lost data / decoder errors)
+static void RxKeyRequest(const TDesC8& aWhy, TInt aGapMs)
 {
     TInt now = NowMs();
     gRxWaitIdr = 1;
-    if (now - gRxKeyReqAt < 800) return;
+    if (now - gRxKeyReqAt < aGapMs) return;
     gRxKeyReqAt = now;
     gRxKeyReqs++;
     SendCtl(_L8("P"));
@@ -819,7 +834,7 @@ static void RxCheckThread()
     if (gRxRestarts < KRxRestarts) {
         gRxRestarts++;
         RxSetState(6);
-        if (RxStartThread() == KErrNone) { TBuf8<24> w(_L8("decoder restarted")); RxKeyRequest(w); }
+        if (RxStartThread() == KErrNone) { TBuf8<24> w(_L8("decoder restarted")); RxKeyRequest(w, KRxLossGapMs); }
     } else {
         RxSetState(3);
         HSet(TGV_W_RX_ERR, gRxThread.ExitReason());
@@ -847,7 +862,7 @@ static void RxUnit(const TUint8* aAu, TInt aLen, TInt aIdr)
     if (gRx->iWantIdr) {
         gRx->iWantIdr = 0;
         TBuf8<24> w(_L8("decoder error"));
-        RxKeyRequest(w);
+        RxKeyRequest(w, KRxLossGapMs);
     }
     if (gRxW > 0 && RxTooBig(gRxW, gRxH)) {
         // refused before decoding: wait for the peer to step down (REMB is low already)
@@ -859,11 +874,11 @@ static void RxUnit(const TUint8* aAu, TInt aLen, TInt aIdr)
     }
     if (gRxWaitIdr && !aIdr) { gRxDropped++; return; }
     TUint8* copy = (TUint8*)User::Alloc(aLen);
-    if (!copy) { gRxDropped++; TBuf8<24> w(_L8("out of memory")); RxKeyRequest(w); return; }
+    if (!copy) { gRxDropped++; TBuf8<24> w(_L8("out of memory")); RxKeyRequest(w, KRxKeyGapMs); return; }
     Mem::Copy(copy, aAu, aLen);
     TBool overflow = EFalse;
     gRx->iLock.Wait();
-    if (gRx->iCount >= KRxQ - 1) {
+    if (gRx->iCount >= KRxQ) {
         // the decoder fell behind: throw the backlog away, restart at an IDR
         while (gRx->iCount > 0) {
             User::Free(gRx->iQ[gRx->iHead].iData);
@@ -883,7 +898,8 @@ static void RxUnit(const TUint8* aAu, TInt aLen, TInt aIdr)
     gRx->iLock.Signal();
     if (take) { gRxQueued++; gRxWaitIdr = 0; gRx->iSem.Signal(); }
     else { User::Free(copy); gRxDropped++; }
-    if (overflow && !aIdr) { TBuf8<24> w(_L8("decoder behind")); RxKeyRequest(w); }
+    if (overflow && !aIdr) { TBuf8<24> w(_L8("queue full")); RxKeyRequest(w, KRxKeyGapMs); }
+    if (gRxLostFrag) { gRxLostFrag = 0; TBuf8<24> w(_L8("lost fragments")); RxKeyRequest(w, KRxLossGapMs); }
 }
 
 // once a second from StatTick: chunk words, REMB policy, the "rx:" log line
@@ -917,10 +933,27 @@ static void RxSecond(TInt aTickMs)
         SendCtl(b);
         Log(_L8("rx: REMB %d kbit/s"), want);
     }
-    if (dIn > 0 || dDec > 0 || dDrop > 0)
-        Log(_L8("rx: in=%d dec=%d drop=%d err=%d ms/frame=%d.%d max=%d pub=%d size=%dx%d sps=%dx%d state=%d q=%d keyreq=%d fatal=%d tickms=%d remb=%d"),
-            dIn, dDec, dDrop, dErr, avg / 1000, (avg % 1000) / 100, mx / 1000, gRx->iPublished, gRx->iW, gRx->iH, gRxW, gRxH,
-            H ? (TInt)H[TGV_W_RX_STATE] : 0, gRx->iCount, gRxKeyReqs, gRx->iFatal, aTickMs, gRxRemb);
+    // waiting for an IDR but the last request was suppressed by the rate limit: ask again
+    if (gRxWaitIdr && gRxThreadOpen && dIn > 0 && NowMs() - gRxKeyReqAt >= KRxKeyGapMs) {
+        TBuf8<24> w(_L8("still waiting"));
+        RxKeyRequest(w, KRxKeyGapMs);
+    }
+    TInt maxq = gRx->iMaxQ, fastn = gRx->iFastN, skip = gRx->iSkipPub, pub = gRx->iPublished;
+    gRx->iMaxQ = 0; gRx->iFastN = 0; gRx->iSkipPub = 0;
+    TInt dPub = pub - gRxPrevPub;
+    gRxPrevPub = pub;
+    if (dIn > 0 || dDec > 0 || dDrop > 0) {
+        TBuf8<220> l;
+        l.Format(_L8("rx: in=%d dec=%d drop=%d err=%d ms/frame=%d.%d max=%d shown=%d skipped=%d fast=%d qmax=%d q=%d size=%dx%d sps=%dx%d state=%d keyreq=%d fatal=%d tickms=%d remb=%d cam=%d"),
+            dIn, dDec, dDrop, dErr, avg / 1000, (avg % 1000) / 100, mx / 1000, dPub, skip, fastn, maxq, gRx->iCount, gRx->iW, gRx->iH,
+            gRxW, gRxH, H ? (TInt)H[TGV_W_RX_STATE] : 0, gRxKeyReqs, gRx->iFatal, aTickMs, gRxRemb, H ? (TInt)H[TGV_W_STATE] == 1 : 0);
+        Log(_L8("%S"), &l);
+        // the same line into tgcallaudio.exe's log (retrotele_callaudio.txt), next to its own rx lines
+        TBuf8<224> t;
+        t.Append('T');
+        t.Append(l);
+        SendCtl(t);
+    }
 }
 
 static void RxPacket(const TDesC8& aD)
@@ -945,7 +978,7 @@ static void RxPacket(const TDesC8& aD)
     TRxFrag& f = *gRxFrag;
     if (cnt < 1 || cnt > KRxFragMax || idx >= cnt || n > KRxFragSz) return;
     if (id != f.iId) {
-        if (f.iId >= 0 && f.iNGot > 0) { gRxDropped++; gRxWaitIdr = 1; }   // a unit lost fragments
+        if (f.iId >= 0 && f.iNGot > 0) { gRxDropped++; gRxWaitIdr = 1; gRxLostFrag = 1; }   // a unit lost fragments
         f.iId = id; f.iCnt = cnt; f.iNGot = 0; f.iLast = 0; f.iIdr = idr;
         Mem::FillZ(f.iGot, sizeof(f.iGot));
     }
@@ -1983,6 +2016,13 @@ static TInt StatTick(TAny*)
             capF / 10, capF % 10, encF / 10, encF % 10, bps, kk, dd, encms, el, gExpUnits, gExpDrops, gW, gHt, gQuality, gKbps);
     }
     RxSecond(el);
+    if (gSecs % 10 == 0) {
+        // the phone's file system does not update the modified time when we append through a
+        // fresh Open each line (0.15.0 logs looked stale on the PC although they were written)
+        TTime t;
+        t.UniversalTime();
+        for (TInt i = 0; i < gLogN; i++) gFs.SetModified(gLogPath[i], t);
+    }
     if (++gSecs % 5 == 0)
         Log(_L8("stats: cap=%d.%d enc=%d.%d dec=%d.%d fps lat=%d ms %d B/s err=%d drops=%d keys=%d"), capF / 10, capF % 10,
             encF / 10, encF % 10, decF / 10, decF % 10, gSt.iLat, bps, gSt.iErrors, gSt.iDrops, gSt.iKeys);

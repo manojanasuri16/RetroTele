@@ -65,6 +65,10 @@ class CallAudio:
         self.route = 1
         self.want_mute = 0
         self.want_route = 1
+        self.want_agc = 1         # mic boost: 0 off, 1 normal (AGC), 2 high
+        self.route_failed = -1    # the helper could not switch to this route (it kept the old one)
+        self.bt_links = -1        # connected Bluetooth links the helper sees (-1 unknown)
+        self.route_user = 0       # the user picked a sound output in this call (no automatic switch)
         self.on_info = None
         self.sent_init = 0
         self.armed = 0
@@ -357,6 +361,18 @@ class CallAudio:
             elif data[:2] == "A ":
                 self.video_active = (data[2:].strip() == "1")
                 self._info()
+            elif data[:2] == "B ":
+                try:
+                    self.bt_links = int(data[2:].strip())
+                except:
+                    self.bt_links = -1
+                self._info()
+            elif data[:2] == "O ":
+                try:
+                    self.route_failed = int(data[2:].strip())
+                except:
+                    self.route_failed = 2
+                self._info()
         else:
             self.rx = self.rx + 1
             try:
@@ -378,6 +394,7 @@ class CallAudio:
         # the helper may have started after the wishes were set: re-send
         self._sendto("R%d" % self.want_route)
         self._sendto("M%d" % self.want_mute)
+        self._sendto("A%d" % self.want_agc)
         if self.want_video:
             self._sendto("V1")
         if self.want_rx:
@@ -413,6 +430,13 @@ class CallAudio:
         else:
             self.want_mute = 0
         self._sendto("M%d" % self.want_mute)
+
+    def set_agc(self, mode):
+        """Mic boost in the helper: 0 off, 1 normal (AGC up to +18 dB), 2 high (+24 dB)."""
+        if mode < 0 or mode > 2:
+            mode = 1
+        self.want_agc = mode
+        self._sendto("A%d" % mode)
 
     def set_route(self, n):
         if n < 0 or n > 2:

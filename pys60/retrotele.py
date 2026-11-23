@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.15.0"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.15.1"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -1887,6 +1887,10 @@ class App:
         else:
             ok = ca.start_relay(cs["kb"], cs["out"], cs["conns"], self.audio_changed, iap)
         ca.on_info = self.audio_info
+        try:
+            ca.set_agc(self.mic_boost())
+        except:
+            self.log("mic boost: " + err_text())
         if self.client.call_version == "2.7.7" and self.cfg.get("video_rx") != "0":
             try:
                 # receive the peer's video (on by default since 0.15.0: software H.264 decoder in
@@ -1936,15 +1940,19 @@ class App:
         if ca is None or not getattr(ca, "want_rx", 0) or not self.call_peer_video():
             return
         cv = self.call_video
-        if cv is not None and (cv.helper_up() or getattr(cv, "rx_tried", 0)):
-            return
+        if cv is not None and getattr(cv, "rx_on", 0) and cv.helper_up():
+            return                      # already showing (or waiting for) the peer's picture
+        if cv is not None and getattr(cv, "rx_tried", 0) >= 3:
+            return                      # the helper failed for the peer's picture 3 times this call
         try:
             import callvideo
             if cv is None:
                 cv = callvideo.CallVideo(ca, self.call_video_changed, self.log)
                 cv.show_self = self.call_show_self
                 self.call_video = cv
-            cv.rx_tried = 1
+            # also when our camera video already runs in the helper (0.15.0 bug: the peer's video
+            # was never switched on in that order)
+            cv.rx_tried = getattr(cv, "rx_tried", 0) + 1
             cv.start_rx()
         except:
             self.log("peer video helper: " + err_text())
@@ -1956,6 +1964,33 @@ class App:
             self.call_peer_video_check()
         except:
             self.log("peer video check: " + err_text())
+        ca = self.call_audio
+        bt = getattr(ca, "bt_links", -1)
+        if bt != getattr(self, "call_bt_seen", -1):
+            self.call_bt_seen = bt
+            self.log("bluetooth links %d, sound output %d (chosen by user: %d)" % (
+                bt, getattr(ca, "want_route", -1), getattr(ca, "route_user", 0)))
+            if bt > 0 and not getattr(ca, "route_user", 0) and getattr(ca, "want_route", 2) != 2:
+                # a headset is connected and the user did not choose: the call audio goes to it
+                self.call_set_route(2)
+                try:
+                    self.show_toast(u"Sound output", u"Bluetooth headset")
+                except:
+                    pass
+            try:
+                if self.screen == "call":
+                    self.call_menu()
+            except:
+                pass
+        rf = getattr(ca, "route_failed", -1)
+        if rf >= 0:
+            ca.route_failed = -1
+            name = [u"Earpiece", u"Speaker", u"Bluetooth / auto"][rf % 3]
+            self.log("sound output %d failed in the helper, previous route kept" % rf)
+            try:
+                self.show_toast(u"Sound output", name + u" not available, kept the previous output")
+            except:
+                pass
         cs = self.client.cs
         if cs is not None and cs["state"] != "ended" and self.screen == "call":
             self.redraw()
@@ -1980,17 +2015,56 @@ class App:
         self.call_menu()
         self.redraw()
 
+    def call_bt(self):
+        """A Bluetooth device is connected (the helper reads the phone's Bluetooth link count)."""
+        ca = self.call_audio
+        return ca is not None and getattr(ca, "bt_links", -1) > 0
+
+    def call_route_name(self):
+        """What the [2] Sound button and the menu show: the current output."""
+        r = self.call_route()
+        if r == 0:
+            return u"Earpiece"
+        if r == 1:
+            return u"Speaker"
+        if self.call_bt():
+            return u"Bluetooth"
+        return u"Auto"
+
+    def call_pick_route(self, n):
+        """Sound output chosen by the user (no automatic Bluetooth switch after that)."""
+        ca = self.call_audio
+        if ca is not None:
+            ca.route_user = 1
+        self.call_set_route(n)
+        try:
+            self.call_menu()
+        except:
+            pass
+
     def call_set_route(self, n):
+        """Sound output. Whatever goes wrong here never ends the call (0.15.1)."""
         ca = self.call_audio
         if ca is None:
             return
-        ca.set_route(n)
-        self.redraw()
+        try:
+            ca.set_route(n)
+        except:
+            self.log("route %d: %s" % (n, err_text()))
+            try:
+                self.show_toast(u"Sound output", u"Could not switch the sound output")
+            except:
+                pass
+        try:
+            self.redraw()
+        except:
+            pass
 
     def call_cycle_route(self):
         ca = self.call_audio
         if ca is None:
             return
+        ca.route_user = 1
         self.call_set_route((ca.want_route + 1) % 3)
 
     # ---------------------------------------------------------- send-only video (2.7.7 calls)
@@ -2198,10 +2272,18 @@ class App:
                     m.append((u"Unmute microphone", self.call_toggle_mute))
                 else:
                     m.append((u"Mute microphone", self.call_toggle_mute))
-                m.append((u"Sound output", (
-                    (u"Speaker", lambda self=self: self.call_set_route(1)),
-                    (u"Earpiece", lambda self=self: self.call_set_route(0)),
-                    (u"Bluetooth / auto", lambda self=self: self.call_set_route(2)))))
+                if self.call_bt():
+                    # a Bluetooth headset is connected: "auto" hands the call audio (and its
+                    # microphone) to it through the phone's audio policy
+                    m.append((u"Sound: " + self.call_route_name(), (
+                        (u"Bluetooth headset", lambda self=self: self.call_pick_route(2)),
+                        (u"Speaker", lambda self=self: self.call_pick_route(1)),
+                        (u"Phone earpiece", lambda self=self: self.call_pick_route(0)))))
+                else:
+                    m.append((u"Sound: " + self.call_route_name(), (
+                        (u"Speaker", lambda self=self: self.call_pick_route(1)),
+                        (u"Earpiece", lambda self=self: self.call_pick_route(0)),
+                        (u"Auto (headset if connected)", lambda self=self: self.call_pick_route(2)))))
                 if self.call_video_ok():
                     if self.call_video_on():
                         m.append((u"Turn video off", self.call_toggle_video))
@@ -2342,6 +2424,16 @@ class App:
 
     # ---------------------------------------------------------- menus
 
+    def mic_boost(self):
+        """0 off, 1 normal (default), 2 high: the digital mic gain in calls (tgcallaudio's AGC)."""
+        try:
+            m = int(self.cfg.get("mic_boost", "1"))
+        except:
+            m = 1
+        if m < 0 or m > 2:
+            m = 1
+        return m
+
     def settings(self):
         ap = u"Auto-download pictures: on"
         if not self.auto_photos():
@@ -2352,7 +2444,8 @@ class App:
         fm = u"Fast mode: on"
         if self.cfg.get("verify", default) == "1":
             fm = u"Fast mode: off (full check)"
-        items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder", ap, fm]
+        mb = [u"Mic boost in calls: off", u"Mic boost in calls: normal", u"Mic boost in calls: high"][self.mic_boost()]
+        items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder", ap, fm, mb]
         i = appuifw.popup_menu(items, u"Settings")
         if i == 0:
             if self.setup_ap(1):
@@ -2380,6 +2473,18 @@ class App:
             self.client.verify = v
             for sess in self.client.sessions.values():
                 sess.verify = v
+        elif i == 6:
+            j = appuifw.popup_menu([u"Off", u"Normal (automatic level)", u"High (quiet microphone)"],
+                                   u"Mic boost in calls")
+            if j is not None and j >= 0:
+                self.cfg.set("mic_boost", str(j))
+                self.cfg.save()
+                ca = self.call_audio
+                if ca is not None:
+                    try:
+                        ca.set_agc(j)
+                    except:
+                        pass
         elif i == 4:
             if self.auto_photos():
                 self.cfg.set("auto_photos", "0")

@@ -11,7 +11,9 @@ LIB="c277_crypto.c c277_msg.c c277_conn.c c277_refl.c c277_stun.c c277_ice.c c27
 gcc $CF -o "$OUT/test_call277" test_call277.c $LIB
 gcc $CF -o "$OUT/test_session" test_session.c $LIB
 gcc $CF -o "$OUT/test_video" test_video.c c277_video.c c277_rtp.c c277_crypto.c
+gcc $CF -o "$OUT/test_agc" test_agc.c c277_agc.c
 "$OUT/test_call277" "$OUT/crosscheck.txt"
 "$OUT/test_session" "$OUT/crosscheck.txt"
 "$OUT/test_video"
+"$OUT/test_agc" | tail -1
 rm -rf "$OUT"

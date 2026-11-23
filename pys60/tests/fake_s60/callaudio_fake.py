@@ -26,6 +26,11 @@ class CallAudio:
         self.loss = 0
         self.want_rx = 0
         self.want_rxfwd = 0
+        self.want_agc = 1
+        self.route_failed = -1
+        self.route_raises = 0
+        self.bt_links = -1
+        self.route_user = 0
         CallAudio.instances.append(self)
 
     def start_relay(self, key, is_outgoing, connections, on_state, iap=0):
@@ -66,8 +71,14 @@ class CallAudio:
         self.sent.append("V%d" % self.want_video)
 
     def set_route(self, n):
+        if self.route_raises:
+            raise IOError("route change failed (test)")
         self.want_route = n
         self.sent.append("R%d" % n)
+
+    def set_agc(self, mode):
+        self.want_agc = mode
+        self.sent.append("A%d" % mode)
 
     def helper_info(self, muted, route):
         self.muted = muted

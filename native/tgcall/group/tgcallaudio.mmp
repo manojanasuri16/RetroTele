@@ -22,7 +22,7 @@ SOURCE        callproto.c
 // callproto_crypto.c is compiled as part of c277_crypto.c (#include): do not list it twice
 
 SOURCEPATH    ..\..\call277
-SOURCE        c277_crypto.c c277_msg.c c277_conn.c c277_refl.c c277_stun.c c277_ice.c c277_rtp.c c277_video.c c277_session.c
+SOURCE        c277_crypto.c c277_msg.c c277_conn.c c277_refl.c c277_stun.c c277_ice.c c277_rtp.c c277_video.c c277_session.c c277_agc.c
 
 STATICLIBRARY tgopus.lib
 LIBRARY       euser.lib efsrv.lib esock.lib insock.lib estlib.lib voipaudiointfc.lib commdb.lib

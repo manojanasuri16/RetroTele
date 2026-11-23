@@ -458,10 +458,10 @@ fa.helper_state("connected")
 t = screen_text()
 assert t.find(u"[1] Mic | On") >= 0 and t.find(u"[2] Sound | Speaker") >= 0 and t.find(u"[3] Call | End") >= 0, t
 mlabels = [m[0] for m in appuifw.app.menu]
-assert u"Mute microphone" in mlabels and u"Sound output" in mlabels and u"Hang up" in mlabels, mlabels
+assert u"Mute microphone" in mlabels and u"Sound: Speaker" in mlabels and u"Hang up" in mlabels, mlabels
 assert u"Add person to call" not in mlabels and len(mlabels) <= 5, mlabels
-sub = [m[1] for m in appuifw.app.menu if m[0] == u"Sound output"][0]
-assert [x[0] for x in sub] == [u"Speaker", u"Earpiece", u"Bluetooth / auto"], sub
+sub = [m[1] for m in appuifw.app.menu if m[0][:6] == u"Sound:"][0]
+assert [x[0] for x in sub] == [u"Speaker", u"Earpiece", u"Auto (headset if connected)"], sub
 app.view.canvas.keys[ord("1")]()
 assert fa.sent[-1] == "M1" and app.call_muted()
 t = screen_text()
@@ -477,6 +477,35 @@ app.view.canvas.keys[ord("2")]()
 assert fa.sent[-1] == "R1" and screen_text().find(u"[2] Sound | Speaker") >= 0
 sub[1][1]()
 assert fa.sent[-1] == "R0"
+# 0.15.1: a failing route change (e.g. Bluetooth) never ends the call
+fa.route_raises = 1
+sub[2][1]()
+app.view.canvas.keys[ord("2")]()
+assert app.client.cs["state"] == "connected" and fa.running and fa.sent[-1] == "R0", fa.sent[-3:]
+assert app.toast_text is not None and app.toast_text[1].find(u"Could not switch") >= 0, app.toast_text
+fa.route_raises = 0
+# the helper reports a route it could not use (info 'O'): message, call goes on
+fa.route_failed = 2
+fa.helper_info(0, 0)
+assert app.client.cs["state"] == "connected" and fa.route_failed == -1
+assert app.toast_text[1].find(u"Bluetooth / auto not available") >= 0, app.toast_text
+# a Bluetooth headset connects during the call: the menu offers it and, as the user only used the
+# cycle key before, nothing is switched automatically; in a fresh state it is
+fa.route_user = 0
+fa.bt_links = 1
+fa.helper_info(0, 0)
+assert fa.sent[-1] == "R2" and app.client.cs["state"] == "connected", fa.sent[-2:]
+assert screen_text().find(u"[2] Sound | Bluetooth") >= 0, screen_text()
+mb = [m for m in appuifw.app.menu if m[0][:6] == u"Sound:"][0]
+assert mb[0] == u"Sound: Bluetooth" and [x[0] for x in mb[1]] == [u"Bluetooth headset", u"Speaker", u"Phone earpiece"], mb
+mb[1][1][1]()                                   # the user picks the speaker: kept
+assert fa.sent[-1] == "R1" and fa.route_user == 1
+fa.helper_info(0, 1)
+assert fa.sent[-1] == "R1"                       # no automatic switch back
+fa.bt_links = 0
+fa.helper_info(0, 1)
+assert [m for m in appuifw.app.menu if m[0][:6] == u"Sound:"][0][0] == u"Sound: Speaker"
+assert app.client.cs["state"] == "connected" and fa.running
 # Options menu opened and cancelled (also its Sound output submenu): no menu callback runs and the
 # call goes on. If the right softkey fires with the Cancel (some S60 builds), it asks first.
 assert app.client.cs["state"] == "connected" and fa.running
@@ -940,9 +969,10 @@ class FakeCV:
         self.live = 0; self.stopped = self.stopped + 1; self.audio.set_video(0)
     def switch_camera(self): self.sw = self.sw + 1; return 1
     def frame(self): return None
-    rx = 0; pf = None; ps = u""; pfail = 0; up = 0
+    rx = 0; pf = None; ps = u""; pfail = 0; up = 0; rx_on = 0; rx_calls = 0
     def helper_up(self): return self.up
-    def start_rx(self): self.rx = 1; self.up = 1; return 1
+    def start_rx(self):
+        self.rx = 1; self.up = 1; self.rx_on = 1; self.rx_calls = self.rx_calls + 1; return 1
     def peer_frame(self): return self.pf
     def peer_status(self): return self.ps
     def peer_failed(self): return self.pfail
@@ -979,8 +1009,17 @@ assert t.find(u"Video on -") >= 0 and t.find(u"[7] show me") >= 0 and t.find(u"[
 app.view.key("6")
 assert cvf.sw == 1
 fv.peer_video = 2
+fv.want_rx = 0                              # video_rx = 0: the peer's video is not received
 t = screen_text()
 assert t.find(u"video is on (cannot be shown on this phone)") >= 0 or t.find(u"cannot be shown") >= 0, t
+# our camera first, then the peer turns video on: the running helper also takes the peer's picture
+# (0.15.0 bug: start_rx was never called when the helper already ran for our camera)
+fv.want_rx = 1
+cvf.up = 1
+app.audio_info()
+assert app.call_video is cvf and cvf.rx_on == 1 and cvf.rx_calls == 1, (cvf.rx_on, cvf.rx_calls)
+app.audio_info()
+assert cvf.rx_calls == 1                    # once is enough while it runs
 fv.peer_video = -1
 # the peer's video: the helper starts when the peer turns video on, the picture fills the screen
 app.stop_call_video(); app.call_video = None

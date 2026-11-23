@@ -2118,6 +2118,9 @@ class CallView(CanvasView):
         cv = self.app.call_video
         f = None
         if cv is not None:
+            sb = getattr(cv, "set_self_box", None)
+            if sb is not None:
+                sb((tw, th))
             f = cv.frame()
         g.rectangle((x1 - 1, y1 - 1, x1 + tw + 1, y1 + th + 1), outline=WHITE)
         if f is None:
@@ -2133,7 +2136,10 @@ class CallView(CanvasView):
             return
         img, iw, ih = f
         try:
-            g.blit(img, target=(x1, y1, x1 + tw, y1 + th), scale=1)
+            if iw == tw and ih == th:
+                g.blit(img, target=(x1, y1))           # rendered at this size by tgvdisp
+            else:
+                g.blit(img, target=(x1, y1, x1 + tw, y1 + th), scale=1)
         except:
             pass
 
@@ -2167,7 +2173,10 @@ class CallView(CanvasView):
         else:
             mc = self.BTN
             ml = u"On"
-        if r == 0:
+        f = getattr(self.app, "call_route_name", None)
+        if f is not None:
+            rl = f()
+        elif r == 0:
             rl = u"Earpiece"
         elif r == 2:
             rl = u"Auto"
@@ -2210,15 +2219,27 @@ class CallView(CanvasView):
         ah = top - ay
         g.rectangle((0, ay, w, ay + ah), fill=0x000000)
         img, iw, ih = pf
-        tw = w
-        th = tw * ih / iw
-        if th > ah:
-            th = ah
-            tw = th * iw / ih
+        cv = app.call_video
+        pb = getattr(cv, "set_peer_box", None)
+        if pb is not None:
+            pb((w, ah))
+        if iw <= w and ih <= ah and (iw >= w - 2 or ih >= ah - 2):
+            # already rendered at the shown size (tgvdisp flag 8): plain blit, centred
+            tw = iw
+            th = ih
+        else:
+            tw = w
+            th = tw * ih / iw
+            if th > ah:
+                th = ah
+                tw = th * iw / ih
         x1 = (w - tw) / 2
         y1 = ay + (ah - th) / 2
         try:
-            g.blit(img, target=(x1, y1, x1 + tw, y1 + th), scale=1)
+            if tw == iw and th == ih:
+                g.blit(img, target=(x1, y1))
+            else:
+                g.blit(img, target=(x1, y1, x1 + tw, y1 + th), scale=1)
         except:
             pass
         if vid:

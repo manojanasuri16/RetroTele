@@ -101,6 +101,15 @@ else
   FAIL=$((FAIL+1)); echo "FAIL late join"; tail -3 "$W/late.log"
 fi
 
+# fast mode (no deblocking on P pictures, used when the phone falls behind): decodes everything
+if "$T" "$W/hp_cabac_176x320.264" "$W/fast.yuv" -fast 2>"$W/fast.log" &&
+   [ "$(stat -c %s "$W/fast.yuv")" = "$(stat -c %s "$W/hp_cabac_176x320.ref.yuv")" ] &&
+   cmp -s -n $((176*320*3/2)) "$W/fast.yuv" "$W/hp_cabac_176x320.ref.yuv"; then
+  PASS=$((PASS+1)); echo "PASS fast mode (all pictures, first IDR exact; $(tail -1 "$W/fast.log"))"
+else
+  FAIL=$((FAIL+1)); echo "FAIL fast mode"; tail -3 "$W/fast.log"
+fi
+
 # packet loss and corrupt data: must not crash and must keep producing pictures
 for c in "-drop 5" "-drop 2" "-fuzz 1 2" "-fuzz 2 10" "-fuzz 3 50" "-fuzz 4 200"; do
   ok=1

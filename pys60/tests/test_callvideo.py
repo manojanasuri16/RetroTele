@@ -405,6 +405,9 @@ a._handle("A 1"); assert a.video_active
 a._handle("L 77"); assert a.loss == 77
 a.set_rx(1); assert sent[-1] == "W1" and a.want_rx == 1
 a.set_rxfwd(1); assert sent[-1] == "H1"
+a.set_agc(2); assert sent[-1] == "A2" and a.want_agc == 2
+a.set_agc(7); assert sent[-1] == "A1"                  # bad value: normal
+a._handle("O 2"); assert a.route_failed == 2
 del sent[:]
 a._send_controls()
 assert "W1" in sent and "H1" in sent    # resent when the helper starts late
@@ -462,4 +465,50 @@ HDR[28] = 5
 vq2.inf = tuple(HDR)
 assert vq2.peer_status() == u"Peer video: decoder error, resyncing"
 HDR[28] = 2
+# ---- 0.15.1: pictures rendered at their shown size (tgvdisp flag 8), blitted unscaled
+cfb = callaudio_fake.CallAudio()
+vb = cv.CallVideo(cfb, None, LOG.append)
+vb.start_rx(); vb.on_status("T hello"); vb.tick()
+HDR[28] = 2; HDR[4] = 50; HDR[5] = 176; HDR[6] = 320
+vb.set_peer_box((240, 280))
+del RENDERS[:]
+vb.tick()
+f = vb.peer_frame()
+assert f is not None and f[1:] == (154, 280) and RENDERS[-1][1] == 8, (f, RENDERS)
+vb.set_peer_box((240, 280))                 # same box: no forced redraw
+vb.set_self_box((72, 54))
+assert vb.self_box == (72, 54)
+# ---- both orders (0.15.1): camera first then the peer's video, peer off/on, our video off/on
+cfo = callaudio_fake.CallAudio()
+vo = cv.CallVideo(cfo, None, LOG.append)
+del STARTED[:], SENT[:]
+vo.start(cv.CAM_FRONT); vo.on_status("T hello"); vo.tick()
+vo.on_status("T 1 1 176 144 150 150 0 12 7500 0 0 1 0"); vo.tick()
+assert vo.state == cv.S_RUNNING and vo.fwd_on == 0 and "H1" not in cfo.sent
+assert vo.start_rx() == 1 and STARTED == ["tgvideo.exe"]        # no second helper
+assert vo.rx_on == 1 and vo.fwd_on == 1 and cfo.sent[-1] == "H1"
+assert vo.start_rx() == 1 and cfo.sent.count("H1") == 1          # peer off/on again: nothing new
+vo.stop_send()                                                   # our video off: helper stays for the peer
+assert vo.state == cv.S_RXIDLE and vo.fwd_on == 1 and vo.helper_up()
+vo.on_status("T 2 0 0 0 0 0 0 0 0 0 0 0 0")                       # the helper idles (camera off)
+vo.start(cv.CAM_FRONT); vo.tick()                                # our video on again
+assert vo.state == cv.S_WAIT_RUN, vo.state
+vo.on_status("T 1 1 176 144 150 150 0 12 7500 0 0 1 0"); vo.tick()
+assert vo.state == cv.S_RUNNING and vo.fwd_on == 1
+# peer first, then our camera
+cpf = callaudio_fake.CallAudio()
+vp = cv.CallVideo(cpf, None, LOG.append)
+del STARTED[:]
+vp.start_rx(); vp.on_status("T hello"); vp.tick()
+assert vp.state == cv.S_RXIDLE and cpf.sent[-1] == "H1"
+vp.on_status("T 2 0 0 0 0 0 0 0 0 0 0 0 0")
+vp.start(cv.CAM_FRONT); vp.tick()
+assert vp.state == cv.S_WAIT_RUN and STARTED == ["tgvideo.exe"]
+# a full stop forgets the helper: the next start launches a new one instead of "reusing" it
+vp.on_status("T 1 1 176 144 150 150 0 12 7500 0 0 1 0"); vp.tick()
+vp.stop()
+assert vp.hstate == -1 and vp.state == cv.S_IDLE
+del STARTED[:]
+vp.start_rx()
+assert STARTED == ["tgvideo.exe"] and vp.state == cv.S_RXSTART
 print "test_callvideo OK"

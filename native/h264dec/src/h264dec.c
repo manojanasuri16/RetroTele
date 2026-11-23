@@ -47,7 +47,7 @@ struct h264dec {
     int buf_size;
     int max_area, max_side;
     int too_big;              /* the last access unit was refused by the size hook */
-    int frames, errors, fatal;
+    int frames, errors, fatal, fast;
     h264dec_log_fn log_fn;
     void *log_user;
 };
@@ -92,6 +92,7 @@ static int open_codec(h264dec *d)
     c->error_concealment = FF_EC_GUESS_MVS | FF_EC_DEBLOCK;
     c->error_recognition = FF_ER_CAREFUL;
     c->thread_count = 1;
+    c->skip_loop_filter = d->fast ? AVDISCARD_NONKEY : AVDISCARD_DEFAULT;
     if (avcodec_open(c, &h264_decoder) < 0) {
         av_free(c);
         return H264DEC_ERR_NOMEM;
@@ -217,6 +218,15 @@ int h264dec_decode(h264dec *d, const unsigned char *au, int len, h264dec_frame *
     f->level = h->sps.level_idc;
     d->frames++;
     return H264DEC_FRAME;
+}
+
+void h264dec_set_fast(h264dec *d, int on)
+{
+    if (d == NULL)
+        return;
+    d->fast = on ? 1 : 0;
+    if (d->ctx != NULL)
+        d->ctx->skip_loop_filter = d->fast ? AVDISCARD_NONKEY : AVDISCARD_DEFAULT;
 }
 
 void h264dec_reset(h264dec *d)

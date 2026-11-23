@@ -55,6 +55,11 @@ void h264dec_set_log(h264dec *d, h264dec_log_fn fn, void *user);
  * slices). The buffer is not modified and need not be padded. */
 int h264dec_decode(h264dec *d, const unsigned char *au, int len, h264dec_frame *frame);
 
+/* Fast mode for a decoder that falls behind: 1 = no deblocking filter on P pictures (about a
+ * quarter less work; the picture gets slightly blockier and drifts until the next IDR, which is
+ * deblocked as usual), 0 = exact decoding (the default). */
+void h264dec_set_fast(h264dec *d, int on);
+
 /* Drop all references and state (e.g. after a long loss); wait for the next IDR. */
 void h264dec_reset(h264dec *d);
 

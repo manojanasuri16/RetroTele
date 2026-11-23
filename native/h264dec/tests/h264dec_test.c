@@ -9,6 +9,7 @@
  *     -time         print decode time per frame
  *     -start K      skip the first K access units (joining mid-stream, before a PLI's IDR)
  *     -fuzz SEED R  corrupt about R bytes per 10000 (robustness test; output not comparable)
+ *     -fast         h264dec_set_fast(1): no deblocking on P pictures (output not comparable)
  *     -loop N       decode the whole file N times (benchmark; writes only the first pass)
  *     -sums FILE    write "au OFFSET LENGTH" per access unit and "frame FNV1A" per picture
  */
@@ -71,6 +72,7 @@ int main(int argc, char **argv)
     int nau = 0, nframes = 0, nerr = 0, seen_slice = 0, seen_idr = 0, lastw = 0, lasth = 0;
     int au_has_idr = 0, ndropped = 0, nonidr = 0, start = 0, fuzz = 0, loops = 1, pass;
     unsigned int seed = 1;
+    int fast = 0;
     unsigned char *tmp = NULL;
     FILE *sums = NULL;
     double total = 0, worst = 0;
@@ -83,6 +85,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-start") && i + 1 < argc) start = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-fuzz") && i + 2 < argc) { seed = atoi(argv[i + 1]); fuzz = atoi(argv[i + 2]); i += 2; }
         else if (!strcmp(argv[i], "-loop") && i + 1 < argc) loops = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-fast")) fast = 1;
         else if (!strcmp(argv[i], "-sums") && i + 1 < argc) sums = fopen(argv[++i], "w");
     }
     b = load(argv[1], &n);
@@ -91,6 +94,7 @@ int main(int argc, char **argv)
     d = h264dec_create(maxw, maxh);
     if (!d || !out) { fprintf(stderr, "init failed\n"); return 2; }
     h264dec_set_log(d, logf_, NULL);
+    if (fast) h264dec_set_fast(d, 1);
     tmp = (unsigned char *)malloc(n + 16);
     for (pass = 0; pass < loops; pass++) {
     int au_index = 0;
@@ -166,6 +170,6 @@ int main(int argc, char **argv)
     free(b);
     free(tmp);
     if (sums) fclose(sums);
-    if (fuzz || start) return nframes > 0 ? 0 : 1;
+    if (fuzz || start || fast) return nframes > 0 ? 0 : 1;
     return nerr ? 1 : 0;
 }

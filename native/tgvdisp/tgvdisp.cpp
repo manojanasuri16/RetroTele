@@ -10,6 +10,8 @@
  *       flags: 1 swap U and V, 2 swap the byte order of 4:2:2 interleaved data,
  *              4 mirror horizontally (front camera self-view); the picture is also decimated
  *              by 2 (every other pixel and row) when the image is at most half its size
+ *              8 fit: scale (nearest neighbour) to exactly the image size, so Python blits it
+ *                unscaled (0.15.1: cheaper call screen)
  *       last : if the counter equals it nothing is drawn (frame unchanged)
  *       a negative result is an error: -1 not attached/no header, -2 bad image,
  *       -3 no picture yet or unsupported layout, -4 picture changed while reading
@@ -115,6 +117,31 @@ static TBool BuildSrc(TSrc& s, const TUint8* aBase, TInt aW, TInt aH, TInt aPatt
     return EFalse;
 }
 
+// Flag 8: one destination row, any size: source column for output column xo is (xo * aXStep) >> 16.
+template <int MODE>
+static void RowFit(const TSrc& s, TInt y, TInt aCount, TUint aXStep, TUint8* aDst, TInt aMirrorW)
+{
+    const TUint8* yp = s.iY + y * s.iYStride;
+    const TUint8* up = s.iU + (y >> s.iCShift) * s.iCStride;
+    const TUint8* vp = s.iV + (y >> s.iCShift) * s.iCStride;
+    const TTab* t = gTab;
+    const TUint8* clip = t->iClip + 384;
+    TUint xf = 0;
+    for (TInt xo = 0; xo < aCount; xo++, xf += aXStep) {
+        TInt x = (TInt)(xf >> 16);
+        if (aMirrorW > 0) x = aMirrorW - 1 - x;
+        TInt yy = t->iY[yp[x * s.iYStep]];
+        TInt c = (x >> 1) * s.iCStep;
+        TInt u = up[c], v = vp[c];
+        TInt r = clip[yy + t->iRV[v]];
+        TInt g = clip[yy + t->iGU[u] + t->iGV[v]];
+        TInt b = clip[yy + t->iBU[u]];
+        if (MODE == 0) { *(TUint16*)aDst = P565(r, g, b); aDst += 2; }
+        else if (MODE == 1) { *(TUint32*)aDst = 0xFF000000u | (TUint32)((r << 16) | (g << 8) | b); aDst += 4; }
+        else { aDst[0] = (TUint8)b; aDst[1] = (TUint8)g; aDst[2] = (TUint8)r; aDst += 3; }
+    }
+}
+
 /* ------------------------------------------------------------ python functions */
 static PyObject* tv_attach(PyObject*, PyObject*)
 {
@@ -212,6 +239,30 @@ static PyObject* tv_render(PyObject*, PyObject* args)
     else if (dm == EColor16MU || dm == EColor16MA) { mode = 1; bpp = 4; }
     else if (dm == EColor16M) { mode = 2; bpp = 3; }
     else return Py_BuildValue("i", -2);
+    if (flags & 8) {
+        // fit: every image pixel gets the nearest source pixel
+        if (sz.iWidth < 1 || sz.iHeight < 1) return Py_BuildValue("i", -2);
+        TUint xs = (TUint)(((TUint)w << 16) / (TUint)sz.iWidth);
+        TUint ys = (TUint)(((TUint)h << 16) / (TUint)sz.iHeight);
+        TInt mw = (flags & 4) ? w : 0;
+        TInt st = CFbsBitmap::ScanLineLength(sz.iWidth, dm);
+        bm->LockHeap();
+        TUint8* d0 = (TUint8*)bm->DataAddress();
+        if (d0) {
+            TUint yf = 0;
+            for (TInt yo = 0; yo < sz.iHeight; yo++, yf += ys) {
+                TInt sy = (TInt)(yf >> 16);
+                if (sy >= h) sy = h - 1;
+                TUint8* row = d0 + yo * st;
+                if (mode == 0) RowFit<0>(s, sy, sz.iWidth, xs, row, mw);
+                else if (mode == 1) RowFit<1>(s, sy, sz.iWidth, xs, row, mw);
+                else RowFit<2>(s, sy, sz.iWidth, xs, row, mw);
+            }
+        }
+        bm->UnlockHeap();
+        if (gH[(which == 0) ? TGV_W_DEC_SEQ : TGV_W_PREV_SEQ] != seq0) return Py_BuildValue("i", -4);
+        return Py_BuildValue("i", (int)cnt);
+    }
     TInt scale = (sz.iWidth >= 2 * w && sz.iHeight >= 2 * h) ? 2 : 1;
     TInt step = 1;
     if (scale == 1 && sz.iWidth * 2 <= w && sz.iHeight * 2 <= h) step = 2;
