@@ -186,6 +186,8 @@ class CallVideo:
     def on_status(self, data):
         self.rx_lines = self.rx_lines + 1
         st = parse_status(data)
+        if self.rx_lines <= 3 or (st is not None and st != self.hstate):
+            self.log("helper status #%d: %s" % (self.rx_lines, data[:90]))
         if st is not None:
             self.hstate = st
 
@@ -211,6 +213,7 @@ class CallVideo:
         self.t_switch = 0
         self.last_dec = -1
         self.stopping = 0
+        self.rx_lines = 0
         try:
             import tgvdisp
             self.tgvdisp = tgvdisp
@@ -236,7 +239,8 @@ class CallVideo:
     def fail(self, text):
         """Camera/helper trouble: tell the engine to stop sending, release the camera,
         keep the call alive."""
-        self.log("FAILED: " + str(text))
+        self.log("FAILED: %s (helper state %s, %d status lines heard, tick %d, errors %d)" % (
+            str(text), str(self.hstate), self.rx_lines, self.ticks, self.errors))
         self.set_audio_video(0)
         self.release_helper()
         self.msg = text

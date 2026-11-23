@@ -693,6 +693,11 @@ public:
     void VideoUnit(const TDesC8& aData)
     {
         iVUnits++;
+        if (iVUnits == 1 || iVUnits == 50) {
+            TBuf8<64> lb;
+            lb.Format(_L8("video: unit %d from tgvideo.exe, %d bytes\n"), iVUnits, aData.Length());
+            Write(lb);
+        }
         if (!iV277 || !iS || !iRelayOk || aData.Length() < 2 || aData[0] != 'V') return;
         c277_session_video_put(iS, aData.Ptr() + 1, (u32)(aData.Length() - 1), NowMs());
         PumpVideo();

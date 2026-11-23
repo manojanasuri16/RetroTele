@@ -43,8 +43,10 @@
 
 // ---------------------------------------------------------------- log
 static RFs gFs;
-static TFileName gLogPath;
+static TFileName gLogPath[3];
+static TInt gLogN = 0;
 static TBool gLogOk = EFalse;
+#define TGV_HELPER_VERSION "0.14.1"
 
 static void Log(TRefByValue<const TDesC8> aFmt, ...)
 {
@@ -55,30 +57,36 @@ static void Log(TRefByValue<const TDesC8> aFmt, ...)
     b.FormatList(aFmt, l);
     VA_END(l);
     b.Append('\n');
-    RFile f;
-    if (f.Open(gFs, gLogPath, EFileWrite | EFileShareAny) != KErrNone) return;
-    TInt pos = 0;
-    f.Seek(ESeekEnd, pos);
-    f.Write(b);
-    f.Flush();
-    f.Close();
+    // every line goes to ALL log files that could be opened (card + phone), one open per line
+    for (TInt i = 0; i < gLogN; i++) {
+        RFile f;
+        if (f.Open(gFs, gLogPath[i], EFileWrite | EFileShareAny) != KErrNone) continue;
+        TInt pos = 0;
+        f.Seek(ESeekEnd, pos);
+        f.Write(b);
+        f.Flush();
+        f.Close();
+    }
 }
 
 static void InitLog()
 {
     _LIT(KCard, "E:\\retrotele_videomirror.txt");
-    _LIT(KPhone, "C:\\Data\\retrotele_videomirror.txt");
+    _LIT(KCard2, "E:\\retrotele_videohelper.txt");
+    _LIT(KPhone, "C:\\Data\\retrotele_videohelper.txt");
     gFs.MkDirAll(KPhone);
-    RFile f;
-    gLogPath.Copy(KCard);
-    TInt e = f.Open(gFs, gLogPath, EFileWrite | EFileShareAny);
-    if (e != KErrNone) e = f.Create(gFs, gLogPath, EFileWrite | EFileShareAny);
-    if (e != KErrNone) {
-        gLogPath.Copy(KPhone);
-        e = f.Open(gFs, gLogPath, EFileWrite | EFileShareAny);
-        if (e != KErrNone) e = f.Create(gFs, gLogPath, EFileWrite | EFileShareAny);
+    const TDesC* names[3] = { &KCard, &KCard2, &KPhone };
+    for (TInt i = 0; i < 3; i++) {
+        RFile f;
+        TInt e = f.Open(gFs, *names[i], EFileWrite | EFileShareAny);
+        if (e != KErrNone) e = f.Create(gFs, *names[i], EFileWrite | EFileShareAny);
+        if (e == KErrNone) {
+            f.Close();
+            gLogPath[gLogN].Copy(*names[i]);
+            gLogN++;
+        }
     }
-    if (e == KErrNone) { f.Close(); gLogOk = ETrue; }
+    gLogOk = gLogN > 0;
 }
 
 static TInt gTickUs = 1000;
@@ -1506,7 +1514,7 @@ static void RunL()
     tick->Start(1000000, 1000000, TCallBack(StatTick, NULL));
 
     HSet(TGV_W_STATE, 2);
-    Status(_L8("T hello"));
+    Status(_L8("T hello " TGV_HELPER_VERSION));
     Log(_L8("ready, waiting for commands on 127.0.0.1:47012"));
     CActiveScheduler::Start();
 
@@ -1530,7 +1538,7 @@ GLDEF_C TInt E32Main()
     InitLog();
     TInt p = 0;
     if (HAL::Get(HAL::ENanoTickPeriod, p) == KErrNone && p > 0) gTickUs = p;
-    Log(_L8("mirror start"));
+    Log(_L8("mirror start: tgvideo.exe " TGV_HELPER_VERSION " built " __DATE__ " " __TIME__ ", %d log files"), gLogN);
     TRAPD(err, RunL());
     if (err) Log(_L8("fatal err=%d"), err);
     StopPipeline();
