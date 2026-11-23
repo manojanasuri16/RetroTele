@@ -93,8 +93,9 @@ v.tick()
 assert v.state == cv.S_RUNNING
 assert ("E 1", ("127.0.0.1", 47012)) in SENT and ca.sent == ["V1"], (SENT, ca.sent)
 assert v.status_text() == u"Video on - front camera"
-# self-view frames
+# self-view frames (hidden by default: key 7 shows them)
 assert v.frame() is None
+v.toggle_self()
 HDR[11] = 5; HDR[12] = 176; HDR[13] = 144
 v.tick()
 f = v.frame()
@@ -190,8 +191,10 @@ for i in range(cv.BAD_LIMIT):
 assert v9.level == 1
 assert cv.parse_stats("T 1 1 320 240 150 130 0 40 20000 0 7 1 0") == (130, 20000, 7, 150)
 assert cv.parse_stats("T hello") is None
-# own picture: shown about every other tick, can be hidden
+# own picture: hidden by default, shown about every other tick after key 7, can be hidden again
 vs = cv.CallVideo(callaudio_fake.CallAudio(), None, None)
+assert vs.show_self == 0
+assert vs.toggle_self() == 1
 vs.start(cv.CAM_FRONT); vs.on_status("T 2"); vs.tick()
 vs.on_status("T 1 1 176 144 130 125 0 40 5000 0 0 1 0"); vs.tick()
 HDR[11] = 9; HDR[12] = 176; HDR[13] = 144

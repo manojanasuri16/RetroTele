@@ -975,7 +975,7 @@ assert cvf.live and fv.want_video and fv.sent[-1] == "V1", fv.sent
 labels = [m[0] for m in appuifw.app.menu]
 assert u"Turn video off" in labels and u"Switch camera" in labels, labels
 t = screen_text()
-assert t.find(u"Video on -") >= 0 and t.find(u"Camera starting") >= 0 and t.find(u"[6] Camera") >= 0 and t.find(u"Left: Options") >= 0, t
+assert t.find(u"Video on -") >= 0 and t.find(u"[7] show me") >= 0 and t.find(u"[6] Camera") >= 0 and t.find(u"Left: Options") >= 0, t
 app.view.key("6")
 assert cvf.sw == 1
 fv.peer_video = 2

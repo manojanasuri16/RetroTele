@@ -172,7 +172,7 @@ class CallVideo:
         self.steps = 0
         self.ceiling = 0
         self.t_up = 0
-        self.show_self = 1
+        self.show_self = 0      # own picture hidden by default (smoother sending); key 7 shows it
         self.last_flags = -1
         self.rx_on = 0          # the helper also shows the peer's picture
         self.fwd_on = 0         # told the engine to forward the peer's access units
@@ -534,7 +534,10 @@ class CallVideo:
 
     def toggle_self(self):
         """Show / hide our own picture (hiding saves the repaints)."""
-        self.show_self = not self.show_self
+        if self.show_self:
+            self.show_self = 0
+        else:
+            self.show_self = 1
         self.last_dec = -1
         self.changed()
         return self.show_self

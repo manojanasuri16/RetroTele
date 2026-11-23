@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.14.7"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.14.8"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -386,6 +386,7 @@ class App:
         self.call_timer = 0
         self.call_audio = None
         self.call_video = None
+        self.call_show_self = 0    # own picture in calls: hidden until key 7 (kept for this run only)
         self.call_video_sig = None
         self.pending_sig = []
         self.audio_state = ""
@@ -1940,6 +1941,7 @@ class App:
             import callvideo
             if cv is None:
                 cv = callvideo.CallVideo(ca, self.call_video_changed, self.log)
+                cv.show_self = self.call_show_self
                 self.call_video = cv
             cv.rx_tried = 1
             cv.start_rx()
@@ -2068,6 +2070,7 @@ class App:
                 cv = self.call_video
                 if cv is None:
                     cv = callvideo.CallVideo(self.call_audio, self.call_video_changed, self.log)
+                    cv.show_self = self.call_show_self
                 self.call_video = cv
                 if getattr(self.call_audio, "peer_asked", 0):
                     self.call_audio.peer_asked = 0
@@ -2084,12 +2087,15 @@ class App:
         f = getattr(cv, "toggle_self", None)
         if f is not None and cv.active():
             f()
+            self.call_show_self = getattr(cv, "show_self", 0) and 1 or 0
         self.call_menu()
         self.redraw()
 
     def call_self_shown(self):
         cv = self.call_video
-        return cv is None or getattr(cv, "show_self", 1)
+        if cv is None:
+            return self.call_show_self
+        return getattr(cv, "show_self", 0)
 
     def call_switch_camera(self):
         cv = self.call_video
