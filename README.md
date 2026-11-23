@@ -120,4 +120,4 @@ The full list is on the [RetroArchive Open source page](https://manojanasuri16.g
 
 ## License
 
-MIT, see [LICENSE](LICENSE). Third-party components (for example Opus, Nokia's VoIP Audio Services, which is not redistributed here) keep their own licences.
+MIT, see [LICENSE](LICENSE). Third-party components (for example Opus, Nokia's VoIP Audio Services, which is not redistributed here) keep their own licences. The H.264 decoder in `native/third_party/ffmpeg-0.6.7/` (FFmpeg's, used to show the other person's video) is LGPL 2.1; see its NOTICE for the source and how to rebuild with a changed copy.
