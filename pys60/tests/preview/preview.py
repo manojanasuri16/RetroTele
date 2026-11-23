@@ -310,6 +310,12 @@ class PV:
 app.call_video = PV()
 ca.peer_video = 2
 snap("16-call-video-on")
+PV.helper_up = lambda self: 1
+PV.peer_status = lambda self: u"Peer video: decoder cannot decode this stream (High profile)"
+PV.peer_failed = lambda self: 1
+PV.peer_frame = lambda self: None
+app.call_video.on = 0
+snap("16b-call-peer-cannot-decode")
 cs["state"] = "incoming"; cs["text"] = "Incoming Telegram call"; app.call_audio = None; app.call_video = None
 snap("17-call-incoming")
 json.dump(screens, open(os.environ["RT_OUT"] + "/screens.json", "w"))

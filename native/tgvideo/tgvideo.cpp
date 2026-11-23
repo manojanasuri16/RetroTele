@@ -46,7 +46,7 @@ static RFs gFs;
 static TFileName gLogPath[3];
 static TInt gLogN = 0;
 static TBool gLogOk = EFalse;
-#define TGV_HELPER_VERSION "0.14.2"
+#define TGV_HELPER_VERSION "0.14.3"
 
 static void Log(TRefByValue<const TDesC8> aFmt, ...)
 {
@@ -341,6 +341,8 @@ public:
     TInt iPattern, iLayout;
     TInt iFirst;
     TBool iStarted, iGotIdr;
+    TBool iRx;              // decoder for the peer's picture (plain video/h264 input format, diagnostics)
+    TUint iRxUid;
 
     ~CDec() { if (iPlay && iStarted) iPlay->Stop(); delete iPlay; }
 
@@ -350,13 +352,31 @@ public:
         iFirst = 0; iPattern = 0; iLayout = 0; iStarted = EFalse; iGotIdr = EFalse; gDecFed = 0; gDecSkipped = 0;
         Log(_L8("step dec: CMMFDevVideoPlay::NewL"));
         iPlay = CMMFDevVideoPlay::NewL(*this);
-        const TUid duid = TUid::Uid(gDecOpt.iUid);
+        const TUid duid = TUid::Uid(iRx ? iRxUid : gDecOpt.iUid);
         Log(_L8("step dec: SelectDecoderL 0x%08x"), duid.iUid);
         iDev = iPlay->SelectDecoderL(duid);
         Log(_L8("step dec: VideoDecoderInfoLC"));
         CVideoDecoderInfo* info = iPlay->VideoDecoderInfoLC(duid);
         TInt need = NeedLevel(aSz.iWidth, aSz.iHeight, aFps);
-        CCompressedVideoFormat* cf = PickFormat(info->SupportedFormats(), need);
+        if (iRx) {
+            TBuf8<64> mf, id;
+            mf.Copy(info->Manufacturer().Left(60));
+            id.Copy(info->Identifier().Left(60));
+            Log(_L8("rx dec info: manufacturer=%S identifier=%S accelerated=%d maxpic=%dx%d maxbitrate=%u"), &mf, &id,
+                (TInt)info->Accelerated(), info->MaxPictureSize().iWidth, info->MaxPictureSize().iHeight, info->MaxBitrate());
+            for (TInt k = 0; k < info->SupportedFormats().Count() && k < 24; k++) {
+                TBuf8<80> fm;
+                fm.Copy(info->SupportedFormats()[k]->MimeType().Left(78));
+                Log(_L8("  rx dec supports %S"), &fm);
+            }
+        }
+        CCompressedVideoFormat* cf = NULL;
+        if (iRx) {
+            // High profile cannot be named by a baseline id: prefer the plain "video/h264" entry
+            for (TInt k = 0; k < info->SupportedFormats().Count(); k++)
+                if (info->SupportedFormats()[k]->MimeType().Find(_L8("profile-level-id")) < 0) { cf = info->SupportedFormats()[k]; break; }
+        }
+        if (!cf) cf = PickFormat(info->SupportedFormats(), need);
         if (!cf) User::Leave(KErrNotSupported);
         TBuf8<80> mm;
         mm.Copy(cf->MimeType().Left(78));
@@ -510,6 +530,146 @@ public:
     void MdvpoStreamEnd() {}
 };
 static CDec* gDecoder;
+
+// ---------------------------------------------------------------- peer video (UDP 127.0.0.1:47015)
+// tgcallaudio.exe sends "I profile constraints level w h" when the peer's SPS changes and every
+// access unit (Annex-B, SPS+PPS before an IDR) as fragments 'R' id idx cnt idr data[<=1200].
+static CDec* gRxDec = NULL;
+static const TUint KRxUids[2] = { 0x102073ef, 0x10204bfc };
+static TInt gRxUidIdx = 0, gRxProfile = 0, gRxLevel = 0, gRxW = 0, gRxH = 0, gRxRebuild = 0;
+static TInt gRxAuIn = 0, gRxFed = 0, gRxPicBase = 0, gRxDead = 0;
+static const TInt KRxMax = 1300, KRxFragSz = 1200, KRxFragMax = 40;
+struct TRxFrag { TUint8 iAu[KRxFragMax * KRxFragSz]; TUint8 iGot[KRxFragMax]; TInt iId, iCnt, iNGot, iLast, iIdr; };
+static TRxFrag* gRxFrag = NULL;
+static RSocket gRxSock;
+static TInt ParseInts(const TDesC8& aS, TInt* aOut, TInt aMax);
+
+static void RxSetState(TInt aSt) { HSet(TGV_W_RX_STATE, aSt); }
+static TInt BuildRxDec()
+{
+    delete gRxDec; gRxDec = NULL;
+    HSet(TGV_W_RX_DEC, gRxUidIdx + 1);
+    RxSetState(1);
+    CDec* d = new CDec;
+    if (!d) return KErrNoMemory;
+    d->iRx = ETrue;
+    d->iRxUid = KRxUids[gRxUidIdx];
+    TInt w = gRxW > 0 ? gRxW : 176, h = gRxH > 0 ? gRxH : 320;
+    Log(_L8("rx: building decoder 0x%08x for the peer stream profile=%d level=%d size=%dx%d (send pipeline running: %d)"), d->iRxUid,
+        gRxProfile, gRxLevel, w, h, H ? (TInt)H[TGV_W_ENC_OK] : 0);
+    gRxDec = d;
+    TRAPD(e, d->SetupL(TSize(w, h), 30));
+    Log(_L8("rx: decoder 0x%08x setup err=%d"), d->iRxUid, e);
+    if (e) {
+        Err();
+        HSet(TGV_W_RX_ERR, e);
+        delete gRxDec; gRxDec = NULL;
+        if (e == KErrHardwareNotAvailable) Log(_L8("rx: decoder unavailable while the camera captures (-44)"));
+        return e;
+    }
+    gRxPicBase = H ? (TInt)H[TGV_W_DEC_COUNT] : 0;
+    gRxFed = 0;
+    RxSetState(2);
+    HSet(TGV_W_RX_ERR, 0);
+    return KErrNone;
+}
+
+// the current decoder produced nothing / failed: try the next one, else give up (and say so)
+static void RxDecoderFailed(const TDesC8& aWhy)
+{
+    Log(_L8("rx: decoder 0x%08x FAILED: %S (peer profile %d level %d %dx%d)"), KRxUids[gRxUidIdx], &aWhy, gRxProfile, gRxLevel, gRxW, gRxH);
+    delete gRxDec; gRxDec = NULL;
+    if (gRxUidIdx + 1 < 2) {
+        gRxUidIdx++;
+        Log(_L8("rx: trying decoder 0x%08x"), KRxUids[gRxUidIdx]);
+        return;
+    }
+    gRxDead = 1;
+    RxSetState(4);
+    Log(_L8("rx: no decoder can decode this stream (profile %d level %d): peer video not shown"), gRxProfile, gRxLevel);
+}
+
+static void RxUnit(const TUint8* aAu, TInt aLen, TInt aIdr)
+{
+    gRxAuIn++;
+    HSet(TGV_W_RX_AU, gRxAuIn);
+    if (gRxAuIn <= 3) Log(_L8("rx: access unit %d, %d bytes, idr=%d"), gRxAuIn, aLen, aIdr);
+    if (gRxDead) return;
+    if (gRxDec && gRxRebuild && aIdr) { gRxRebuild = 0; Log(_L8("rx: peer stream changed, rebuilding the decoder")); delete gRxDec; gRxDec = NULL; }
+    if (!gRxDec) {
+        if (!aIdr) return;
+        if (BuildRxDec() != KErrNone) {
+            TBuf8<40> why(_L8("setup error"));
+            RxDecoderFailed(why);
+            return;
+        }
+    }
+    if (gRxDec->iFatal) {
+        HSet(TGV_W_RX_ERR, (TInt)gRxDec->iFatal);
+        TBuf8<40> why(_L8("fatal error from the decoder"));
+        RxDecoderFailed(why);
+        return;
+    }
+    TPtrC8 p(aAu, aLen);
+    gRxDec->Write(p, (TInt64)NowMs() * 1000);
+    gRxFed++;
+    HSet(TGV_W_RX_FED, gRxFed);
+    if (gRxFed == 30 && H && (TInt)H[TGV_W_DEC_COUNT] - gRxPicBase == 0) {
+        TBuf8<48> why(_L8("no picture after 30 units"));
+        RxDecoderFailed(why);
+    }
+}
+
+static void RxPacket(const TDesC8& aD)
+{
+    if (aD.Length() < 2) return;
+    if (aD[0] == 'I') {
+        TInt v[5];
+        Mem::FillZ(v, sizeof(v));
+        if (ParseInts(aD.Mid(1), v, 5) < 5) return;
+        Log(_L8("rx: peer SPS profile=%d constraints=0x%02x level=%d size=%dx%d"), v[0], v[1], v[2], v[3], v[4]);
+        if (gRxDec && (v[3] != gRxW || v[4] != gRxH || v[0] != gRxProfile)) gRxRebuild = 1;
+        gRxProfile = v[0]; gRxLevel = v[2]; gRxW = v[3]; gRxH = v[4];
+        HSet(TGV_W_RX_PROFILE, v[0]); HSet(TGV_W_RX_LEVEL, v[2]); HSet(TGV_W_RX_W, v[3]); HSet(TGV_W_RX_H, v[4]);
+        return;
+    }
+    if (aD[0] != 'R' || aD.Length() < 6 || !gRxFrag) return;
+    TInt id = aD[1], idx = aD[2], cnt = aD[3], idr = aD[4], n = aD.Length() - 5;
+    TRxFrag& f = *gRxFrag;
+    if (cnt < 1 || cnt > KRxFragMax || idx >= cnt || n > KRxFragSz) return;
+    if (id != f.iId) {
+        f.iId = id; f.iCnt = cnt; f.iNGot = 0; f.iLast = 0; f.iIdr = idr;
+        Mem::FillZ(f.iGot, sizeof(f.iGot));
+    }
+    if (f.iGot[idx]) return;
+    f.iGot[idx] = 1;
+    Mem::Copy(f.iAu + idx * KRxFragSz, aD.Ptr() + 5, n);
+    if (idx == cnt - 1) f.iLast = idx * KRxFragSz + n;
+    f.iNGot++;
+    if (f.iNGot == f.iCnt) {
+        f.iNGot = 0; f.iId = -1;
+        RxUnit(f.iAu, f.iLast, f.iIdr);
+    }
+}
+
+class CRxRecv : public CActive
+{
+public:
+    CRxRecv() : CActive(CActive::EPriorityStandard), iPtr(iBuf, 0, KRxMax) { CActiveScheduler::Add(this); }
+    ~CRxRecv() { Cancel(); }
+    void Start() { iPtr.Zero(); gRxSock.RecvFrom(iPtr, iFrom, 0, iStatus); SetActive(); }
+    void RunL()
+    {
+        TInt s = iStatus.Int();
+        if (s == KErrNone) RxPacket(iPtr); else Log(_L8("rx recv err=%d"), s);
+        if (!gQuit) Start();
+    }
+    void DoCancel() { gRxSock.CancelRecv(); }
+private:
+    TUint8 iBuf[KRxMax];
+    TPtr8 iPtr;
+    TInetAddr iFrom;
+};
 
 // ---------------------------------------------------------------- encoder
 static const TInt KPool = 2;      // at most 2 frames in the encoder: later ones are dropped
@@ -748,7 +908,7 @@ public:
             Log(_L8("  cam%d size[%d]=%dx%d"), aIdx, s, sz.iWidth, sz.iHeight);
             if (sz.iWidth == aW && sz.iHeight == aH) exact = s;
             TInt area = sz.iWidth * sz.iHeight;
-            if (sz.iWidth <= aW && sz.iHeight <= aH && sz.iWidth <= TGV_MAX_W && sz.iHeight <= TGV_MAX_H &&
+            if (sz.iWidth <= aW && sz.iHeight <= aH && sz.iWidth <= TGV_CAM_W && sz.iHeight <= TGV_CAM_H &&
                 area > bestArea) { best = s; bestArea = area; }
         }
         iSIdx = exact >= 0 ? exact : best;
@@ -981,8 +1141,8 @@ static TInt gRotation = 0;     // degrees baked into the pixels before encoding:
 static void StartPipeline(TInt aW, TInt aH, TInt aFps, TInt aKbps, TInt aCam)
 {
     StopPipeline();
-    if (aW < 16 || aW > TGV_MAX_W) aW = 176;
-    if (aH < 16 || aH > TGV_MAX_H) aH = 144;
+    if (aW < 16 || aW > TGV_CAM_W) aW = 176;
+    if (aH < 16 || aH > TGV_CAM_H) aH = 144;
     if (aFps < 1 || aFps > 30) aFps = 15;
     if (aKbps < 16 || aKbps > 2000) aKbps = 128;
     if (aCam < 0 || aCam > 1) aCam = 0;
@@ -1413,6 +1573,12 @@ static void Exec(const TDesC8& aCmd)
         gLoopDec = v[0] ? 1 : 0;
         Log(_L8("cmd L %d (loopback decoder)"), gLoopDec);
         break;
+    case 'T':
+        Log(_L8("cmd T (stop camera + encoder, keep the peer-video decoder)"));
+        gExport = 0;
+        StopPipeline();
+        HSet(TGV_W_STATE, 2);
+        break;
     case 'C':
         Log(_L8("cmd C %d"), v[0]);
         SwitchCamera(v[0]);
@@ -1488,6 +1654,10 @@ static TInt StatTick(TAny*)
            gSt.iErrors, gSt.iDrops, H ? (TInt)H[TGV_W_ENC_OK] : 0, H ? (TInt)H[TGV_W_DEC_OK] : 0);
     if (gExport && gSecs % 5 == 4)
         Log(_L8("export: units=%d drops=%d"), gExpUnits, gExpDrops);
+    if (gRxAuIn > 0 && gSecs % 5 == 4)
+        Log(_L8("rx: units=%d fed=%d decoded=%d (%d.%d fps) state=%d uid=%d err=%d"), gRxAuIn, gRxFed,
+            H ? (TInt)H[TGV_W_DEC_COUNT] - gRxPicBase : 0, decF / 10, decF % 10, H ? (TInt)H[TGV_W_RX_STATE] : 0,
+            gRxUidIdx + 1, H ? (TInt)H[TGV_W_RX_ERR] : 0);
     if (++gSecs % 5 == 0)
         Log(_L8("stats: cap=%d.%d enc=%d.%d dec=%d.%d fps lat=%d ms %d B/s err=%d drops=%d keys=%d"), capF / 10, capF % 10,
             encF / 10, encF % 10, decF / 10, decF % 10, gSt.iLat, bps, gSt.iErrors, gSt.iDrops, gSt.iKeys);
@@ -1520,6 +1690,22 @@ static void RunL()
     User::LeaveIfError(be);
     User::LeaveIfError(gTxSock.Open(gSs, KAfInet, KSockDatagram, KProtocolInetUdp));
     gSockOk = ETrue;
+    gRxFrag = (TRxFrag*)User::AllocZ(sizeof(TRxFrag));
+    if (gRxFrag) gRxFrag->iId = -1;
+    CRxRecv* rxv = NULL;
+    if (gRxFrag && gRxSock.Open(gSs, KAfInet, KSockDatagram, KProtocolInetUdp) == KErrNone) {
+        TInetAddr rl;
+        rl.SetAddress(INET_ADDR(127, 0, 0, 1));
+        rl.SetPort(47015);
+        TInt rbe = gRxSock.Bind(rl);
+        Log(_L8("peer-video socket bind err=%d (47015)"), rbe);
+        if (rbe == KErrNone) {
+            gRxSock.SetOpt(KSORecvBuf, KSOLSocket, 65536);
+            rxv = new (ELeave) CRxRecv;
+            CleanupStack::PushL(rxv);
+            rxv->Start();
+        }
+    }
     gSend = new (ELeave) CSend;
     CleanupStack::PushL(gSend);
     CCmdRecv* rx = new (ELeave) CCmdRecv;
@@ -1537,6 +1723,10 @@ static void RunL()
     Log(_L8("scheduler stopped"));
     tick->Cancel();
     CleanupStack::PopAndDestroy(3);          // tick, rx, gSend
+    if (rxv) { CleanupStack::PopAndDestroy(rxv); }
+    delete gRxDec; gRxDec = NULL;
+    gRxSock.Close();
+    User::Free(gRxFrag); gRxFrag = NULL;
     gSend = NULL;
     FreeExport();
     gCmdSock.Close();

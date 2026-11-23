@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.14.2"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.14.3"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -1886,6 +1886,11 @@ class App:
         else:
             ok = ca.start_relay(cs["kb"], cs["out"], cs["conns"], self.audio_changed, iap)
         ca.on_info = self.audio_info
+        if self.client.call_version == "2.7.7" and self.cfg.get("video_rx") != "0":
+            try:
+                ca.set_rx(1)             # ask the peer for its video (shown if the phone can decode it)
+            except:
+                self.log("set_rx: " + err_text())
         if self.client.call_version == "2.7.7":
             for sid, d in early:
                 if sid == cs["id"]:
@@ -1921,9 +1926,31 @@ class App:
         if cs is not None and cs["state"] != "ended":
             self.redraw()
 
+    def call_peer_video_check(self):
+        """The peer turned its video on: start the helper that decodes and shows it."""
+        ca = self.call_audio
+        if ca is None or not getattr(ca, "want_rx", 0) or not self.call_peer_video():
+            return
+        cv = self.call_video
+        if cv is not None and (cv.helper_up() or getattr(cv, "rx_tried", 0)):
+            return
+        try:
+            import callvideo
+            if cv is None:
+                cv = callvideo.CallVideo(ca, self.call_video_changed, self.log)
+                self.call_video = cv
+            cv.rx_tried = 1
+            cv.start_rx()
+        except:
+            self.log("peer video helper: " + err_text())
+
     def audio_info(self):
         if self.call_audio is None:
             return
+        try:
+            self.call_peer_video_check()
+        except:
+            self.log("peer video check: " + err_text())
         cs = self.client.cs
         if cs is not None and cs["state"] != "ended" and self.screen == "call":
             self.redraw()
@@ -2003,13 +2030,42 @@ class App:
         ca = self.call_audio
         return ca is not None and getattr(ca, "peer_video", -1) == 2
 
+    def call_peer_frame(self):
+        cv = self.call_video
+        f = getattr(cv, "peer_frame", None)
+        if f is None:
+            return None
+        return f()
+
+    def call_peer_status(self):
+        cv = self.call_video
+        f = getattr(cv, "peer_status", None)
+        if f is None:
+            return u""
+        return f()
+
+    def call_peer_failed(self):
+        cv = self.call_video
+        f = getattr(cv, "peer_failed", None)
+        return f is not None and f()
+
     def call_toggle_video(self):
         if self.call_video_on():
-            self.stop_call_video()
+            cv = self.call_video
+            f = getattr(cv, "stop_send", None)
+            if f is not None:
+                try:
+                    f()
+                except:
+                    self.log("video off: " + err_text())
+            else:
+                self.stop_call_video()
         elif self.call_video_ok():
             try:
                 import callvideo
-                cv = callvideo.CallVideo(self.call_audio, self.call_video_changed, self.log)
+                cv = self.call_video
+                if cv is None:
+                    cv = callvideo.CallVideo(self.call_audio, self.call_video_changed, self.log)
                 self.call_video = cv
                 if getattr(self.call_audio, "peer_asked", 0):
                     self.call_audio.peer_asked = 0
@@ -2032,7 +2088,8 @@ class App:
             cv = self.call_video
             sig = None
             if cv is not None:
-                sig = (cv.state, cv.cam, cv.status_text())
+                sig = (cv.state, cv.cam, cv.status_text(), self.call_peer_status(),
+                       self.call_peer_frame() is not None)
             if sig != self.call_video_sig:
                 self.call_video_sig = sig
                 try:

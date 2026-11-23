@@ -193,6 +193,7 @@ static PyObject* tv_render(PyObject*, PyObject* args)
         seq0 = gH[TGV_W_PREV_SEQ]; cnt = gH[TGV_W_PREV_COUNT];
         w = gH[TGV_W_PREV_W]; h = gH[TGV_W_PREV_H];
         len = w * h * 3 / 2;
+        if (w > TGV_CAM_W || h > TGV_CAM_H) return Py_BuildValue("i", -3);
         base = (const TUint8*)gChunk.Base() + TGV_PREV_OFF;
     }
     if (cnt == 0 || w < 2 || h < 2 || w > TGV_MAX_W || h > TGV_MAX_H) return Py_BuildValue("i", -3);

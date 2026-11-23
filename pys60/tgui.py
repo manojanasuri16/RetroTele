@@ -2042,6 +2042,7 @@ class CallView(CanvasView):
 
     def __init__(self, app):
         CanvasView.__init__(self, app)
+        self.full = 1          # the peer's picture fills the screen (8 shows the buttons)
 
     def live(self):
         cs = self.app.client.cs
@@ -2049,7 +2050,10 @@ class CallView(CanvasView):
                 self.app.call_audio is not None)
 
     def key(self, k):
-        if k == "select" or k == "5":
+        if k == "8":
+            self.full = not self.full
+            self.app.redraw()
+        elif k == "select" or k == "5":
             self.app.call_primary()
         elif k == "1" and self.live():
             self.app.call_toggle_mute()
@@ -2140,9 +2144,97 @@ class CallView(CanvasView):
         if app.call_peer_asked():
             out.append(u"%s asks you to turn video on (press 4)" % to_u(app.client.short_name(key)))
         if app.call_peer_video():
-            out.append(u"%s's video is on (cannot be shown on this phone)" %
-                       to_u(app.client.short_name(key)))
+            ps = app.call_peer_status()
+            if not ps or app.call_peer_failed():
+                out.append(u"%s's video is on (cannot be shown on this phone)" %
+                           to_u(app.client.short_name(key)))
+            if ps:
+                out.append(ps)
         return out
+
+    def paint_buttons(self, g, w, bt, vid, row2):
+        app = self.app
+        bw = (w - 20 - 12) / 3
+        muted = app.call_muted()
+        r = app.call_route()
+        if muted:
+            mc = self.RED
+            ml = u"Muted"
+        else:
+            mc = self.BTN
+            ml = u"On"
+        if r == 0:
+            rl = u"Earpiece"
+        elif r == 2:
+            rl = u"Auto"
+        else:
+            rl = u"Speaker"
+        self.button(g, 10, bt, 10 + bw, bt + 46, u"[1] Mic", ml, mc)
+        self.button(g, 16 + bw, bt, 16 + 2 * bw, bt + 46, u"[2] Sound", rl, self.BTN)
+        self.button(g, 22 + 2 * bw, bt, w - 10, bt + 46, u"[3] Call", u"End", self.RED)
+        if row2:
+            y2 = bt + 52
+            hw = (w - 26) / 2
+            if vid:
+                self.button(g, 10, y2, 10 + hw, y2 + 40, u"[4] Video", u"On", self.BTN_ON)
+                cam = u"Front"
+                if app.call_video_cam() == 0:
+                    cam = u"Rear"
+                self.button(g, w - 10 - hw, y2, w - 10, y2 + 40, u"[6] Camera", cam, self.BTN)
+            else:
+                self.button(g, 10, y2, 10 + hw, y2 + 40, u"[4] Video", u"Off", self.BTN)
+                self.button(g, w - 10 - hw, y2, w - 10, y2 + 40, u"[6] Camera", u"-",
+                            self.BTN_DIM, 1)
+
+    def paint_peer(self, g, w, h, pf, status, name):
+        """The peer's picture (fit, centred) with our own picture in the corner. Full screen:
+        only a thin name/time bar on top and a hint line; otherwise the buttons stay below."""
+        app = self.app
+        vid = app.call_video_on()
+        row2 = app.call_video_ok()
+        top = h - 20
+        if not self.full:
+            top = h - 22 - 46 - 6 - 40
+        if not row2:
+            top = top + 46
+        g.rectangle((0, 0, w, 20), fill=CALL_TOP)
+        nm = fit(g, name, "name", w - 110)
+        txt(g, 6, 15, nm, WHITE, "name", "b")
+        sl = fit(g, status, "small", 100)
+        g.text((w - 6 - width(g, sl, "small"), 14), sl, fill=HEADER_SUB, font=font("small"))
+        ay = 20
+        ah = top - ay
+        g.rectangle((0, ay, w, ay + ah), fill=0x000000)
+        img, iw, ih = pf
+        tw = w
+        th = tw * ih / iw
+        if th > ah:
+            th = ah
+            tw = th * iw / ih
+        x1 = (w - tw) / 2
+        y1 = ay + (ah - th) / 2
+        try:
+            g.blit(img, target=(x1, y1, x1 + tw, y1 + th), scale=1)
+        except:
+            pass
+        if vid:
+            pw = 72
+            ph = 54
+            self.paint_selfview(g, w - pw - 6, ay + ah - ph - 6, pw, ph)
+        if not self.full:
+            self.paint_buttons(g, w, top + 4, vid, row2)
+        hint = u"8: show buttons    Right: Hang up"
+        if not self.full:
+            hint = u"8: full screen    Right: Hang up"
+        if self.full:
+            g.rectangle((0, h - 20, w, h), fill=CALL_BG)
+            hint = fit(g, hint, "small", w - 10)
+            g.text(((w - width(g, hint, "small")) / 2, h - 6), hint, fill=GREY_LIGHT,
+                   font=font("small"))
+        else:
+            hint = fit(g, hint, "small", w - 10)
+            g.text(((w - width(g, hint, "small")) / 2, h - 6), hint, fill=GREY_LIGHT,
+                   font=font("small"))
 
     def paint(self, g, w, h):
         app = self.app
@@ -2154,6 +2246,11 @@ class CallView(CanvasView):
         st = cs["state"]
         key = cs["key"]
         live = self.live()
+        if live:
+            pf = app.call_peer_frame()
+            if pf is not None and app.call_peer_video():
+                self.paint_peer(g, w, h, pf, self.state_text(cs), cl.peer_name(key))
+                return
         vid = live and app.call_video_on()
         name = cl.peer_name(key)
         status = self.state_text(cs)
@@ -2167,6 +2264,7 @@ class CallView(CanvasView):
             top = top - 46 - (row2 and 6)
         elif st != "ended":
             top = top - 52
+        notes = self.notes(g, key, live)
         # ---- identity
         g.rectangle((0, 0, w, top - 6), fill=CALL_TOP)
         y = 0
@@ -2185,7 +2283,9 @@ class CallView(CanvasView):
             y0 = 10
             if top < 230:
                 PH = 52
-                x = (w - PH) / 2
+            if notes:
+                PH = 40
+            x = (w - PH) / 2
             g.ellipse((x - 4, y0 - 4, x + PH + 4, y0 + PH + 4), fill=BLUE)
             app.avatars.draw(g, key, name, cl.peer(key).get("photo"), x, y0, PH, None)
             y = y0 + PH + 28
@@ -2195,7 +2295,6 @@ class CallView(CanvasView):
             sl = fit(g, status, "text", w - 16)
             g.text(((w - width(g, sl, "text")) / 2, y), sl, fill=HEADER_SUB, font=font("text"))
             y = y + 6
-        notes = self.notes(g, key, live)
         if vid:
             # our picture top right, notes and video state to its left
             tw = 112
@@ -2228,37 +2327,7 @@ class CallView(CanvasView):
         # ---- buttons
         bt = top
         if live:
-            bw = (w - 20 - 12) / 3
-            muted = app.call_muted()
-            r = app.call_route()
-            if muted:
-                mc = self.RED
-                ml = u"Muted"
-            else:
-                mc = self.BTN
-                ml = u"On"
-            if r == 0:
-                rl = u"Earpiece"
-            elif r == 2:
-                rl = u"Auto"
-            else:
-                rl = u"Speaker"
-            self.button(g, 10, bt, 10 + bw, bt + 46, u"[1] Mic", ml, mc)
-            self.button(g, 16 + bw, bt, 16 + 2 * bw, bt + 46, u"[2] Sound", rl, self.BTN)
-            self.button(g, 22 + 2 * bw, bt, w - 10, bt + 46, u"[3] Call", u"End", self.RED)
-            if row2:
-                y2 = bt + 52
-                hw = (w - 26) / 2
-                if vid:
-                    self.button(g, 10, y2, 10 + hw, y2 + 40, u"[4] Video", u"On", self.BTN_ON)
-                    cam = u"Front"
-                    if app.call_video_cam() == 0:
-                        cam = u"Rear"
-                    self.button(g, w - 10 - hw, y2, w - 10, y2 + 40, u"[6] Camera", cam, self.BTN)
-                else:
-                    self.button(g, 10, y2, 10 + hw, y2 + 40, u"[4] Video", u"Off", self.BTN)
-                    self.button(g, w - 10 - hw, y2, w - 10, y2 + 40, u"[6] Camera", u"-",
-                                self.BTN_DIM, 1)
+            self.paint_buttons(g, w, bt, vid, row2)
         elif st == "incoming":
             hw = (w - 26) / 2
             self.button(g, 10, bt, 10 + hw, bt + 46, u"[OK] ", u"Accept", self.BTN_ON)

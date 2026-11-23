@@ -324,7 +324,19 @@ int c277_rtcp_parse(const u8 *p, u32 n, u32 our_ssrc, c277_rtcp_info *o)
             } else if (fmt == 15) o->n_remb++;
             else o->n_other++;
         } else if (pt == 205 && len >= 12) {
-            if (fmt == 1) { if (our_ssrc == 0 || get32(q + 8) == our_ssrc) o->n_nack++; }
+            if (fmt == 1) {
+                if (our_ssrc == 0 || get32(q + 8) == our_ssrc) {
+                    u32 k;
+                    o->n_nack++;
+                    for (k = 12; k + 4 <= len; k += 4) {
+                        u32 pid = ((u32)q[k] << 8) | q[k + 1], blp = ((u32)q[k + 2] << 8) | q[k + 3], b;
+                        if (o->n_nack_seq < C277_NACK_SEQ_MAX) o->nack_seq[o->n_nack_seq++] = (u16)pid;
+                        for (b = 0; b < 16; b++)
+                            if ((blp >> b) & 1 && o->n_nack_seq < C277_NACK_SEQ_MAX)
+                                o->nack_seq[o->n_nack_seq++] = (u16)(pid + 1 + b);
+                    }
+                }
+            }
             else if (fmt == 15) o->n_twcc++;
             else o->n_other++;
         } else {
@@ -333,4 +345,179 @@ int c277_rtcp_parse(const u8 *p, u32 n, u32 our_ssrc, c277_rtcp_info *o)
         pos += len;
     }
     return 0;
+}
+
+int c277_rtcp_build_rr(u8 *out, u32 cap, u32 sender, u32 media, u32 fraction, u32 cum_lost,
+                       u32 ext_hi_seq, u32 jitter)
+{
+    if (cap < 32) return -1;
+    out[0] = 0x81; out[1] = 201; put16(out + 2, 7);
+    put32(out + 4, sender); put32(out + 8, media);
+    out[12] = (u8)fraction; out[13] = (u8)(cum_lost >> 16); out[14] = (u8)(cum_lost >> 8); out[15] = (u8)cum_lost;
+    put32(out + 16, ext_hi_seq); put32(out + 20, jitter);
+    put32(out + 24, 0); put32(out + 28, 0);          /* no SR seen: LSR / DLSR 0 */
+    return 32;
+}
+
+/* REMB: bitrate = mantissa(18 bit) << exp(6 bit) */
+int c277_rtcp_build_remb(u8 *out, u32 cap, u32 sender, u32 media, u32 bitrate_bps)
+{
+    u32 exp = 0, man = bitrate_bps;
+    if (cap < 24) return -1;
+    while (man > 0x3FFFFUL) { man >>= 1; exp++; }
+    out[0] = 0x8F; out[1] = 206; put16(out + 2, 5);
+    put32(out + 4, sender); put32(out + 8, 0);
+    out[12] = 'R'; out[13] = 'E'; out[14] = 'M'; out[15] = 'B';
+    out[16] = 1;
+    out[17] = (u8)((exp << 2) | (man >> 16));
+    out[18] = (u8)(man >> 8); out[19] = (u8)man;
+    put32(out + 20, media);
+    return 24;
+}
+
+/* ---------------------------------------------------------------- receiver */
+
+void c277_vrx_init(c277_vrx *v)
+{
+    memset(v, 0, sizeof(*v));
+    v->need_idr = 1;
+}
+
+static void vrx_damage(c277_vrx *v)
+{
+    if (v->in_au) v->n_drop_au++;
+    v->in_au = 0; v->au_len = 0; v->au_ok = 0; v->fu_open = 0; v->au_idr = v->au_sps = v->au_pps = 0;
+    v->need_idr = 1; v->need_pli = 1;
+}
+
+static int vrx_append(c277_vrx *v, const u8 *nal, u32 n, int open_only)
+{
+    u32 need = n + (open_only ? 0 : 4);
+    if (v->au_len + need > C277_VRX_AU_MAX) { v->au_ok = 0; return -1; }
+    if (!open_only) {
+        v->au[v->au_len] = 0; v->au[v->au_len + 1] = 0; v->au[v->au_len + 2] = 0; v->au[v->au_len + 3] = 1;
+        v->au_len += 4;
+    }
+    memcpy(v->au + v->au_len, nal, n);
+    v->au_len += n;
+    return 0;
+}
+
+static void vrx_nal(c277_vrx *v, const u8 *nal, u32 n)
+{
+    int t;
+    if (n == 0) return;
+    t = nal[0] & 31;
+    if (t == 7) {
+        if (n <= C277_VPS_MAX) {
+            if (n != v->sps_len || memcmp(v->sps, nal, n) != 0) v->sps_changed = 1;
+            memcpy(v->sps, nal, n); v->sps_len = n;
+        }
+        v->au_sps = 1;
+    } else if (t == 8) {
+        if (n <= C277_VPS_MAX) { memcpy(v->pps, nal, n); v->pps_len = n; }
+        v->au_pps = 1;
+    } else if (t == 5) v->au_idr = 1;
+    vrx_append(v, nal, n, 0);
+}
+
+static void vrx_finish(c277_vrx *v)
+{
+    /* the access unit is complete (marker seen) */
+    v->in_au = 0;
+    if (!v->au_ok || v->au_len == 0) { vrx_damage(v); return; }
+    if (v->need_idr && !v->au_idr) { v->au_len = 0; v->au_idr = v->au_sps = v->au_pps = 0; v->n_wait++; v->need_pli = 1; return; }
+    if (v->au_idr && !(v->au_sps && v->au_pps)) {
+        /* IDR without parameter sets: prepend the cached ones */
+        u32 add = 0;
+        if (v->sps_len == 0 || v->pps_len == 0) { v->au_len = 0; v->au_idr = v->au_sps = v->au_pps = 0; v->need_pli = 1; return; }
+        if (!v->au_sps) add += 4 + v->sps_len;
+        if (!v->au_pps) add += 4 + v->pps_len;
+        if (v->au_len + add > C277_VRX_AU_MAX) { vrx_damage(v); return; }
+        memmove(v->au + add, v->au, v->au_len);
+        add = 0;
+        if (!v->au_sps) { v->au[0] = 0; v->au[1] = 0; v->au[2] = 0; v->au[3] = 1; memcpy(v->au + 4, v->sps, v->sps_len); add = 4 + v->sps_len; }
+        if (!v->au_pps) { v->au[add] = 0; v->au[add + 1] = 0; v->au[add + 2] = 0; v->au[add + 3] = 1; memcpy(v->au + add + 4, v->pps, v->pps_len); add += 4 + v->pps_len; }
+        v->au_len += add;
+    }
+    if (v->au_idr) { v->need_idr = 0; v->n_idr++; }
+    v->ready = 1; v->ready_len = v->au_len; v->ready_idr = v->au_idr; v->ready_ts = v->au_ts;
+    v->n_au++;
+    v->au_len = 0; v->au_ok = 0; v->au_idr = v->au_sps = v->au_pps = 0;
+}
+
+void c277_vrx_done(c277_vrx *v) { v->ready = 0; }
+
+int c277_vrx_put(c277_vrx *v, u16 seq, u32 ts, int marker, u32 ssrc, const u8 *p, u32 n)
+{
+    int t;
+    if (n < 1) return 0;
+    if (v->ready) { v->ready = 0; v->n_drop_au++; }          /* the consumer was too slow: drop that unit */
+    if (!v->started || ssrc != v->ssrc) {
+        v->started = 1; v->ssrc = ssrc; v->next_seq = seq; v->au_len = 0; v->au_ok = 0; v->fu_open = 0; v->in_au = 0;
+        v->need_idr = 1; v->need_pli = 1;
+        v->base_seq = seq; v->max_ext = seq; v->received = 0; v->expected_prior = 0; v->received_prior = 0;
+    }
+    if (seq != v->next_seq) {
+        u16 d = (u16)(seq - v->next_seq);
+        if (d >= 0x8000) { v->n_late++; return 0; }          /* late or duplicate */
+        v->n_lost += d;
+        vrx_damage(v);                                        /* a gap: this picture and the following P frames are unusable */
+        v->next_seq = seq;
+    }
+    v->next_seq = (u16)(seq + 1);
+    v->n_pk++; v->received++;
+    {   /* extended highest sequence */
+        u32 cyc = v->max_ext & 0xFFFF0000UL, low = v->max_ext & 0xFFFFUL;
+        if (seq < low && low - seq > 0x8000UL) cyc += 0x10000UL;
+        if ((cyc | seq) > v->max_ext) v->max_ext = cyc | seq;
+    }
+    if (v->in_au && ts != v->au_ts) vrx_damage(v);           /* the marker packet is missing */
+    if (!v->in_au) { v->in_au = 1; v->au_ts = ts; v->au_ok = 1; }
+    t = p[0] & 31;
+    if (t >= 1 && t <= 23) {
+        vrx_nal(v, p, n);
+    } else if (t == 24) {
+        u32 pos = 1;
+        while (pos + 2 <= n) {
+            u32 sz = ((u32)p[pos] << 8) | p[pos + 1];
+            if (sz == 0 || pos + 2 + sz > n) { v->au_ok = 0; break; }
+            vrx_nal(v, p + pos + 2, sz);
+            pos += 2 + sz;
+        }
+    } else if (t == 28 && n >= 2) {
+        int start = (p[1] & 0x80) != 0, end = (p[1] & 0x40) != 0;
+        if (start) {
+            u8 hdr = (u8)((p[0] & 0xE0) | (p[1] & 31));
+            if (v->fu_open) v->au_ok = 0;
+            v->fu_open = 1;
+            if ((hdr & 31) == 5) v->au_idr = 1;
+            if (vrx_append(v, &hdr, 1, 0) == 0) vrx_append(v, p + 2, n - 2, 1);
+        } else if (!v->fu_open) {
+            v->au_ok = 0;
+        } else {
+            vrx_append(v, p + 2, n - 2, 1);
+        }
+        if (end) v->fu_open = 0;
+    } else {
+        /* STAP-B, MTAP, FU-B, unknown: not used by WebRTC */
+        v->au_ok = 0;
+    }
+    if (marker) {
+        if (!v->au_ok) vrx_damage(v); else vrx_finish(v);
+        v->fu_open = 0; v->in_au = 0;
+    }
+    return v->ready;
+}
+
+void c277_vrx_stats(c277_vrx *v, u32 *fraction, u32 *cum_lost, u32 *ext_hi)
+{
+    u32 expected = v->max_ext - v->base_seq + 1, lost, ep, rp;
+    ep = expected - v->expected_prior; rp = v->received - v->received_prior;
+    v->expected_prior = expected; v->received_prior = v->received;
+    lost = expected > v->received ? expected - v->received : 0;
+    *fraction = (ep > rp && ep > 0) ? ((ep - rp) * 256UL) / ep : 0;
+    if (*fraction > 255) *fraction = 255;
+    *cum_lost = lost & 0xFFFFFFUL;
+    *ext_hi = v->max_ext;
 }

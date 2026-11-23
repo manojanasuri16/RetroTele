@@ -65,6 +65,7 @@ const TInt KDnPrefill = 960;    /* 120 ms */
 const TInt KOpusMax = 1500;
 const TInt KPortVideoIn = 47014;    /* tgvideo.exe -> here: 'V' + one Annex-B encoder unit */
 const TInt KPortVideoCmd = 47012;   /* tgvideo.exe command port: 'K' = IDR, 'Q' = quit */
+const TInt KPortVideoRx = 47015;    /* here -> tgvideo.exe: peer video, see PumpRx */
 const TInt KVideoMax = 16400;       /* largest unit datagram (c277 C277_VAU_MAX + 'V') */
 
 static TInt NowUs()
@@ -342,6 +343,8 @@ public:
         iNetOk = ETrue;
         iTgv.SetAddress(INET_ADDR(127, 0, 0, 1));
         iTgv.SetPort(KPortVideoCmd);
+        iTgvRx.SetAddress(INET_ADDR(127, 0, 0, 1));
+        iTgvRx.SetPort(KPortVideoRx);
         // encoder units from tgvideo.exe; failure here only disables video, never the call
         if (Check(_L8("VSockOpen"), iVSock.Open(iSs, KAfInet, KSockDatagram, KProtocolInetUdp))) {
             TInetAddr vl;
@@ -418,6 +421,14 @@ public:
                     c277_session_video_enable(iS, aData[1] == '1');
                     if (aData[1] == '1') iVideoEver = ETrue;
                 }
+                return ETrue;
+            }
+            if (n == 2 && (aData[0] == 'W' || aData[0] == 'H')) {
+                if (aData[0] == 'W') iRxWant = (aData[1] == '1'); else iRxFwd = (aData[1] == '1');
+                TBuf8<48> lb;
+                lb.Format(_L8("control: peer video %c %d\n"), (TInt)aData[0], aData[1] == '1' ? 1 : 0);
+                Write(lb);
+                ApplyRx();
                 return ETrue;
             }
             if (n == 2 && aData[0] == 'M') {
@@ -601,6 +612,7 @@ public:
             Write(b);
         }
         if (r == C277_SESS_OK) SetWallClock();
+        if (r == C277_SESS_OK) ApplyRx();
         if (r == C277_SESS_OK) {
             _LIT(KFlag, "E:\\retrotele_videocap.flag");
             TEntry ent;
@@ -711,6 +723,44 @@ public:
         }
         CheckIdrRequest();
     }
+    void ApplyRx()
+    {
+        if (iV277 && iS) c277_session_rx_enable(iS, iRxWant, iRxFwd, 150);
+    }
+    // peer video -> tgvideo.exe (port 47015). 'I' text line "I profile level w h" when the peer's SPS
+    // changes, then each access unit as fragments: 'R', id, index, count, idr, up to 1200 bytes.
+    void PumpRx()
+    {
+        c277_sps sp;
+        const u8* au = NULL;
+        u32 len = 0;
+        TInt idr = 0;
+        if (!iS || !iNetOk || !iV277) return;
+        if (c277_session_vrx_sps_take(iS, &sp)) {
+            TBuf8<64> b;
+            b.Format(_L8("I %d %d %d %d %d"), sp.profile, sp.constraints, sp.level, sp.width, sp.height);
+            SendTo(iSock, iTgvRx, b.Ptr(), b.Length());
+            TBuf8<96> lb;
+            lb.Format(_L8("rx: peer SPS profile %d level %d size %dx%d sent to tgvideo\n"), sp.profile, sp.level, sp.width, sp.height);
+            Write(lb);
+        }
+        if (!c277_session_vrx_take(iS, &au, &len, &idr)) return;
+        {
+            TUint8 pk[1210];
+            TInt cnt = (TInt)((len + 1199) / 1200);
+            if (cnt > 40) cnt = 40;
+            iRxId = (iRxId + 1) & 0xFF;
+            for (TInt i = 0; i < cnt; i++) {
+                TInt off = i * 1200, n = (TInt)len - off;
+                if (n > 1200) n = 1200;
+                pk[0] = 'R'; pk[1] = (TUint8)iRxId; pk[2] = (TUint8)i; pk[3] = (TUint8)cnt; pk[4] = (TUint8)(idr ? 1 : 0);
+                Mem::Copy(pk + 5, au + off, n);
+                SendTo(iSock, iTgvRx, pk, n + 5);
+            }
+            iRxAu++;
+        }
+        c277_session_vrx_done(iS);
+    }
     void CheckIdrRequest()
     {
         if (!iS || !iNetOk) return;
@@ -754,6 +804,7 @@ public:
         PollOpus277();
         Drain277();
         CheckIdrRequest();      /* a PLI/FIR from the peer */
+        PumpRx();
     }
     void Tick277()
     {
@@ -1330,6 +1381,14 @@ public:
                 // peer's RTCP receiver report about our video: loss fraction (0..255), for the adaptive bitrate
                 if (c277_session_video_active(iS) && iS->rr_have) SendInfo('L', (TInt)iS->rr_fraction);
             }
+            if (iRxWant && iS->vrx.started) {
+                TBuf8<300> rl;
+                rl.Format(_L8("rx %d pk %d au %d idr %d lost %d dropau %d late %d waitau %d pli %d rr %d rtx %d fwd %d sent %d ssrc %d\n"),
+                          iTicks, (TInt)iS->vrx.n_pk, (TInt)iS->vrx.n_au, (TInt)iS->vrx.n_idr, (TInt)iS->vrx.n_lost,
+                          (TInt)iS->vrx.n_drop_au, (TInt)iS->vrx.n_late, (TInt)iS->vrx.n_wait, (TInt)iS->rx_pli_sent,
+                          (TInt)iS->rx_rr_sent, (TInt)iS->rx_nack_rtx, iRxFwd, iRxAu, (TInt)iS->vrx.ssrc);
+                Write(rl);
+            }
             if (iNetOk && iStatusName.Length()) SendStatus(iStatusName);
             if (iNetOk) SendStatus(_L8("ready"));
             if (iTicks >= iSeconds) CActiveScheduler::Stop();
@@ -1449,6 +1508,8 @@ private:
     RSocket iVSock;
     CVRecv* iVRecv;
     TBool iVNet, iVideoEver;
+    TInt iRxWant, iRxFwd, iRxId, iRxAu;
+    TInetAddr iTgvRx;
     TInetAddr iTgv;
     TInt iVUnits, iKeyReqs, iLastPeerVid, iLastReqVid, iLastVidAct;
 };

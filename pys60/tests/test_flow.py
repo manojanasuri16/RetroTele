@@ -924,6 +924,13 @@ class FakeCV:
         self.live = 0; self.stopped = self.stopped + 1; self.audio.set_video(0)
     def switch_camera(self): self.sw = self.sw + 1; return 1
     def frame(self): return None
+    rx = 0; pf = None; ps = u""; pfail = 0; up = 0
+    def helper_up(self): return self.up
+    def start_rx(self): self.rx = 1; self.up = 1; return 1
+    def peer_frame(self): return self.pf
+    def peer_status(self): return self.ps
+    def peer_failed(self): return self.pfail
+    def stop_send(self): self.live = 0; self.audio.set_video(0)
 import types as _types
 _fake_mod = _types.ModuleType("callvideo")
 _fake_mod.CallVideo = FakeCV
@@ -959,6 +966,35 @@ fv.peer_video = 2
 t = screen_text()
 assert t.find(u"video is on (cannot be shown on this phone)") >= 0 or t.find(u"cannot be shown") >= 0, t
 fv.peer_video = -1
+# the peer's video: the helper starts when the peer turns video on, the picture fills the screen
+app.stop_call_video(); app.call_video = None
+fv.want_rx = 1; fv.peer_video = 2
+app.audio_info()
+pv = app.call_video
+pv.txt = u""
+assert pv is not None and pv.rx == 1 and pv.live == 0, pv
+t = screen_text()
+assert t.find(u"video is on (cannot be shown") >= 0, t           # no picture yet: the old notice
+pv.ps = u"Peer video: decoder cannot decode this stream (High profile)"; pv.pfail = 1
+t = screen_text()
+assert t.find(u"cannot be shown") >= 0 and t.find(u"High profile") >= 0, t
+pv.pfail = 0; pv.ps = u"Peer video: receiving 176x320"
+t = screen_text()
+assert t.find(u"cannot be shown") < 0 and t.find(u"receiving 176x320") >= 0, t
+class _Img:
+    size = (176, 320)
+pv.pf = (_Img(), 176, 320)
+t = screen_text()
+assert t.find(u"8: show buttons") >= 0 and t.find(u"[1] Mic") < 0, t             # full screen picture
+app.view.key("8")
+t = screen_text()
+assert t.find(u"8: full screen") >= 0 and t.find(u"[1] Mic") >= 0 and t.find(u"[4] Video") >= 0, t
+app.view.key("8")
+app.view.key("4")                                  # our camera on while the peer is shown
+assert pv.live == 1 and fv.want_video
+app.view.key("4")
+assert pv.live == 0 and not fv.want_video
+pv.pf = None
 app.stop_call_audio()                 # hang up / app exit: video stops before the audio helper
 assert cvf.stopped >= 1 and not fv.want_video and app.call_video is None
 # voice-only call: no video entries when the call is not 2.7.7

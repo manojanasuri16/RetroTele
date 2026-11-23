@@ -76,6 +76,8 @@ class CallAudio:
         self.video_active = 0     # helper says our video is announced (RemoteMediaState Active)
         self.peer_video = -1      # peer's RemoteMediaState video: 0 inactive 1 paused 2 active
         self.peer_asked = 0       # times the peer sent RequestVideo
+        self.want_rx = 0          # 1: answer the peer's video offer and depacketize its picture ("W1")
+        self.want_rxfwd = 0       # 1: tgvideo.exe is up and takes the peer's access units ("H1")
         self.loss = 0             # peer's RTCP loss fraction for our video (0..255), from "L n"
 
     def relay_config(self, key, is_outgoing, connections):
@@ -378,6 +380,21 @@ class CallAudio:
         self._sendto("M%d" % self.want_mute)
         if self.want_video:
             self._sendto("V1")
+        if self.want_rx:
+            self._sendto("W1")
+        if self.want_rxfwd:
+            self._sendto("H1")
+
+    def set_rx(self, flag):
+        """Receive the peer's video (2.7.7): the engine announces H264 support to the peer and
+        depacketizes what it sends."""
+        self.want_rx = flag and 1 or 0
+        self._sendto("W%d" % self.want_rx)
+
+    def set_rxfwd(self, flag):
+        """The display helper (tgvideo.exe) is ready: forward the peer's access units to it."""
+        self.want_rxfwd = flag and 1 or 0
+        self._sendto("H%d" % self.want_rxfwd)
 
     def set_video(self, flag):
         """Video send on/off for a 2.7.7 call: the helper announces it to the peer and
@@ -436,6 +453,8 @@ class CallAudio:
         self.muted = 0
         self.route = 1
         self.want_video = 0
+        self.want_rx = 0
+        self.want_rxfwd = 0
         self.video_active = 0
         self.peer_video = -1
         self.peer_asked = 0

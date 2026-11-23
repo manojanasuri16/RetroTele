@@ -101,6 +101,17 @@ typedef struct {
     u8  peer_sps[24];
     u32 peer_sps_len;
     u32 n_peer_vrtp;
+    /* Video receive (peer's picture). rx_want: reply with our VideoFormats so the peer sends
+     * video, depacketize and ask for pictures; rx_fwd: the display helper is up and takes units. */
+    int rx_want, rx_fwd;
+    c277_vrx vrx;
+    c277_sps rx_sps;                             /* parsed from the peer's newest SPS */
+    int rx_sps_new;                              /* rx_sps changed: tell the display helper */
+    int rx_pli_due;                              /* send a PLI at the next chance */
+    u32 rx_pli_at, rx_rr_next, rx_remb_bps;
+    u32 rx_pli_sent, rx_rr_sent, rx_nack_rtx, rx_ready_n;
+    /* the last 64 video packets for NACK retransmission */
+    struct { u16 seq, len; u8 d[1040]; } vhist[64];
 } c277_session;
 
 /* key256: raw DH key. rnd: C277_SESS_RANDOM random bytes (nrnd = how many).
@@ -132,6 +143,18 @@ void c277_outq_clear(c277_outq *q);
 void c277_session_capture(c277_session *s, int on, int vid);
 /* Copies up to cap bytes of pending capture text into out and removes them. */
 u32  c277_session_cap_take(c277_session *s, char *out, u32 cap);
+
+/* ---- video receive */
+/* want: answer the peer's video offer and depacketize its video; fwd: the display helper takes
+ * access units (turning it on asks the peer for an IDR). remb_kbps: bitrate the peer is told it
+ * may send (0 = no REMB). */
+void c277_session_rx_enable(c277_session *s, int want, int fwd, u32 remb_kbps);
+/* A complete access unit (Annex-B, parameter sets before an IDR) if one is ready: 1 and the
+ * pointer/length/idr flag, else 0. Call c277_session_vrx_done afterwards. */
+int  c277_session_vrx_take(c277_session *s, const u8 **au, u32 *len, int *idr);
+void c277_session_vrx_done(c277_session *s);
+/* New peer SPS since the last call: 1 and the parsed size/profile/level. */
+int  c277_session_vrx_sps_take(c277_session *s, c277_sps *o);
 
 /* ---- video send. A helper (tgvideo.exe via the call engine) feeds encoder units. */
 /* 0 = off, 1 = on. Turning on announces VideoFormats / VideoParameters / RemoteMediaState

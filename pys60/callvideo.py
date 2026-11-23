@@ -20,11 +20,12 @@ HOST = "127.0.0.1"
 PORT_CMD = 47012
 PORT_STATUS = 47011
 
-# Quality ladder (width, height, fps, kbit/s). The software encoder (uid 0x20001c13) manages
-# about 10-13 fps at 320x240 on the N79 (about half the CPU), so level 0 steps down when it
-# cannot keep up or the peer reports loss. 176x144 is the old QCIF fallback.
-LEVELS = [(320, 240, 15, 200), (176, 144, 15, 100), (176, 144, 15, 56)]
-LEVEL_NAMES = [u"", u" (small picture)", u" (small, low rate)"]
+# Quality ladder (width, height, fps, kbit/s). The software encoder (uid 0x20001c13) only reaches
+# 3-6 fps at 320x240 next to the call audio on the N79 (measured 0.14.2), but 11-13 fps at
+# QCIF, so QCIF 176x144 is the top level; it steps down to a lower rate when the encoder drops
+# frames or the peer reports loss.
+LEVELS = [(176, 144, 15, 100), (176, 144, 15, 56)]
+LEVEL_NAMES = [u"", u" (low rate)"]
 VIDEO_W = LEVELS[0][0]
 VIDEO_H = LEVELS[0][1]
 VIDEO_FPS = LEVELS[0][2]
@@ -49,6 +50,8 @@ S_STARTING = 1      # exe launched, waiting until it reports "idle"
 S_WAIT_RUN = 2      # S sent, waiting until the camera + encoder run
 S_RUNNING = 3
 S_FAILED = 4
+S_RXSTART = 5       # helper launched only to show the peer's picture (no camera), waiting for hello
+S_RXIDLE = 6        # helper up, camera off: the peer's picture is decoded and shown
 
 # tgvdisp.info() word indexes (native/tgvideo/tgvshared.h)
 I_STATE = 2
@@ -58,6 +61,17 @@ I_DEC_H = 6
 I_PREV_COUNT = 11
 I_PREV_W = 12
 I_PREV_H = 13
+I_RX_STATE = 28     # 0 none, 1 decoder starting, 2 decoding, 3 setup failed, 4 no picture, 5 fatal
+I_RX_ERR = 29
+I_RX_W = 30
+I_RX_H = 31
+I_RX_PROFILE = 32
+I_RX_LEVEL = 33
+I_RX_AU = 34
+I_RX_FED = 35
+I_RX_DEC = 36
+PROFILE_NAMES = {66: u"Baseline", 77: u"Main", 88: u"Extended", 100: u"High", 110: u"High 10",
+                 122: u"High 4:2:2", 244: u"High 4:4:4"}
 
 
 def _raw(sock):
@@ -152,6 +166,14 @@ class CallVideo:
         self.last_drops = 0
         self.steps = 0
         self.last_flags = -1
+        self.rx_on = 0          # the helper also shows the peer's picture
+        self.fwd_on = 0         # told the engine to forward the peer's access units
+        self.want_send = 0
+        self.err = u""
+        self.inf = None
+        self.pimg = None
+        self.pimg_size = (0, 0)
+        self.p_last = -1
 
     # ------------------------------------------------------------ helpers
     def log(self, msg):
@@ -163,6 +185,11 @@ class CallVideo:
                 pass
 
     def active(self):
+        """Our camera video is on or starting."""
+        return (self.state == S_STARTING or self.state == S_WAIT_RUN or
+                self.state == S_RUNNING)
+
+    def helper_up(self):
         return self.state != S_IDLE and self.state != S_FAILED
 
     def changed(self):
@@ -179,6 +206,8 @@ class CallVideo:
             return u""
         if self.state == S_FAILED:
             return self.msg
+        if self.state == S_RXSTART or self.state == S_RXIDLE:
+            return self.err
         cam = CAM_NAMES[self.cam]
         if self.state == S_RUNNING:
             if self.t_switch and self.ticks - self.t_switch < 12:
@@ -291,15 +320,9 @@ class CallVideo:
                 self.errors = self.errors + 1
 
     # ------------------------------------------------------------ start / stop
-    def start(self, cam=CAM_FRONT):
-        """Launch the camera helper; the pipeline starts when it is ready. Returns 1 if
-        the helper could be started (progress via on_change / status_text)."""
-        if self.active():
-            return 1
-        self.cam = cam
+    def reset_counters(self):
         self.msg = u""
-        self.hstate = -1
-        self.ticks = 0
+        self.err = u""
         self.resent_s = 0
         self.t_switch = 0
         self.last_dec = -1
@@ -311,12 +334,19 @@ class CallVideo:
         self.t_level = 0
         self.last_drops = 0
         self.steps = 0
+
+    def launch(self, newstate):
+        """Start tgvideo.exe (it waits for commands; the camera is only used after "S")."""
+        self.hstate = -1
+        self.ticks = 0
+        self.reset_counters()
+        self.fwd_on = 0
         try:
             import tgvdisp
             self.tgvdisp = tgvdisp
         except:
             self.tgvdisp = None
-            self.log("tgvdisp missing: no self-view")
+            self.log("tgvdisp missing: no self-view and no peer picture")
         try:
             self.sock = self._open()
         except:
@@ -326,19 +356,58 @@ class CallVideo:
             e32.start_exe(u"tgvideo.exe", u"")
         except:
             return self.fail(u"Video helper tgvideo.exe is missing")
-        self.state = S_STARTING
-        self.log("helper started, camera %d" % self.cam)
+        self.state = newstate
         self.timer = e32.Ao_timer()
         self.timer.after(TICK, self.tick)
         self.changed()
         return 1
 
+    def start_rx(self):
+        """Peer video only: launch the helper without the camera so the peer's picture can be
+        decoded and drawn. Returns 1 if the helper could be started."""
+        if self.helper_up():
+            self.rx_on = 1
+            return 1
+        self.rx_on = 1
+        self.want_send = 0
+        self.log("helper started for the peer's picture")
+        return self.launch(S_RXSTART)
+
+    def start(self, cam=CAM_FRONT):
+        """Start our camera video; the helper is launched first if it is not running. The
+        pipeline starts when it is ready. Returns 1 if the helper could be started (progress
+        via on_change / status_text)."""
+        if self.active():
+            return 1
+        self.cam = cam
+        self.want_send = 1
+        if self.state == S_RXIDLE or self.state == S_RXSTART:
+            self.reset_counters()
+            self.log("camera video on (helper already running), camera %d" % self.cam)
+            if self.state == S_RXIDLE:
+                self.state = S_STARTING
+                self.ticks = 0
+            self.changed()
+            return 1
+        r = self.launch(S_STARTING)
+        if r:
+            self.log("helper started, camera %d" % self.cam)
+        return r
+
     def fail(self, text):
         """Camera/helper trouble: tell the engine to stop sending, release the camera,
-        keep the call alive."""
+        keep the call alive. When the helper also shows the peer's picture it keeps running."""
         self.log("FAILED: %s (helper state %s, %d status lines heard, tick %d, errors %d)" % (
             str(text), str(self.hstate), self.rx_lines, self.ticks, self.errors))
         self.set_audio_video(0)
+        if self.rx_on and self.fwd_on and self.hstate != 4 and self.state != S_STARTING:
+            self.send("E 0")
+            self.send("T")
+            self.img = None
+            self.err = text
+            self.state = S_RXIDLE
+            self.changed()
+            return 0
         self.release_helper()
         self.msg = text
         self.state = S_FAILED
@@ -365,6 +434,8 @@ class CallVideo:
         self.stopping = 1
         self.log("stop")
         self.set_audio_video(0)
+        self.set_fwd(0)
+        self.rx_on = 0
         self.send("E 0")
         n = 0
         while n < 15:
@@ -384,10 +455,46 @@ class CallVideo:
         self.attached = 0
         self.img = None
         self.img_size = (0, 0)
+        self.pimg = None
+        self.pimg_size = (0, 0)
+        self.p_last = -1
+        self.inf = None
         self.state = S_IDLE
         self.msg = u""
+        self.err = u""
         self.timer = None
         self.changed()
+
+    def stop_send(self):
+        """Our camera video off. If the helper is also showing the peer's picture it keeps
+        running (camera and encoder released); otherwise it is stopped completely."""
+        if not self.active():
+            return
+        if not (self.rx_on and self.fwd_on):
+            self.stop()
+            return
+        self.log("camera video off, helper stays for the peer's picture")
+        self.set_audio_video(0)
+        self.send("E 0")
+        self.send("T")
+        self.img = None
+        self.img_size = (0, 0)
+        self.err = u""
+        self.t_switch = 0
+        self.state = S_RXIDLE
+        self.changed()
+
+    def set_fwd(self, flag):
+        """Tell the call engine whether tgvideo.exe takes the peer's access units."""
+        if (flag and 1 or 0) == self.fwd_on:
+            return
+        self.fwd_on = flag and 1 or 0
+        a = self.audio
+        if a is not None:
+            try:
+                a.set_rxfwd(self.fwd_on)
+            except:
+                self.errors = self.errors + 1
 
     def switch_camera(self):
         """Front <-> rear. The helper restarts the encoder: new SPS/PPS + IDR; RTP seq, SSRC
@@ -419,9 +526,22 @@ class CallVideo:
 
     def step(self):
         hs = self.hstate
-        if self.state == S_STARTING:
+        if self.state == S_RXSTART:
+            if hs == 2:
+                self.send("L 0")
+                self.set_fwd(1)
+                self.state = S_RXIDLE
+                self.log("helper ready for the peer's picture")
+                self.changed()
+            elif self.ticks > 60:
+                self.rx_on = 0
+                self.fail(u"Peer video helper did not start")
+        elif self.state == S_RXIDLE:
+            self.update_frames()
+        elif self.state == S_STARTING:
             if hs == 2:
                 self.send("L 0")             # no loopback decoder: the self-view uses the camera frames
+                self.set_fwd(self.rx_on)
                 self.send(self.params())
                 self.t_s = self.ticks
                 self.state = S_WAIT_RUN
@@ -450,29 +570,42 @@ class CallVideo:
             if self.t_switch and self.ticks - self.t_switch == 12:
                 self.send("K")                       # belt and braces after a camera switch
                 self.changed()
-            self.update_frame()
+            self.update_frames()
 
     # ------------------------------------------------------------ self-view
-    def update_frame(self):
-        """Pull the newest camera picture (the helper keeps a copy of every frame in the shared
-        chunk; the 0x102073ef loopback decoder is QCIF-only so it is not used). The picture is
-        decimated by 2 for 320x240 and mirrored for the front camera."""
+    def attach(self):
         td = self.tgvdisp
         if td is None:
-            return
+            return None
         if not self.attached:
             try:
                 if td.attach() == 0:
                     self.attached = 1
             except:
-                return
+                return None
             if not self.attached:
-                return
+                return None
         try:
-            inf = td.info()
+            return td.info()
         except:
+            return None
+
+    def update_frames(self):
+        """Read the shared chunk: the peer's decoded picture (decoder output) and, while our
+        camera is on, the camera preview (decimated by 2 for big frames, mirrored for the front
+        camera; the QCIF-only loopback decoder is not used)."""
+        inf = self.attach()
+        self.inf = inf
+        if inf is None:
             return
-        if inf is None or inf[I_PREV_COUNT] <= 0:
+        if self.state == S_RUNNING:
+            self.update_self(inf)
+        if self.rx_on and inf[I_RX_STATE] == 2:
+            self.update_peer(inf)
+
+    def update_self(self, inf):
+        td = self.tgvdisp
+        if inf[I_PREV_COUNT] <= 0:
             return
         w = inf[I_PREV_W]
         h = inf[I_PREV_H]
@@ -504,6 +637,72 @@ class CallVideo:
             self.last_dec = rc
             self.frame_new = 1
             self.changed()
+
+    def update_peer(self, inf):
+        td = self.tgvdisp
+        if inf[I_DEC_COUNT] <= 0:
+            return
+        w = inf[I_DEC_W]
+        h = inf[I_DEC_H]
+        if w <= 0 or h <= 0:
+            return
+        if w >= 320 or h >= 400:
+            w = w / 2
+            h = h / 2
+        if self.pimg is None or self.pimg_size != (w, h):
+            try:
+                import graphics
+                self.pimg = graphics.Image.new((w, h), 'RGB16')
+                self.pimg_size = (w, h)
+                self.p_last = -1
+            except:
+                self.pimg = None
+                return
+        try:
+            rc = td.render(self.pimg, 0, 0, self.p_last)
+        except:
+            return
+        if rc >= 0 and rc != self.p_last:
+            self.p_last = rc
+            self.frame_new = 1
+            self.changed()
+
+    def peer_frame(self):
+        """(image, w, h) of the peer's newest decoded picture, or None."""
+        inf = self.inf
+        if (not self.rx_on or inf is None or inf[I_RX_STATE] != 2 or self.pimg is None or
+                self.p_last < 0):
+            return None
+        return (self.pimg, self.pimg_size[0], self.pimg_size[1])
+
+    def peer_status(self):
+        """One line about the peer's video decoding, or u"" when nothing is known yet."""
+        inf = self.inf
+        if not self.rx_on or inf is None or not self.helper_up():
+            return u""
+        st = inf[I_RX_STATE]
+        w = inf[I_RX_W]
+        h = inf[I_RX_H]
+        prof = PROFILE_NAMES.get(inf[I_RX_PROFILE], u"profile %d" % inf[I_RX_PROFILE])
+        if st == 2:
+            if inf[I_DEC_COUNT] > 0 and self.p_last >= 0:
+                return u"Peer video: receiving %dx%d" % (w, h)
+            return u"Peer video: waiting for the first picture"
+        if st == 1:
+            return u"Peer video: starting decoder (%dx%d, %s)" % (w, h, prof)
+        if st == 3:
+            return u"Peer video: decoder setup failed (error %d, %s profile)" % (inf[I_RX_ERR], prof)
+        if st == 4:
+            return u"Peer video: decoder cannot decode this stream (%s profile)" % prof
+        if st == 5:
+            return u"Peer video: decoder error %d" % inf[I_RX_ERR]
+        if inf[I_RX_AU] > 0:
+            return u"Peer video: starting..."
+        return u""
+
+    def peer_failed(self):
+        inf = self.inf
+        return inf is not None and self.rx_on and inf[I_RX_STATE] >= 3
 
     def frame(self):
         """(image, w, h) of the self-view or None."""

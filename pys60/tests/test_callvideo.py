@@ -46,7 +46,7 @@ class FakeImage:
 
 mod("graphics", Image=FakeImage)
 
-HDR = [0x54475646, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0]
+HDR = [0x54475646, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0] + [0] * 30
 RENDERS = []
 
 
@@ -84,7 +84,7 @@ v.tick()                                   # helper silent: nothing sent yet
 assert SENT == []
 v.on_status("T hello")
 v.tick()
-assert SENT[-1] == ("S 320 240 15 200 1 0", ("127.0.0.1", 47012)), SENT
+assert SENT[-1] == ("S 176 144 15 100 1 0", ("127.0.0.1", 47012)), SENT
 assert SENT[-2][0] == "L 0"                # no loopback decoder (QCIF-only, not needed)
 assert v.state == cv.S_WAIT_RUN
 assert ca.sent == []                       # nothing announced before the camera runs
@@ -95,10 +95,10 @@ assert ("E 1", ("127.0.0.1", 47012)) in SENT and ca.sent == ["V1"], (SENT, ca.se
 assert v.status_text() == u"Video on - front camera"
 # self-view frames
 assert v.frame() is None
-HDR[11] = 5; HDR[12] = 320; HDR[13] = 240
+HDR[11] = 5; HDR[12] = 176; HDR[13] = 144
 v.tick()
 f = v.frame()
-assert f is not None and f[1:] == (160, 120) and (1, 4, -1) in RENDERS, RENDERS   # preview, mirrored (front)
+assert f is not None and f[1:] == (176, 144) and (1, 4, -1) in RENDERS, RENDERS   # preview, mirrored (front)
 n = len(CHANGES)
 v.tick()                                   # same frame counter: no new redraw
 assert len(CHANGES) == n
@@ -111,15 +111,15 @@ for i in range(12):
     v.tick()
 assert SENT[-1][0] == "K", SENT                        # extra IDR request after the switch
 assert v.status_text() == u"Video on - rear camera"
-# ---- adaptive quality: slow encoder / peer loss step down 320x240 -> 176x144 -> lower rate
+# ---- adaptive quality: slow encoder / peer loss / drops step down to the lower rate
 ca8 = callaudio_fake.CallAudio()
 v8 = cv.CallVideo(ca8, None, LOG.append)
 v8.start(cv.CAM_FRONT)
 v8.on_status("T 2"); v8.tick()
-v8.on_status("T 1 1 320 240 150 150 0 12 7500 0 0 1 0"); v8.tick()
+v8.on_status("T 1 1 176 144 150 150 0 12 7500 0 0 1 0"); v8.tick()
 assert v8.state == cv.S_RUNNING and v8.level == 0
-GOOD = "T 1 1 320 240 150 130 0 40 20000 0 %d 1 0"
-SLOW = "T 1 1 320 240 150 60 0 40 9000 0 %d 1 0"
+GOOD = "T 1 1 176 144 150 130 0 40 20000 0 %d 1 0"
+SLOW = "T 1 1 176 144 150 60 0 40 9000 0 %d 1 0"
 for i in range(60):                          # warm-up is not judged
     v8.tick()
 for i in range(20):
@@ -130,26 +130,29 @@ for i in range(cv.BAD_LIMIT - 1):
 assert v8.level == 0
 del SENT[:]
 v8.on_status(SLOW % 0)
-assert v8.level == 1 and SENT[-1][0] == "S 176 144 15 100 1 0", (v8.level, SENT)
+assert v8.level == 1 and SENT[-1][0] == "S 176 144 15 56 1 0", (v8.level, SENT)
 assert v8.status_text().find(u"adjusting") >= 0
 for i in range(120):
     v8.tick()
-assert v8.status_text() == u"Video on - front camera (small picture)", v8.status_text()
-ca8.loss = 90                                # peer reports about 35 percent loss
-del SENT[:]
+assert v8.status_text() == u"Video on - front camera (low rate)", v8.status_text()
+ca8.loss = 200
+for i in range(30):                          # bottom of the ladder
+    v8.on_status(GOOD % 0)
+assert v8.level == 1
+# peer loss alone steps down
+v10 = cv.CallVideo(callaudio_fake.CallAudio(), None, None)
+v10.start(cv.CAM_REAR); v10.on_status("T 2"); v10.tick()
+v10.on_status("T 1 0 176 144 0 0 0 0 0 0 0 1 0"); v10.tick()
+for i in range(60):
+    v10.tick()
+v10.audio.loss = 90
 for i in range(cv.BAD_LIMIT):
-    v8.on_status(GOOD % 0)
-assert v8.level == 2 and SENT[-1][0] == "S 176 144 15 56 1 0" and ca8.loss == 0, (v8.level, SENT)
-for i in range(120):
-    v8.tick()
-for i in range(30):
-    ca8.loss = 200
-    v8.on_status(GOOD % 0)
-assert v8.level == 2                         # bottom of the ladder
+    v10.on_status(GOOD % 0)
+assert v10.level == 1 and v10.audio.loss == 0
 # many encoder drops also count
 v9 = cv.CallVideo(callaudio_fake.CallAudio(), None, None)
 v9.start(cv.CAM_REAR); v9.on_status("T 2"); v9.tick()
-v9.on_status("T 1 0 320 240 0 0 0 0 0 0 0 1 0"); v9.tick()
+v9.on_status("T 1 0 176 144 0 0 0 0 0 0 0 1 0"); v9.tick()
 for i in range(60):
     v9.tick()
 n = 0
@@ -174,7 +177,7 @@ del SENT[:]
 v2.start(cv.CAM_REAR)
 v2.on_status("T 2")
 v2.tick()
-assert SENT[-1][0] == "S 320 240 15 200 0 0"
+assert SENT[-1][0] == "S 176 144 15 100 0 0"
 v2.on_status("T 1 0 176 144 0 0 0 0 0 0 0 1 1")
 v2.tick()
 assert v2.state == cv.S_RUNNING
@@ -229,6 +232,75 @@ v7.on_status("T 2"); v7.tick()
 v7.on_status("T 1 1 176 144 0 0 0 0 0 0 0 1 1"); v7.tick()
 assert v7.state == cv.S_RUNNING and v7.frame() is None
 
+# ---- peer video: helper without camera, decoded picture, diagnostics, then our camera on top
+for i in range(11, 14):
+    pass
+HDR[4] = 0; HDR[5] = 0; HDR[6] = 0
+cax = callaudio_fake.CallAudio()
+del STARTED[:], SENT[:]
+del RENDERS[:]
+sys.modules["tgvdisp"] = types.ModuleType("tgvdisp")
+sys.modules["tgvdisp"].__dict__.update(dict([(n, getattr(disp, n)) for n in ("attach", "detach", "info", "render")]))
+vr = cv.CallVideo(cax, lambda: CHANGES.append(1), LOG.append)
+assert vr.start_rx() == 1 and STARTED == ["tgvideo.exe"] and vr.state == cv.S_RXSTART
+assert not vr.active() and vr.helper_up() and vr.status_text() == u""
+vr.tick()
+assert SENT == [] and cax.sent == []
+vr.on_status("T hello")
+vr.tick()
+assert vr.state == cv.S_RXIDLE and SENT[-1][0] == "L 0" and cax.sent[-1] == "H1" and vr.fwd_on == 1
+assert vr.peer_frame() is None and vr.peer_status() == u""
+HDR[28] = 1; HDR[30] = 176; HDR[31] = 320; HDR[32] = 100; HDR[33] = 13; HDR[34] = 1
+vr.tick()
+assert vr.peer_status().startswith(u"Peer video: starting decoder (176x320, High)"), vr.peer_status()
+HDR[28] = 2; HDR[4] = 3; HDR[5] = 176; HDR[6] = 320
+vr.tick()
+f = vr.peer_frame()
+assert f is not None and f[1:] == (176, 320) and (0, 0, -1) in RENDERS, (f, RENDERS)
+assert vr.peer_status() == u"Peer video: receiving 176x320" and not vr.peer_failed()
+n = len(CHANGES)
+vr.tick()
+assert len(CHANGES) == n                    # same frame counter: no redraw
+HDR[4] = 4; HDR[5] = 528; HDR[6] = 960      # big peer picture: drawn at half size
+vr.tick()
+assert vr.peer_frame()[1:] == (264, 480)
+HDR[28] = 4
+vr.tick()
+assert vr.peer_failed() and vr.peer_frame() is None
+assert vr.peer_status() == u"Peer video: decoder cannot decode this stream (High profile)"
+HDR[28] = 3; HDR[29] = -44
+vr.tick()
+assert vr.peer_status().find(u"decoder setup failed (error -44") >= 0
+HDR[28] = 5; HDR[29] = -1
+assert vr.peer_status() or 1
+vr.tick()
+HDR[28] = 2
+# our camera on top of the running helper: no second exe, L 0 then S
+del STARTED[:], SENT[:]
+assert vr.start(cv.CAM_FRONT) == 1 and STARTED == [] and vr.state == cv.S_STARTING and vr.active()
+vr.tick()
+assert [d for d, a in SENT] == ["L 0", "S 176 144 15 100 1 0"], SENT
+vr.on_status("T 1 1 176 144 150 150 0 12 7500 0 0 1 0")
+vr.tick()
+assert vr.state == cv.S_RUNNING and cax.sent[-1] == "V1"
+# camera off: the helper stays for the peer's picture
+del SENT[:]
+vr.stop_send()
+assert vr.state == cv.S_RXIDLE and [d for d, a in SENT] == ["E 0", "T"] and cax.sent[-1] == "V0"
+assert not vr.active() and vr.helper_up() and vr.status_text() == u""
+# camera trouble while the helper shows the peer: the helper stays, the message is kept
+vr.on_status("T 2"); vr.start(cv.CAM_FRONT); vr.tick(); vr.on_status("T 3 1 0 0 0 0 0 0 0 0 0 0 0"); vr.tick()
+assert vr.state == cv.S_RXIDLE and vr.status_text() == u"Camera is in use or unavailable", (vr.state, vr.status_text())
+# full stop also stops the forwarding
+vr.stop()
+assert vr.state == cv.S_IDLE and cax.sent[-2:] == ["V0", "H0"] and vr.fwd_on == 0
+# camera video first, peer picture added later: forwarding starts with the helper
+cay = callaudio_fake.CallAudio()
+vy = cv.CallVideo(cay, None, None)
+vy.rx_on = 1
+vy.start(cv.CAM_REAR); vy.on_status("T 2"); vy.tick()
+assert "H1" in cay.sent
+
 # ---- the real CallAudio: control datagrams and helper info
 import callaudio as cau
 a = cau.CallAudio()
@@ -244,6 +316,11 @@ a._handle("P 2"); assert a.peer_video == 2
 a._handle("X 1"); assert a.peer_asked == 1
 a._handle("A 1"); assert a.video_active
 a._handle("L 77"); assert a.loss == 77
+a.set_rx(1); assert sent[-1] == "W1" and a.want_rx == 1
+a.set_rxfwd(1); assert sent[-1] == "H1"
+del sent[:]
+a._send_controls()
+assert "W1" in sent and "H1" in sent    # resent when the helper starts late
 a.set_video(0)
 assert sent[-1] == "V0" and not a.video_active
 a.want_video = 0

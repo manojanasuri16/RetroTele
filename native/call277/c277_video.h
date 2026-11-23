@@ -65,8 +65,11 @@ u32  c277_vtx_ts_at(const c277_vtx *v, u32 now);
 /* SR (28 bytes, no report blocks) + SDES with CNAME "cname" (16): 44 bytes. */
 int c277_rtcp_build_sr(u8 *out, u32 cap, u32 ssrc, u32 ntp_hi, u32 ntp_lo, u32 rtp_ts, u32 pk, u32 oct);
 
+#define C277_NACK_SEQ_MAX 16
 typedef struct {
     u32 n_sr, n_rr, n_pli, n_fir, n_nack, n_twcc, n_remb, n_other;
+    u16 nack_seq[C277_NACK_SEQ_MAX];       /* sequence numbers asked for (about our ssrc) */
+    u32 n_nack_seq;
     int rr_have;                          /* a report block for our ssrc was present */
     u32 rr_fraction, rr_lost, rr_jitter;
 } c277_rtcp_info;
@@ -76,5 +79,38 @@ typedef struct {
 int c277_rtcp_parse(const u8 *p, u32 n, u32 our_ssrc, c277_rtcp_info *o);
 /* PLI (RFC 4585, 12 bytes) for tests. */
 int c277_rtcp_build_pli(u8 *out, u32 cap, u32 sender, u32 media);
+
+
+/* RR with one report block (32 bytes) about media_ssrc, REMB (24 bytes) */
+int c277_rtcp_build_rr(u8 *out, u32 cap, u32 sender, u32 media, u32 fraction, u32 cum_lost,
+                       u32 ext_hi_seq, u32 jitter);
+int c277_rtcp_build_remb(u8 *out, u32 cap, u32 sender, u32 media, u32 bitrate_bps);
+
+/* ---- receiver (peer's video): RFC 6184 depacketizer -> Annex-B access units.
+ * Packets must arrive in order; a gap or a damaged access unit discards the picture
+ * and the stream waits for the next IDR (PLI requested). */
+#define C277_VRX_AU_MAX  32768
+typedef struct {
+    int started, in_au, need_idr, ready, ready_idr, need_pli, au_ok, fu_open, au_idr, au_sps, au_pps;
+    u32 ssrc, au_ts, au_len, ready_len, ready_ts;
+    u16 next_seq;
+    u8  au[C277_VRX_AU_MAX];
+    u8  sps[C277_VPS_MAX], pps[C277_VPS_MAX];
+    u32 sps_len, pps_len;
+    int sps_changed;                       /* new SPS content since the last c277_vrx_sps_take */
+    /* RR statistics */
+    u32 base_seq, max_ext, received, expected_prior, received_prior;
+    /* totals */
+    u32 n_pk, n_au, n_idr, n_lost, n_drop_au, n_late, n_wait;
+} c277_vrx;
+
+void c277_vrx_init(c277_vrx *v);
+/* Feeds one RTP packet (video PT). Returns 1 when an access unit is ready in v->au
+ * (v->ready_len bytes, v->ready_idr), else 0. v->need_pli says a picture request is due. */
+int  c277_vrx_put(c277_vrx *v, u16 seq, u32 ts, int marker, u32 ssrc, const u8 *payload, u32 plen);
+/* The consumer took the ready unit. */
+void c277_vrx_done(c277_vrx *v);
+/* Report block data for an RR: fraction lost since the last call (0..255), cumulative lost, extended highest seq */
+void c277_vrx_stats(c277_vrx *v, u32 *fraction, u32 *cum_lost, u32 *ext_hi);
 
 #endif
