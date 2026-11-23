@@ -76,6 +76,7 @@ class CallAudio:
         self.video_active = 0     # helper says our video is announced (RemoteMediaState Active)
         self.peer_video = -1      # peer's RemoteMediaState video: 0 inactive 1 paused 2 active
         self.peer_asked = 0       # times the peer sent RequestVideo
+        self.loss = 0             # peer's RTCP loss fraction for our video (0..255), from "L n"
 
     def relay_config(self, key, is_outgoing, connections):
         """Text for the helper: out=, key= (hex) and up to 4 ep=ip,port,tag
@@ -346,6 +347,11 @@ class CallAudio:
                 except:
                     pass
                 self._info()
+            elif data[:2] == "L ":
+                try:
+                    self.loss = int(data[2:].strip())
+                except:
+                    pass
             elif data[:2] == "A ":
                 self.video_active = (data[2:].strip() == "1")
                 self._info()
@@ -381,6 +387,7 @@ class CallAudio:
         else:
             self.want_video = 0
             self.video_active = 0
+            self.loss = 0
         self._sendto("V%d" % self.want_video)
 
     def set_mute(self, flag):

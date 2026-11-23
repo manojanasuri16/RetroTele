@@ -46,7 +46,7 @@ static RFs gFs;
 static TFileName gLogPath[3];
 static TInt gLogN = 0;
 static TBool gLogOk = EFalse;
-#define TGV_HELPER_VERSION "0.14.1"
+#define TGV_HELPER_VERSION "0.14.2"
 
 static void Log(TRefByValue<const TDesC8> aFmt, ...)
 {
@@ -594,8 +594,8 @@ public:
         CleanupStack::PopAndDestroy(info);
         Log(_L8("step enc: SetSourceMemoryL %d fps const=1 realtime=1"), aFps);
         iRec->SetSourceMemoryL((TReal)aFps, ETrue, ETrue);
-        Log(_L8("step enc: SetMinRandomAccessRate 0.5"));
-        iRec->SetMinRandomAccessRate(0.5);
+        Log(_L8("step enc: SetMinRandomAccessRate 0.4 (IDR about every 2.5 s)"));
+        iRec->SetMinRandomAccessRate(0.4);
         Log(_L8("step enc: Initialize"));
         iRec->Initialize();
         gPump->Run(10000, &iInitDone);
@@ -733,6 +733,11 @@ public:
         if (!iPowered) return KErrTimedOut;
         if (iPowerErr) return iPowerErr;
         iPoweredOn = ETrue;
+        // sensible picture for a call: automatic exposure and white balance, no flash
+        TRAPD(x1, iCam->SetExposureL(CCamera::EExposureAuto));
+        TRAPD(x2, iCam->SetWhiteBalanceL(CCamera::EWBAuto));
+        TRAPD(x3, iCam->SetFlashL(CCamera::EFlashNone));
+        Log(_L8("cam%d auto exposure err=%d, auto white balance err=%d, flash off err=%d"), aIdx, x1, x2, x3);
         TCameraInfo ci;
         iCam->CameraInfo(ci);
         // size: exact match, else the largest one not bigger than requested
@@ -931,8 +936,15 @@ static TInt BuildDec(TSize sz)
 static TInt BuildEnc(TSize sz);
 static void Settle(TInt aMs);
 // camera + encoder are running: create the loopback decoder now and ask for an IDR with parameter sets
+static TInt gLoopDec = 1;    // loopback decoder for the self-view (command L): the call UI shows the camera preview instead
 static void LateDecoder()
 {
+    if (!gLoopDec || gW > 176 || gHt > 144) {
+        // 0x102073ef decodes QCIF only; the call UI draws the camera frames (chunk "preview") directly
+        Log(_L8("loopback decoder skipped (wanted %d, size %dx%d)"), gLoopDec, gW, gHt);
+        if (gEncoder) gEncoder->KeyFrame();
+        return;
+    }
     Settle(600);
     gDecOpt.iUid = 0x102073ef;
     TInt de = BuildDec(TSize(gW, gHt));
@@ -1396,6 +1408,10 @@ static void Exec(const TDesC8& aCmd)
         if (gRotation != 0) Log(_L8("cmd S: rotation %d not implemented, sending landscape"), gRotation);
         if (n >= 5) StartPipeline(v[0], v[1], v[2], v[3], n >= 5 ? v[4] : 0);
         else Log(_L8("cmd S: need 5 numbers"));
+        break;
+    case 'L':
+        gLoopDec = v[0] ? 1 : 0;
+        Log(_L8("cmd L %d (loopback decoder)"), gLoopDec);
         break;
     case 'C':
         Log(_L8("cmd C %d"), v[0]);

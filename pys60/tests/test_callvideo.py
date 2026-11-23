@@ -79,25 +79,26 @@ v = cv.CallVideo(ca, lambda: CHANGES.append(1), LOG.append)
 assert cv.VIDEO_ROTATION_DEG == 0
 assert v.start(cv.CAM_FRONT) == 1
 assert STARTED == ["tgvideo.exe"] and v.state == cv.S_STARTING
-assert v.status_text().startswith(u"video starting")
+assert v.status_text().startswith(u"Starting video")
 v.tick()                                   # helper silent: nothing sent yet
 assert SENT == []
 v.on_status("T hello")
 v.tick()
-assert SENT[-1] == ("S 176 144 15 60 1 0", ("127.0.0.1", 47012)), SENT
+assert SENT[-1] == ("S 320 240 15 200 1 0", ("127.0.0.1", 47012)), SENT
+assert SENT[-2][0] == "L 0"                # no loopback decoder (QCIF-only, not needed)
 assert v.state == cv.S_WAIT_RUN
 assert ca.sent == []                       # nothing announced before the camera runs
 v.on_status("T 1 1 176 144 150 150 150 12 7500 0 0 1 1")
 v.tick()
 assert v.state == cv.S_RUNNING
 assert ("E 1", ("127.0.0.1", 47012)) in SENT and ca.sent == ["V1"], (SENT, ca.sent)
-assert v.status_text() == u"video on, camera: front"
+assert v.status_text() == u"Video on - front camera"
 # self-view frames
 assert v.frame() is None
-HDR[4] = 5; HDR[5] = 176; HDR[6] = 144
+HDR[11] = 5; HDR[12] = 320; HDR[13] = 240
 v.tick()
 f = v.frame()
-assert f is not None and f[1:] == (176, 144) and (0, 0, -1) in RENDERS
+assert f is not None and f[1:] == (160, 120) and (1, 4, -1) in RENDERS, RENDERS   # preview, mirrored (front)
 n = len(CHANGES)
 v.tick()                                   # same frame counter: no new redraw
 assert len(CHANGES) == n
@@ -105,11 +106,59 @@ assert len(CHANGES) == n
 del SENT[:]
 assert v.switch_camera() == 1 and v.cam == cv.CAM_REAR
 assert SENT[-1][0] == "C 0"
-assert v.status_text() == u"video on, switching camera..."
+assert v.status_text() == u"Video on - switching camera..."
 for i in range(12):
     v.tick()
 assert SENT[-1][0] == "K", SENT                        # extra IDR request after the switch
-assert v.status_text() == u"video on, camera: rear"
+assert v.status_text() == u"Video on - rear camera"
+# ---- adaptive quality: slow encoder / peer loss step down 320x240 -> 176x144 -> lower rate
+ca8 = callaudio_fake.CallAudio()
+v8 = cv.CallVideo(ca8, None, LOG.append)
+v8.start(cv.CAM_FRONT)
+v8.on_status("T 2"); v8.tick()
+v8.on_status("T 1 1 320 240 150 150 0 12 7500 0 0 1 0"); v8.tick()
+assert v8.state == cv.S_RUNNING and v8.level == 0
+GOOD = "T 1 1 320 240 150 130 0 40 20000 0 %d 1 0"
+SLOW = "T 1 1 320 240 150 60 0 40 9000 0 %d 1 0"
+for i in range(60):                          # warm-up is not judged
+    v8.tick()
+for i in range(20):
+    v8.on_status(GOOD % 0)
+assert v8.level == 0                         # healthy: stays
+for i in range(cv.BAD_LIMIT - 1):
+    v8.on_status(SLOW % 0)
+assert v8.level == 0
+del SENT[:]
+v8.on_status(SLOW % 0)
+assert v8.level == 1 and SENT[-1][0] == "S 176 144 15 100 1 0", (v8.level, SENT)
+assert v8.status_text().find(u"adjusting") >= 0
+for i in range(120):
+    v8.tick()
+assert v8.status_text() == u"Video on - front camera (small picture)", v8.status_text()
+ca8.loss = 90                                # peer reports about 35 percent loss
+del SENT[:]
+for i in range(cv.BAD_LIMIT):
+    v8.on_status(GOOD % 0)
+assert v8.level == 2 and SENT[-1][0] == "S 176 144 15 56 1 0" and ca8.loss == 0, (v8.level, SENT)
+for i in range(120):
+    v8.tick()
+for i in range(30):
+    ca8.loss = 200
+    v8.on_status(GOOD % 0)
+assert v8.level == 2                         # bottom of the ladder
+# many encoder drops also count
+v9 = cv.CallVideo(callaudio_fake.CallAudio(), None, None)
+v9.start(cv.CAM_REAR); v9.on_status("T 2"); v9.tick()
+v9.on_status("T 1 0 320 240 0 0 0 0 0 0 0 1 0"); v9.tick()
+for i in range(60):
+    v9.tick()
+n = 0
+for i in range(cv.BAD_LIMIT):
+    n = n + 5
+    v9.on_status(GOOD % n)
+assert v9.level == 1
+assert cv.parse_stats("T 1 1 320 240 150 130 0 40 20000 0 7 1 0") == (130, 20000, 7)
+assert cv.parse_stats("T hello") is None
 # camera error while running: video stops, helper released, call (audio) untouched
 v.on_status("T 3 0 0 0 0 0 0 0 0 0 0 0 0")
 v.tick()
@@ -125,7 +174,7 @@ del SENT[:]
 v2.start(cv.CAM_REAR)
 v2.on_status("T 2")
 v2.tick()
-assert SENT[-1][0] == "S 176 144 15 60 0 0"
+assert SENT[-1][0] == "S 320 240 15 200 0 0"
 v2.on_status("T 1 0 176 144 0 0 0 0 0 0 0 1 1")
 v2.tick()
 assert v2.state == cv.S_RUNNING
@@ -194,6 +243,7 @@ assert sent[-2:] == ["R1", "M0"] or "V1" in sent[-3:], sent
 a._handle("P 2"); assert a.peer_video == 2
 a._handle("X 1"); assert a.peer_asked == 1
 a._handle("A 1"); assert a.video_active
+a._handle("L 77"); assert a.loss == 77
 a.set_video(0)
 assert sent[-1] == "V0" and not a.video_active
 a.want_video = 0

@@ -286,5 +286,31 @@ fv.top = 5; fv.cur = 6
 app.view = fv
 fv.draw(); app.net.run()
 snap("13-filepick-thumbs-marks")
+
+# ---- call screens
+sys.path.insert(0, os.path.join(HERE, "..", "fake_s60"))
+import callaudio_fake
+cs = {"key": "u11", "id": 9, "hash": 1, "out": 1, "state": "ringing", "text": "Ringing...",
+      "start": 0, "emoji": u"", "kb": "", "conns": []}
+app.client.cs = cs
+app.screen = "call"
+app.view = tgui.CallView(app); app.view.canvas = tgui.appuifw.Canvas(redraw_callback=app.view.on_redraw)
+snap("14-call-ringing")
+cs["state"] = "connected"; cs["start"] = time.time() - 42; cs["emoji"] = u"1a2b 3c4d"
+ca = callaudio_fake.CallAudio(); ca.v277 = 1; ca.running = 1
+app.call_audio = ca; app.audio_state = "connected"
+app.client.call_version = "2.7.7"
+snap("15-call-connected")
+class PV:
+    cam = 1; state = 3
+    def __init__(self): self.on = 1
+    def active(self): return self.on
+    def status_text(self): return u"Video on - front camera"
+    def frame(self): return None
+app.call_video = PV()
+ca.peer_video = 2
+snap("16-call-video-on")
+cs["state"] = "incoming"; cs["text"] = "Incoming Telegram call"; app.call_audio = None; app.call_video = None
+snap("17-call-incoming")
 json.dump(screens, open(os.environ["RT_OUT"] + "/screens.json", "w"))
 shutil.rmtree(TMP)

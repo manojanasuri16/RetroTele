@@ -23,6 +23,7 @@ class CallAudio:
         self.video_active = 0
         self.peer_video = -1
         self.peer_asked = 0
+        self.loss = 0
         CallAudio.instances.append(self)
 
     def start_relay(self, key, is_outgoing, connections, on_state, iap=0):

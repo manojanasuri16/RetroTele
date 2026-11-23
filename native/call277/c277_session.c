@@ -232,7 +232,7 @@ static u32 build_videoformats(u8 *o)
 
 /* ---------------------------------------------------------------- video */
 
-#define VIDEO_ASPECT 1222UL     /* 11:9 = QCIF */
+#define VIDEO_ASPECT 1333UL     /* 4:3 = QVGA (QCIF fallback is 11:9; the peer reads the SPS for the real size) */
 
 static void req_idr(c277_session *s, u32 now)
 {
@@ -372,7 +372,7 @@ static void video_tick(c277_session *s, u32 now)
                 c277_vtx_reset(&s->vtx);
                 s->sr_started = 0; s->idr_step = 0; s->idr_t0 = now ? now : 1;
                 s->vw_start = now; s->vw_au = s->vw_pk = s->vw_oct = s->vw_idr = s->vw_drop = 0;
-                if (s->cap_on) { cap_str(s, "t="); cap_dec(s, now); cap_str(s, " video send ON (RemoteMediaState video=2, aspect 1222)\n"); }
+                if (s->cap_on) { cap_str(s, "t="); cap_dec(s, now); cap_str(s, " video send ON (RemoteMediaState video=2, aspect 1333)\n"); }
             }
         } else if (!s->vid_want && s->vid_act) {
             u8 ms = c277_msg_media_state_build(1, 0);

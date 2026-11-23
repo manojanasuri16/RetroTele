@@ -456,25 +456,26 @@ assert screen_text().find(u"Audio failed") >= 0
 fa.helper_state("connected")
 # in-call controls
 t = screen_text()
-assert t.find(u"Mic: ON") >= 0 and t.find(u"Audio: Speaker") >= 0 and t.find(u"[1] Mic on") >= 0, t
+assert t.find(u"[1] Mic | On") >= 0 and t.find(u"[2] Sound | Speaker") >= 0 and t.find(u"[3] Call | End") >= 0, t
 mlabels = [m[0] for m in appuifw.app.menu]
-assert u"Mute microphone" in mlabels and u"Audio: Earpiece" in mlabels and u"Add person to call" in mlabels, mlabels
+assert u"Mute microphone" in mlabels and u"Sound output" in mlabels and u"Hang up" in mlabels, mlabels
+assert u"Add person to call" not in mlabels and len(mlabels) <= 5, mlabels
+sub = [m[1] for m in appuifw.app.menu if m[0] == u"Sound output"][0]
+assert [x[0] for x in sub] == [u"Speaker", u"Earpiece", u"Bluetooth / auto"], sub
 app.view.canvas.keys[ord("1")]()
 assert fa.sent[-1] == "M1" and app.call_muted()
 t = screen_text()
-assert t.find(u"Mic: MUTED") >= 0 and t.find(u"MUTED") >= 0, t
+assert t.find(u"[1] Mic | Muted") >= 0, t
 assert u"Unmute microphone" in [m[0] for m in appuifw.app.menu]
 app.view.canvas.keys[ord("1")]()
-assert fa.sent[-1] == "M0" and screen_text().find(u"Mic: ON") >= 0
+assert fa.sent[-1] == "M0" and screen_text().find(u"[1] Mic | On") >= 0
 app.view.canvas.keys[ord("2")]()
-assert fa.sent[-1] == "R2" and screen_text().find(u"Auto (Bluetooth)") >= 0
+assert fa.sent[-1] == "R2" and screen_text().find(u"[2] Sound | Auto") >= 0
 app.view.canvas.keys[ord("2")]()
-assert fa.sent[-1] == "R0" and screen_text().find(u"Audio: Earpiece") >= 0
+assert fa.sent[-1] == "R0" and screen_text().find(u"[2] Sound | Earpiece") >= 0
 app.view.canvas.keys[ord("2")]()
-assert fa.sent[-1] == "R1" and screen_text().find(u"Audio: Speaker") >= 0
-for m in appuifw.app.menu:
-    if m[0] == u"Audio: Earpiece":
-        m[1]()
+assert fa.sent[-1] == "R1" and screen_text().find(u"[2] Sound | Speaker") >= 0
+sub[1][1]()
 assert fa.sent[-1] == "R0"
 fa.helper_info(1, 0)
 # timer tick keeps going, then hang up with centre
@@ -498,7 +499,7 @@ app.close_call()
 app.telegram_call("u42"); app.net.run()
 req = state["req"]
 assert req["user_id"]["user_id"] == 42 and req["protocol"]["max_layer"] == 92
-assert app.screen == "call" and screen_text().find(u"Calling...") >= 0
+assert app.screen == "call" and screen_text().find(u"Connecting...") >= 0
 upd({"_": "phoneCallWaiting", "id": 777, "access_hash": 9, "date": 0, "admin_id": 7,
      "participant_id": 42, "protocol": {"_": "phoneCallProtocol"}, "receive_date": 5})
 assert screen_text().find(u"Ringing...") >= 0
@@ -913,7 +914,7 @@ class FakeCV:
     made = []
     def __init__(self, audio, on_change, log):
         self.audio = audio; self.on_change = on_change; self.live = 0; self.cam = 1; self.stopped = 0
-        self.sw = 0; self.txt = u"video on, camera: front"
+        self.sw = 0; self.txt = u"Video on - front camera"
         FakeCV.made.append(self)
     def start(self, cam):
         self.live = 1; self.audio.set_video(1); return 1
@@ -942,18 +943,22 @@ app.view = retrotele.tgui.CallView(app)
 app.view.canvas = saved_view.canvas
 app.call_menu()
 labels = [m[0] for m in appuifw.app.menu]
-assert u"Video: turn on" in labels and u"Switch camera (front/rear)" not in labels, labels
+assert u"Turn video on" in labels and u"Switch camera" not in labels, labels
 _t0 = screen_text()
-assert u"Video: off (4 = on)" in _t0, _t0
+assert u"[4] Video" in _t0 and u"Off" in _t0, _t0
 app.view.key("4")
 cvf = FakeCV.made[-1]
 assert cvf.live and fv.want_video and fv.sent[-1] == "V1", fv.sent
 labels = [m[0] for m in appuifw.app.menu]
-assert u"Video: turn off" in labels and u"Switch camera (front/rear)" in labels, labels
+assert u"Turn video off" in labels and u"Switch camera" in labels, labels
 t = screen_text()
-assert t.find(u"video on, camera: front") >= 0 and t.find(u"[4 off, 6 cam]") >= 0, t
+assert t.find(u"Video on -") >= 0 and t.find(u"Camera starting") >= 0 and t.find(u"[6] Camera") >= 0 and t.find(u"Left: Options") >= 0, t
 app.view.key("6")
 assert cvf.sw == 1
+fv.peer_video = 2
+t = screen_text()
+assert t.find(u"video is on (cannot be shown on this phone)") >= 0 or t.find(u"cannot be shown") >= 0, t
+fv.peer_video = -1
 app.stop_call_audio()                 # hang up / app exit: video stops before the audio helper
 assert cvf.stopped >= 1 and not fv.want_video and app.call_video is None
 # voice-only call: no video entries when the call is not 2.7.7
@@ -962,7 +967,7 @@ cs277["state"] = "connected"
 app.call_ready(cs277)
 app.call_menu()
 labels = [m[0] for m in appuifw.app.menu]
-assert not [l for l in labels if l.startswith(u"Video") or l.startswith(u"Switch")], labels
+assert not [l for l in labels if l.find(u"video") >= 0 or l.startswith(u"Switch")], labels
 t = screen_text()
 assert t.find(u"Video") < 0, t
 del sys.modules["callvideo"]

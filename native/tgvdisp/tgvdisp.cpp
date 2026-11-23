@@ -7,7 +7,9 @@
  *   info() -> tuple of header words (see TGV_W_* in tgvshared.h, in that order) or None
  *   render(image, which, flags=0, last=-1) -> frame counter of the chosen buffer
  *       which: 0 decoded picture, 1 camera preview
- *       flags: 1 swap U and V, 2 swap the byte order of 4:2:2 interleaved data
+ *       flags: 1 swap U and V, 2 swap the byte order of 4:2:2 interleaved data,
+ *              4 mirror horizontally (front camera self-view); the picture is also decimated
+ *              by 2 (every other pixel and row) when the image is at most half its size
  *       last : if the counter equals it nothing is drawn (frame unchanged)
  *       a negative result is an error: -1 not attached/no header, -2 bad image,
  *       -3 no picture yet or unsupported layout, -4 picture changed while reading
@@ -54,14 +56,16 @@ struct TSrc
 
 // Converts one source row into aDst (mode 0: 565, 1: 32 bit, 2: 24 bit) for aCount pixels, each repeated aRep times.
 template <int MODE>
-static void Row(const TSrc& s, TInt y, TInt aCount, TInt aRep, TUint8* aDst)
+static void Row(const TSrc& s, TInt y, TInt aCount, TInt aRep, TUint8* aDst, TInt aStep, TInt aMirrorW)
 {
     const TUint8* yp = s.iY + y * s.iYStride;
     const TUint8* up = s.iU + (y >> s.iCShift) * s.iCStride;
     const TUint8* vp = s.iV + (y >> s.iCShift) * s.iCStride;
     const TTab* t = gTab;
     const TUint8* clip = t->iClip + 384;
-    for (TInt x = 0; x < aCount; x++) {
+    for (TInt xo = 0; xo < aCount; xo++) {
+        TInt x = xo * aStep;                       // source column (decimated)
+        if (aMirrorW > 0) x = aMirrorW - 1 - x;    // horizontal flip within the drawn width
         TInt yy = t->iY[yp[x * s.iYStep]];
         TInt c = (x >> 1) * s.iCStep;
         TInt u = up[c], v = vp[c];
@@ -208,18 +212,22 @@ static PyObject* tv_render(PyObject*, PyObject* args)
     else if (dm == EColor16M) { mode = 2; bpp = 3; }
     else return Py_BuildValue("i", -2);
     TInt scale = (sz.iWidth >= 2 * w && sz.iHeight >= 2 * h) ? 2 : 1;
+    TInt step = 1;
+    if (scale == 1 && sz.iWidth * 2 <= w && sz.iHeight * 2 <= h) step = 2;
     TInt cw = w, ch = h;
+    if (step == 2) { cw = w / 2; ch = h / 2; }
     if (cw * scale > sz.iWidth) cw = sz.iWidth / scale;
     if (ch * scale > sz.iHeight) ch = sz.iHeight / scale;
+    TInt mirrorW = (flags & 4) ? cw * step : 0;
     TInt stride = CFbsBitmap::ScanLineLength(sz.iWidth, dm);
     bm->LockHeap();
     TUint8* dst = (TUint8*)bm->DataAddress();
     if (dst) {
         for (TInt y = 0; y < ch; y++) {
             TUint8* row = dst + y * scale * stride;
-            if (mode == 0) Row<0>(s, y, cw, scale, row);
-            else if (mode == 1) Row<1>(s, y, cw, scale, row);
-            else Row<2>(s, y, cw, scale, row);
+            if (mode == 0) Row<0>(s, y * step, cw, scale, row, step, mirrorW);
+            else if (mode == 1) Row<1>(s, y * step, cw, scale, row, step, mirrorW);
+            else Row<2>(s, y * step, cw, scale, row, step, mirrorW);
             if (scale == 2) Mem::Copy(row + stride, row, cw * 2 * bpp);
         }
     }

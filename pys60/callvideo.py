@@ -20,10 +20,19 @@ HOST = "127.0.0.1"
 PORT_CMD = 47012
 PORT_STATUS = 47011
 
-VIDEO_W = 176
-VIDEO_H = 144
-VIDEO_FPS = 15
-VIDEO_KBPS = 60
+# Quality ladder (width, height, fps, kbit/s). The software encoder (uid 0x20001c13) manages
+# about 10-13 fps at 320x240 on the N79 (about half the CPU), so level 0 steps down when it
+# cannot keep up or the peer reports loss. 176x144 is the old QCIF fallback.
+LEVELS = [(320, 240, 15, 200), (176, 144, 15, 100), (176, 144, 15, 56)]
+LEVEL_NAMES = [u"", u" (small picture)", u" (small, low rate)"]
+VIDEO_W = LEVELS[0][0]
+VIDEO_H = LEVELS[0][1]
+VIDEO_FPS = LEVELS[0][2]
+VIDEO_KBPS = LEVELS[0][3]
+WARMUP_S = 8            # seconds after the pipeline runs before judging it
+BAD_LIMIT = 6           # bad seconds in a row that trigger a step down
+LOSS_BAD = 40           # RTCP loss fraction (of 256) counted as a bad second (about 16 percent)
+SLOW_FPS10 = 85         # encoder output below 8.5 fps at the top level counts as a bad second
 # Degrees clockwise baked into the pixels before encoding. The 2.7.7 protocol (V0) has no
 # rotation extension, so a portrait picture would need rotating by us. Only 0 (landscape,
 # the sensor's natural QCIF 176x144) is implemented in tgvideo.exe; others are logged there.
@@ -33,7 +42,7 @@ CAM_REAR = 0
 CAM_FRONT = 1
 CAM_NAMES = [u"rear", u"front"]
 
-TICK = 0.25
+TICK = 0.2
 
 S_IDLE = 0
 S_STARTING = 1      # exe launched, waiting until it reports "idle"
@@ -46,6 +55,9 @@ I_STATE = 2
 I_DEC_COUNT = 4
 I_DEC_W = 5
 I_DEC_H = 6
+I_PREV_COUNT = 11
+I_PREV_W = 12
+I_PREV_H = 13
 
 
 def _raw(sock):
@@ -76,6 +88,20 @@ def _dispatch(res):
         cv._arm()
         if data:
             cv.on_status(data)
+
+
+def parse_stats(line):
+    """'T st cam w h capfps10 encfps10 decfps10 lat bps err drops enc dec' -> (encfps10, bps,
+    drops) or None."""
+    if line[:2] != "T ":
+        return None
+    parts = line.split()
+    if len(parts) < 13:
+        return None
+    try:
+        return (int(parts[6]), int(parts[9]), int(parts[11]))
+    except:
+        return None
 
 
 def parse_status(line):
@@ -119,6 +145,13 @@ class CallVideo:
         self.errors = 0
         self.stopping = 0
         self.rx_lines = 0
+        self.level = 0
+        self.bad = 0
+        self.good_s = 0
+        self.t_level = 0
+        self.last_drops = 0
+        self.steps = 0
+        self.last_flags = -1
 
     # ------------------------------------------------------------ helpers
     def log(self, msg):
@@ -149,9 +182,11 @@ class CallVideo:
         cam = CAM_NAMES[self.cam]
         if self.state == S_RUNNING:
             if self.t_switch and self.ticks - self.t_switch < 12:
-                return u"video on, switching camera..."
-            return u"video on, camera: " + cam
-        return u"video starting (camera: " + cam + u")..."
+                return u"Video on - switching camera..."
+            if self.t_level and self.ticks - self.t_level < 20:
+                return u"Video on - adjusting quality..."
+            return u"Video on - " + cam + u" camera" + LEVEL_NAMES[self.level]
+        return u"Starting video (" + cam + u" camera)..."
 
     def _open(self):
         s = _SHARED[0]
@@ -190,6 +225,62 @@ class CallVideo:
             self.log("helper status #%d: %s" % (self.rx_lines, data[:90]))
         if st is not None:
             self.hstate = st
+            if st == 1 and self.state == S_RUNNING:
+                sts = parse_stats(data)
+                if sts is not None:
+                    self.judge(sts)
+
+    def peer_loss(self):
+        """RTCP loss fraction (0..255) the peer last reported for our video."""
+        a = self.audio
+        try:
+            return int(getattr(a, "loss", 0))
+        except:
+            return 0
+
+    def judge(self, sts):
+        """Once a second while running: step down the quality ladder when the encoder cannot
+        keep up (drops, low fps) or the peer reports loss. Never steps up on its own."""
+        if self.level >= len(LEVELS) - 1:
+            return
+        if self.t_switch and self.ticks - self.t_switch < 60:
+            return
+        if self.t_level and self.ticks - self.t_level < WARMUP_S * 5:
+            self.last_drops = sts[2]
+            return
+        if self.t_run and self.ticks - self.t_run < WARMUP_S * 5:
+            self.last_drops = sts[2]
+            return
+        fps10, bps, drops = sts
+        newdrops = drops - self.last_drops
+        self.last_drops = drops
+        bad = 0
+        if self.level == 0 and fps10 < SLOW_FPS10:
+            bad = 1
+        if newdrops >= 3:
+            bad = 1
+        if self.peer_loss() >= LOSS_BAD:
+            bad = 1
+        if bad:
+            self.bad = self.bad + 1
+            if self.bad >= BAD_LIMIT:
+                self.step_down(fps10, newdrops)
+        elif self.bad > 0:
+            self.bad = self.bad - 1
+
+    def step_down(self, fps10, newdrops):
+        self.level = self.level + 1
+        self.steps = self.steps + 1
+        self.bad = 0
+        self.t_level = self.ticks
+        self.log("quality down -> level %d %s (fps10 %d, drops +%d, peer loss %d)" % (
+            self.level, str(LEVELS[self.level]), fps10, newdrops, self.peer_loss()))
+        try:
+            self.audio.loss = 0
+        except:
+            pass
+        self.send(self.params())
+        self.changed()
 
     def set_audio_video(self, flag):
         a = self.audio
@@ -214,6 +305,12 @@ class CallVideo:
         self.last_dec = -1
         self.stopping = 0
         self.rx_lines = 0
+        self.level = 0
+        self.bad = 0
+        self.good_s = 0
+        self.t_level = 0
+        self.last_drops = 0
+        self.steps = 0
         try:
             import tgvdisp
             self.tgvdisp = tgvdisp
@@ -306,8 +403,8 @@ class CallVideo:
 
     # ------------------------------------------------------------ progress
     def params(self):
-        return "S %d %d %d %d %d %d" % (VIDEO_W, VIDEO_H, VIDEO_FPS, VIDEO_KBPS, self.cam,
-                                        VIDEO_ROTATION_DEG)
+        w, h, fps, kbps = LEVELS[self.level]
+        return "S %d %d %d %d %d %d" % (w, h, fps, kbps, self.cam, VIDEO_ROTATION_DEG)
 
     def tick(self):
         if self.state == S_IDLE or self.state == S_FAILED or self.stopping:
@@ -324,6 +421,7 @@ class CallVideo:
         hs = self.hstate
         if self.state == S_STARTING:
             if hs == 2:
+                self.send("L 0")             # no loopback decoder: the self-view uses the camera frames
                 self.send(self.params())
                 self.t_s = self.ticks
                 self.state = S_WAIT_RUN
@@ -356,7 +454,9 @@ class CallVideo:
 
     # ------------------------------------------------------------ self-view
     def update_frame(self):
-        """Pull the newest loopback-decoded picture (about 4 per second is plenty)."""
+        """Pull the newest camera picture (the helper keeps a copy of every frame in the shared
+        chunk; the 0x102073ef loopback decoder is QCIF-only so it is not used). The picture is
+        decimated by 2 for 320x240 and mirrored for the front camera."""
         td = self.tgvdisp
         if td is None:
             return
@@ -372,12 +472,15 @@ class CallVideo:
             inf = td.info()
         except:
             return
-        if inf is None or inf[I_DEC_COUNT] <= 0:
+        if inf is None or inf[I_PREV_COUNT] <= 0:
             return
-        w = inf[I_DEC_W]
-        h = inf[I_DEC_H]
+        w = inf[I_PREV_W]
+        h = inf[I_PREV_H]
         if w <= 0 or h <= 0:
             return
+        if w >= 300:
+            w = w / 2
+            h = h / 2
         if self.img is None or self.img_size != (w, h):
             try:
                 import graphics
@@ -387,8 +490,14 @@ class CallVideo:
             except:
                 self.img = None
                 return
+        flags = 0
+        if self.cam == CAM_FRONT:
+            flags = 4
+        if flags != self.last_flags:
+            self.last_flags = flags
+            self.last_dec = -1
         try:
-            rc = td.render(self.img, 0, 0, self.last_dec)
+            rc = td.render(self.img, 1, flags, self.last_dec)
         except:
             return
         if rc >= 0 and rc != self.last_dec:

@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.14.1"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.14.2"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -386,6 +386,7 @@ class App:
         self.call_timer = 0
         self.call_audio = None
         self.call_video = None
+        self.call_video_sig = None
         self.pending_sig = []
         self.audio_state = ""
         self.call_return = "chats"
@@ -1960,9 +1961,6 @@ class App:
             return
         self.call_set_route((ca.want_route + 1) % 3)
 
-    def call_add_person(self):
-        appuifw.note(u"Group calls need Telegram's newer protocol, which this phone can't run. Start a separate call or a group chat instead.", "info")
-
     # ---------------------------------------------------------- send-only video (2.7.7 calls)
 
     def call_video_ok(self):
@@ -1978,16 +1976,32 @@ class App:
         return cv is not None and cv.active()
 
     def call_video_text(self):
-        """Status line for the call screen (u"" when video is not in use)."""
+        """Our video state for the call screen: u"Video on - front camera", the failure text,
+        or u"" when video is not in use."""
         cv = self.call_video
-        ca = self.call_audio
-        t = u""
         if cv is not None:
-            t = cv.status_text()
-        if not t and ca is not None:
-            if getattr(ca, "peer_asked", 0):
-                t = u"Peer asks for video (press 4)"
-        return t
+            return cv.status_text()
+        return u""
+
+    def call_video_failed(self):
+        cv = self.call_video
+        return cv is not None and not cv.active() and cv.status_text() != u""
+
+    def call_video_cam(self):
+        """0 rear, 1 front (the camera video would use / uses)."""
+        cv = self.call_video
+        if cv is not None:
+            return cv.cam
+        return 1
+
+    def call_peer_asked(self):
+        ca = self.call_audio
+        return ca is not None and getattr(ca, "peer_asked", 0) and not self.call_video_on()
+
+    def call_peer_video(self):
+        """1 when the peer's own video is on (we cannot show it on this phone)."""
+        ca = self.call_audio
+        return ca is not None and getattr(ca, "peer_video", -1) == 2
 
     def call_toggle_video(self):
         if self.call_video_on():
@@ -2015,10 +2029,16 @@ class App:
 
     def call_video_changed(self):
         if self.screen == "call":
-            try:
-                self.call_menu()
-            except:
-                pass
+            cv = self.call_video
+            sig = None
+            if cv is not None:
+                sig = (cv.state, cv.cam, cv.status_text())
+            if sig != self.call_video_sig:
+                self.call_video_sig = sig
+                try:
+                    self.call_menu()
+                except:
+                    pass
             self.redraw()
 
     def stop_call_video(self):
@@ -2100,16 +2120,16 @@ class App:
                     m.append((u"Unmute microphone", self.call_toggle_mute))
                 else:
                     m.append((u"Mute microphone", self.call_toggle_mute))
-                m.append((u"Audio: Speaker", lambda self=self: self.call_set_route(1)))
-                m.append((u"Audio: Earpiece", lambda self=self: self.call_set_route(0)))
-                m.append((u"Audio: Bluetooth/auto", lambda self=self: self.call_set_route(2)))
+                m.append((u"Sound output", (
+                    (u"Speaker", lambda self=self: self.call_set_route(1)),
+                    (u"Earpiece", lambda self=self: self.call_set_route(0)),
+                    (u"Bluetooth / auto", lambda self=self: self.call_set_route(2)))))
                 if self.call_video_ok():
                     if self.call_video_on():
-                        m.append((u"Video: turn off", self.call_toggle_video))
-                        m.append((u"Switch camera (front/rear)", self.call_switch_camera))
+                        m.append((u"Turn video off", self.call_toggle_video))
+                        m.append((u"Switch camera", self.call_switch_camera))
                     else:
-                        m.append((u"Video: turn on", self.call_toggle_video))
-            m.append((u"Add person to call", self.call_add_person))
+                        m.append((u"Turn video on", self.call_toggle_video))
             m.append((u"Hang up", self.call_hangup))
             appuifw.app.menu = m
             appuifw.app.exit_key_handler = self.call_hangup

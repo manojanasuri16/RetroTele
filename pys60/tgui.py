@@ -109,7 +109,6 @@ def emoji_index():
         idx = {}
         try:
             f = open(ASSET_DIR[0] + "emoji.txt", "rb")
-            n = 0
             for line in f.read().split("\n"):
                 if line.strip():
                     idx[int(line.strip(), 16)] = n
@@ -2028,9 +2027,18 @@ CALL_TOP = 0x1E3A5F
 
 
 class CallView(CanvasView):
-    """Call screen: avatar, name, status. Centre = accept / hang up,
-    right softkey (exit handler) = decline / hang up."""
-    PHOTO = 80
+    """Call screen (240x~290). Top: contact circle, name, state and timer. In the middle the
+    notes (video state, peer video that cannot be shown). Below, big buttons laid out like the
+    phone keypad:
+        [1 Mic] [2 Sound] [3 End]
+        [4 Video]         [6 Camera]
+    While our video is on, the picture of our camera (mirrored for the front camera) sits in
+    the top right corner. Softkeys: left = Options menu, right = Hang up (also 3 and OK)."""
+    BTN = 0x2A4A73
+    BTN_DIM = 0x20344D
+    BTN_ON = 0x2E9E48
+    RED = 0xD32F2F
+    AMBER = 0xFFC46B
 
     def __init__(self, app):
         CanvasView.__init__(self, app)
@@ -2054,25 +2062,6 @@ class CallView(CanvasView):
         elif k == "6" and self.live() and self.app.call_video_on():
             self.app.call_switch_camera()
 
-    def paint_selfview(self, g, w, h):
-        """Small picture of our own camera (the loopback-decoded frames) in the top right."""
-        cv = self.app.call_video
-        if cv is None:
-            return
-        f = cv.frame()
-        if f is None:
-            return
-        img, iw, ih = f
-        tw = 72
-        th = tw * ih / iw
-        x1 = w - tw - 6
-        y1 = 6
-        try:
-            g.blit(img, target=(x1, y1, x1 + tw, y1 + th), scale=1)
-            g.rectangle((x1 - 1, y1 - 1, x1 + tw + 1, y1 + th + 1), outline=WHITE)
-        except:
-            pass
-
     def elapsed(self):
         cs = self.app.client.cs
         if cs is None or not cs["start"]:
@@ -2082,121 +2071,217 @@ class CallView(CanvasView):
             n = 0
         return u"%02d:%02d" % (n / 60, n % 60)
 
+    def state_text(self, cs):
+        st = cs["state"]
+        if st == "incoming":
+            return u"Incoming Telegram call"
+        if st == "ringing":
+            return u"Ringing..."
+        if st == "calling" or st == "keys":
+            return u"Connecting..."
+        if st == "connected":
+            a = self.app.audio_state
+            if a == "connected":
+                return u"Connected " + self.elapsed()
+            if a == "reconnecting":
+                return u"Reconnecting..."
+            if a == "failed" or a == "ended":
+                return u"Audio failed"
+            return u"Connecting audio..."
+        return to_u(cs["text"])
+
+    def button(self, g, x1, y1, x2, y2, label, main, col, dim=0):
+        """Two lines: small function label with its key, then the state in the middle font."""
+        rrect(g, x1, y1, x2, y2, 10, col)
+        bw = x2 - x1 - 6
+        lab = fit(g, label, "small", bw)
+        fg = HEADER_SUB
+        if dim:
+            fg = GREY_LIGHT
+        g.text((x1 + (x2 - x1 - width(g, lab, "small")) / 2, y1 + 15), lab, fill=fg,
+               font=font("small"))
+        m = fit(g, main, "name", bw)
+        fg = WHITE
+        if dim:
+            fg = GREY_LIGHT
+        g.text((x1 + (x2 - x1 - width(g, m, "name")) / 2, y2 - 9), m, fill=fg,
+               font=font("name"))
+
+    def paint_selfview(self, g, x1, y1, tw, th):
+        """Our camera picture (decimated by the helper, mirrored for the front camera)."""
+        cv = self.app.call_video
+        f = None
+        if cv is not None:
+            f = cv.frame()
+        g.rectangle((x1 - 1, y1 - 1, x1 + tw + 1, y1 + th + 1), outline=WHITE)
+        if f is None:
+            g.rectangle((x1, y1, x1 + tw, y1 + th), fill=0x0F1A2A)
+            l = u"Camera starting..."
+            if cv is not None and not cv.active():
+                l = u"No picture"
+            l = fit(g, l, "small", tw - 6)
+            g.text((x1 + (tw - width(g, l, "small")) / 2, y1 + th / 2 + 4), l,
+                   fill=GREY_LIGHT, font=font("small"))
+            return
+        img, iw, ih = f
+        try:
+            g.blit(img, target=(x1, y1, x1 + tw, y1 + th), scale=1)
+        except:
+            pass
+
+    def notes(self, g, key, live):
+        """Short lines about video that go under the state (list of unicode strings)."""
+        app = self.app
+        out = []
+        if not live:
+            return out
+        if app.call_video_failed():
+            out.append(app.call_video_text())
+        if app.call_peer_asked():
+            out.append(u"%s asks you to turn video on (press 4)" % to_u(app.client.short_name(key)))
+        if app.call_peer_video():
+            out.append(u"%s's video is on (cannot be shown on this phone)" %
+                       to_u(app.client.short_name(key)))
+        return out
+
     def paint(self, g, w, h):
         app = self.app
         cl = app.client
         cs = cl.cs
         g.clear(CALL_BG)
-        g.rectangle((0, 0, w, h / 2), fill=CALL_TOP)
         if cs is None:
             return
-        key = cs["key"]
-        PH = self.PHOTO
-        x = (w - PH) / 2
-        y = 36
-        g.ellipse((x - 4, y - 4, x + PH + 4, y + PH + 4), fill=BLUE)
-        app.avatars.draw(g, key, cl.peer_name(key), cl.peer(key).get("photo"),
-                         x, y, PH, None)
-        name = fit(g, cl.peer_name(key), "title", w - 20)
-        y = y + PH + 34
-        txt(g, (w - width(g, name, "title")) / 2, y, name, WHITE, "title", "b")
         st = cs["state"]
-        lines = [to_u(cs["text"])]
-        if st == "connected":
-            a = app.audio_state
-            if a == "connected":
-                lines = [u"Connected " + self.elapsed()]
-            elif a == "reconnecting":
-                lines = [u"Reconnecting..."]
-            elif a == "failed" or a == "ended":
-                lines = [u"Audio failed"]
-            else:
-                lines = [u"Connecting audio..."]
-        for l in lines:
-            y = y + 26
-            l = fit(g, l, "text", w - 16)
-            g.text(((w - width(g, l, "text")) / 2, y), l, fill=HEADER_SUB,
-                   font=font("text"))
-        if st == "connected" and cs["emoji"]:
-            l = u"Key: " + to_u(cs["emoji"])
-            y = y + 26
-            g.text(((w - width(g, l, "small")) / 2, y), l, fill=GREY_LIGHT,
-                   font=font("small"))
-        if self.live():
+        key = cs["key"]
+        live = self.live()
+        vid = live and app.call_video_on()
+        name = cl.peer_name(key)
+        status = self.state_text(cs)
+        # ---- buttons first (they decide how much room the top part has)
+        row2 = 0
+        top = h - 22
+        if live:
+            row2 = app.call_video_ok()
+            if row2:
+                top = top - 40
+            top = top - 46 - (row2 and 6)
+        elif st != "ended":
+            top = top - 52
+        # ---- identity
+        g.rectangle((0, 0, w, top - 6), fill=CALL_TOP)
+        y = 0
+        if vid:
+            PH = 44
+            g.ellipse((10 - 3, 8 - 3, 10 + PH + 3, 8 + PH + 3), fill=BLUE)
+            app.avatars.draw(g, key, name, cl.peer(key).get("photo"), 10, 8, PH, None)
+            nm = fit(g, name, "title", w - 70)
+            txt(g, 62, 26, nm, WHITE, "title", "b")
+            sl = fit(g, status, "text", w - 70)
+            g.text((62, 47), sl, fill=HEADER_SUB, font=font("text"))
+            y = 62
+        else:
+            PH = 64
+            x = (w - PH) / 2
+            y0 = 10
+            if top < 230:
+                PH = 52
+                x = (w - PH) / 2
+            g.ellipse((x - 4, y0 - 4, x + PH + 4, y0 + PH + 4), fill=BLUE)
+            app.avatars.draw(g, key, name, cl.peer(key).get("photo"), x, y0, PH, None)
+            y = y0 + PH + 28
+            nm = fit(g, name, "title", w - 20)
+            txt(g, (w - width(g, nm, "title")) / 2, y, nm, WHITE, "title", "b")
+            y = y + 24
+            sl = fit(g, status, "text", w - 16)
+            g.text(((w - width(g, sl, "text")) / 2, y), sl, fill=HEADER_SUB, font=font("text"))
+            y = y + 6
+        notes = self.notes(g, key, live)
+        if vid:
+            # our picture top right, notes and video state to its left
+            tw = 112
+            th = 84
+            self.paint_selfview(g, w - tw - 10, y, tw, th)
+            cw = w - tw - 30
+            ly = y + 12
+            vt = app.call_video_text()
+            lines = []
+            if vt:
+                lines = wrap(g, vt, "small", cw, 3)
+            for n in notes:
+                if n != vt:
+                    lines = lines + wrap(g, n, "small", cw, 4)
+            for l in lines[:6]:
+                g.text((10, ly), l, fill=GREY_LIGHT, font=font("small"))
+                ly = ly + 14
+        else:
+            if st == "connected" and cs["emoji"] and not notes:
+                l = u"Key: " + to_u(cs["emoji"])
+                y = y + 14
+                g.text(((w - width(g, l, "small")) / 2, y), l, fill=GREY_LIGHT, font=font("small"))
+            for note in notes:
+                for l in wrap(g, note, "small", w - 20, 2):
+                    if y + 14 > top - 8:
+                        break
+                    y = y + 14
+                    g.text(((w - width(g, l, "small")) / 2, y), l, fill=self.note_color(app, note),
+                           font=font("small"))
+        # ---- buttons
+        bt = top
+        if live:
+            bw = (w - 20 - 12) / 3
             muted = app.call_muted()
             r = app.call_route()
             if muted:
-                ml = u"Mic: MUTED"
+                mc = self.RED
+                ml = u"Muted"
             else:
-                ml = u"Mic: ON"
+                mc = self.BTN
+                ml = u"On"
             if r == 0:
-                rl = u"Audio: Earpiece"
-                rb = u"Earpiece"
+                rl = u"Earpiece"
             elif r == 2:
-                rl = u"Audio: Auto (Bluetooth)"
-                rb = u"Auto/BT"
+                rl = u"Auto"
             else:
-                rl = u"Audio: Speaker"
-                rb = u"Speaker"
-            vcap = app.call_video_ok()
-            vl = u""
-            if vcap:
-                vl = app.call_video_text()
-                if not vl:
-                    vl = u"Video: off (4 = on)"
-                elif app.call_video_on():
-                    vl = vl + u" [4 off, 6 cam]"
-            lines2 = [ml, rl]
-            if vl:
-                lines2.append(vl)
-            for l in lines2:
-                l = fit(g, l, "small", w - 12)
-                y = y + 22
-                g.text(((w - width(g, l, "small")) / 2, y), l, fill=GREY_LIGHT,
-                       font=font("small"))
-            if muted:
-                bl = u"MUTED"
-                bw = width(g, bl, "small") + 16
-                rrect(g, (w - bw) / 2, y + 6, (w + bw) / 2, y + 26, 8, 0xD32F2F)
-                g.text(((w - width(g, bl, "small")) / 2, y + 21), bl, fill=WHITE,
-                       font=font("small"))
-            by = h - 78
-            bw = (w - 30) / 2
-            if muted:
-                b1 = u"[1] Mic off"
-            else:
-                b1 = u"[1] Mic on"
-            b2 = u"[2] " + rb
-            for i in [0, 1]:
-                x1 = 10 + i * (bw + 10)
-                if i == 0:
-                    lab = b1
-                    col = BLUE_DARK
-                    if muted:
-                        col = 0xD32F2F
+                rl = u"Speaker"
+            self.button(g, 10, bt, 10 + bw, bt + 46, u"[1] Mic", ml, mc)
+            self.button(g, 16 + bw, bt, 16 + 2 * bw, bt + 46, u"[2] Sound", rl, self.BTN)
+            self.button(g, 22 + 2 * bw, bt, w - 10, bt + 46, u"[3] Call", u"End", self.RED)
+            if row2:
+                y2 = bt + 52
+                hw = (w - 26) / 2
+                if vid:
+                    self.button(g, 10, y2, 10 + hw, y2 + 40, u"[4] Video", u"On", self.BTN_ON)
+                    cam = u"Front"
+                    if app.call_video_cam() == 0:
+                        cam = u"Rear"
+                    self.button(g, w - 10 - hw, y2, w - 10, y2 + 40, u"[6] Camera", cam, self.BTN)
                 else:
-                    lab = b2
-                    col = BLUE_DARK
-                rrect(g, x1, by, x1 + bw, by + 28, 10, col)
-                lab = fit(g, lab, "small", bw - 8)
-                g.text((x1 + (bw - width(g, lab, "small")) / 2, by + 19), lab,
-                       fill=WHITE, font=font("small"))
-            self.paint_selfview(g, w, h)
+                    self.button(g, 10, y2, 10 + hw, y2 + 40, u"[4] Video", u"Off", self.BTN)
+                    self.button(g, w - 10 - hw, y2, w - 10, y2 + 40, u"[6] Camera", u"-",
+                                self.BTN_DIM, 1)
+        elif st == "incoming":
+            hw = (w - 26) / 2
+            self.button(g, 10, bt, 10 + hw, bt + 46, u"[OK] ", u"Accept", self.BTN_ON)
+            self.button(g, w - 10 - hw, bt, w - 10, bt + 46, u"[Right key]", u"Decline", self.RED)
+        elif st != "ended":
+            self.button(g, 10, bt, w - 10, bt + 46, u"[OK] or right key", u"Hang up", self.RED)
+        # ---- bottom line: what the softkeys do
         if app.busy:
-            b = fit(g, app.busy, "small", w - 16)
-            g.text(((w - width(g, b, "small")) / 2, h - 36), b, fill=GREY_LIGHT,
-                   font=font("small"))
-        if st == "incoming":
-            hint = u"OK: Accept    Back: Decline"
+            hint = app.busy
+        elif st == "incoming":
+            hint = u"Left: Options     Right: Decline"
         elif st == "ended":
             hint = u"OK: Close"
-        elif self.live():
-            hint = u"3/OK/Back: Hang up"
         else:
-            hint = u"OK or Back: Hang up"
+            hint = u"Left: Options     Right: Hang up"
         hint = fit(g, hint, "small", w - 10)
-        g.text(((w - width(g, hint, "small")) / 2, h - 12), hint, fill=GREY_LIGHT,
+        g.text(((w - width(g, hint, "small")) / 2, h - 6), hint, fill=GREY_LIGHT,
                font=font("small"))
+
+    def note_color(self, app, note):
+        if app.call_video_failed() and note == app.call_video_text():
+            return self.AMBER
+        return GREY_LIGHT
 
 
 # ---------------------------------------------------------------- welcome

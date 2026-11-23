@@ -1327,6 +1327,8 @@ public:
                           iKeyReqs, (TInt)iS->peer_vid, (TInt)iS->n_peer_vrtp,
                           iS->rr_have ? (TInt)iS->rr_fraction : 0, iS->rr_have ? (TInt)iS->rr_lost : 0);
                 Write(vl);
+                // peer's RTCP receiver report about our video: loss fraction (0..255), for the adaptive bitrate
+                if (c277_session_video_active(iS) && iS->rr_have) SendInfo('L', (TInt)iS->rr_fraction);
             }
             if (iNetOk && iStatusName.Length()) SendStatus(iStatusName);
             if (iNetOk) SendStatus(_L8("ready"));
