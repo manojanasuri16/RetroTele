@@ -15,6 +15,17 @@
  *   ep=<ipv4>,<port>,<32 hex chars peer_tag>      (up to 4 lines)
  * Python gets "S connecting|connected|reconnecting|failed|ended" datagrams on
  * 127.0.0.1:47001; a lone 'Q' to 127.0.0.1:47002 ends the program.
+ *
+ * VIDEO SEND (2.7.7 only, docs/CALL-VIDEO-SPEC.md): Python sends "V1"/"V0" (video on/off) to
+ * 47002. tgvideo.exe (camera + H.264 encoder, other process, needs MultimediaDD) sends each
+ * encoder unit as one UDP datagram 'V'+Annex-B to 127.0.0.1:47014. UDP on localhost was chosen
+ * over a shared RChunk: units arrive as events in this active scheduler (no polling timer,
+ * no seqlock, no extra thread), a unit is at most ~10 KB at 15 fps / 60 kbit/s (<= 40 KB/s),
+ * and the rest of the helper chain (commands, status) already uses localhost UDP. All
+ * per-packet work (RFC 6184 packetizing, RTP, RTCP SR, AES-CTR) stays native in c277_video.c /
+ * c277_session.c. We send 'K' (IDR request) to tgvideo's 127.0.0.1:47012 on PLI/FIR and on
+ * the early schedule. Info datagrams to Python: "P n" peer video state (0 off 1 paused
+ * 2 active), "X n" peer asked for video n times, "A 0|1" our video announced active.
  */
 #include <e32base.h>
 #include <e32std.h>
@@ -43,7 +54,7 @@ const TInt KPrefill = 6;       /* 120 ms: the RetroTele bridge delivers in burst
 const TInt KPortOut = 47001;
 const TInt KPortIn = 47002;
 const TInt KMaxEp = 4;
-const TInt KSends = 16;
+const TInt KSends = 32;       /* an IDR is a burst of ~8 packets: keep slots free for audio */
 const TInt KJbSlots = 12;
 const TInt KJbPkt = 320;
 const TInt KRelayFrame = 480;   /* 60 ms @ 8 kHz */
@@ -52,6 +63,9 @@ const TInt KMaxConn = 8;
 const TInt KDnRing = 4800;      /* v277 downlink PCM ring, samples (600 ms) */
 const TInt KDnPrefill = 960;    /* 120 ms */
 const TInt KOpusMax = 1500;
+const TInt KPortVideoIn = 47014;    /* tgvideo.exe -> here: 'V' + one Annex-B encoder unit */
+const TInt KPortVideoCmd = 47012;   /* tgvideo.exe command port: 'K' = IDR, 'Q' = quit */
+const TInt KVideoMax = 16400;       /* largest unit datagram (c277 C277_VAU_MAX + 'V') */
 
 static TInt NowUs()
 {
@@ -148,6 +162,30 @@ private:
     TInetAddr iFrom;
 };
 
+// Receiver for the encoder units from tgvideo.exe (big datagrams).
+class CVRecv : public CActive
+{
+public:
+    CVRecv(CRunner& aOwner) : CActive(CActive::EPriorityStandard), iOwner(aOwner), iPtr(iBuf, 0, KVideoMax)
+    { CActiveScheduler::Add(this); }
+    ~CVRecv() { Cancel(); }
+    void Start(RSocket& aSock)
+    {
+        iSock = &aSock;
+        iPtr.Zero();
+        aSock.RecvFrom(iPtr, iFrom, 0, iStatus);
+        SetActive();
+    }
+    void RunL();
+    void DoCancel() { if (iSock) iSock->CancelRecv(); }
+private:
+    CRunner& iOwner;
+    RSocket* iSock;
+    TUint8 iBuf[KVideoMax];
+    TPtr8 iPtr;
+    TInetAddr iFrom;
+};
+
 // Active object sending one UDP datagram at a time (drops if busy).
 class CSend : public CActive
 {
@@ -202,6 +240,8 @@ public:
         delete iFactory;
         iFormats.Close();
         delete iRecv;
+        delete iVRecv;
+        iVSock.Close();
         iSock.Close();
         iSs.Close();
         if (iEnc) opus_encoder_destroy(iEnc);
@@ -300,6 +340,19 @@ public:
         if (!iRecv) { Check(_L8("NetAlloc"), KErrNoMemory); return; }
         iRecv->Start(iSock);
         iNetOk = ETrue;
+        iTgv.SetAddress(INET_ADDR(127, 0, 0, 1));
+        iTgv.SetPort(KPortVideoCmd);
+        // encoder units from tgvideo.exe; failure here only disables video, never the call
+        if (Check(_L8("VSockOpen"), iVSock.Open(iSs, KAfInet, KSockDatagram, KProtocolInetUdp))) {
+            TInetAddr vl;
+            vl.SetAddress(INET_ADDR(127, 0, 0, 1));
+            vl.SetPort(KPortVideoIn);
+            if (Check(_L8("VSockBind"), iVSock.Bind(vl))) {
+                iVSock.SetOpt(KSORecvBuf, KSOLSocket, 65536);
+                iVRecv = new CVRecv(*this);
+                if (iVRecv) { iVRecv->Start(iVSock); iVNet = ETrue; }
+            }
+        }
     }
     void SetupAudio()
     {
@@ -354,6 +407,16 @@ public:
                     iSigIn++;
                     if (e != 0) { Check(_L8("Signaling"), e); }
                     Drain277();
+                }
+                return ETrue;
+            }
+            if (n == 2 && aData[0] == 'V' && (aData[1] == '0' || aData[1] == '1')) {
+                TBuf8<48> lb;
+                lb.Format(_L8("control: video %d\n"), aData[1] == '1' ? 1 : 0);
+                Write(lb);
+                if (iV277 && iS) {
+                    c277_session_video_enable(iS, aData[1] == '1');
+                    if (aData[1] == '1') iVideoEver = ETrue;
                 }
                 return ETrue;
             }
@@ -446,6 +509,12 @@ public:
     }
     void FinalStatus()
     {
+        if (iVideoEver && iNetOk) {      // never leave the camera reserved: ask tgvideo.exe to quit
+            TRequestStatus qs;
+            TBuf8<2> q(_L8("Q"));
+            iSock.SendTo(q, iTgv, 0, qs);
+            User::WaitForRequest(qs);
+        }
         if (!iRelayMode || !iNetOk) return;
         TBuf8<24> b(_L8("S ended"));
         TRequestStatus st;
@@ -531,6 +600,7 @@ public:
             b.Format(_L8("step: v277 session init %d conns %d\n"), r, iNConn);
             Write(b);
         }
+        if (r == C277_SESS_OK) SetWallClock();
         if (r == C277_SESS_OK) {
             _LIT(KFlag, "E:\\retrotele_videocap.flag");
             TEntry ent;
@@ -619,12 +689,66 @@ public:
             iEverRecv = ETrue;
         }
     }
+    // ---- video send
+    void VideoUnit(const TDesC8& aData)
+    {
+        iVUnits++;
+        if (!iV277 || !iS || !iRelayOk || aData.Length() < 2 || aData[0] != 'V') return;
+        c277_session_video_put(iS, aData.Ptr() + 1, (u32)(aData.Length() - 1), NowMs());
+        PumpVideo();
+    }
+    void PumpVideo()
+    {
+        for (TInt i = 0; i < 12; i++) {
+            TInt more = c277_session_video_pump(iS, NowMs());
+            Drain277();
+            if (!more) break;
+        }
+        CheckIdrRequest();
+    }
+    void CheckIdrRequest()
+    {
+        if (!iS || !iNetOk) return;
+        if (c277_session_take_idr_req(iS)) {
+            SendTo(iSock, iTgv, (const TUint8*)"K", 1);
+            iKeyReqs++;
+        }
+    }
+    void VideoInfo()
+    {
+        if (!iS || !iNetOk) return;
+        if (iS->peer_vid != iLastPeerVid) {
+            iLastPeerVid = iS->peer_vid;
+            if (iLastPeerVid >= 0) SendInfo('P', iLastPeerVid);
+        }
+        if ((TInt)iS->req_video_n != iLastReqVid) {
+            iLastReqVid = (TInt)iS->req_video_n;
+            SendInfo('X', iLastReqVid);
+        }
+        TInt act = c277_session_video_active(iS) ? 1 : 0;
+        if (act != iLastVidAct) {
+            iLastVidAct = act;
+            SendInfo('A', act);
+            TBuf8<48> lb;
+            lb.Format(_L8("event: video send %d\n"), act);
+            Write(lb);
+        }
+    }
+    void SetWallClock()
+    {
+        TTime now;
+        now.UniversalTime();
+        TTime epoch(TDateTime(1970, EJanuary, 0, 0, 0, 0, 0));
+        TTimeIntervalSeconds sec;
+        if (now.SecondsFrom(epoch, sec) == KErrNone) c277_session_set_wall(iS, (u32)sec.Int(), NowMs());
+    }
     void Handle277(const TDesC8& aData, const TInetAddr& aFrom)
     {
         if (!iS) return;
         c277_session_on_udp(iS, aFrom.Address(), aFrom.Port(), aData.Ptr(), (u32)aData.Length(), NowMs());
         PollOpus277();
         Drain277();
+        CheckIdrRequest();      /* a PLI/FIR from the peer */
     }
     void Tick277()
     {
@@ -632,6 +756,8 @@ public:
         c277_session_tick(iS, NowMs());
         PollOpus277();
         Drain277();
+        CheckIdrRequest();
+        VideoInfo();
         TInt ice = c277_session_ice_state(iS);
         if (ice != iLastIce) {
             TBuf8<48> b;
@@ -1186,6 +1312,17 @@ public:
                         iSentPkts, iRecvPkts, iLostPkts, iPlcFrames, iUnderruns, iSigOut,
                         iErrors, iLast);
             Write(line);
+            if (iVideoEver && iS) {
+                TBuf8<400> vl;
+                vl.Format(_L8("v %d on %d fps10 %d bps %d au %d pk %d idr %d drop %d units %d pli %d fir %d nack %d "
+                              "twcc %d remb %d keyreq %d peer_vid %d peer_rtp %d rr_frac %d rr_lost %d\n"),
+                          iTicks, c277_session_video_active(iS) ? 1 : 0, (TInt)iS->vtx_last_fps, (TInt)iS->vtx_last_bps,
+                          (TInt)iS->vtx.n_au, (TInt)iS->vtx.n_pk, (TInt)iS->vtx.n_idr, (TInt)iS->vtx.n_drop, iVUnits,
+                          (TInt)iS->pli_n, (TInt)iS->fir_n, (TInt)iS->nack_n, (TInt)iS->twcc_n, (TInt)iS->remb_n,
+                          iKeyReqs, (TInt)iS->peer_vid, (TInt)iS->n_peer_vrtp,
+                          iS->rr_have ? (TInt)iS->rr_fraction : 0, iS->rr_have ? (TInt)iS->rr_lost : 0);
+                Write(vl);
+            }
             if (iNetOk && iStatusName.Length()) SendStatus(iStatusName);
             if (iNetOk) SendStatus(_L8("ready"));
             if (iTicks >= iSeconds) CActiveScheduler::Stop();
@@ -1301,11 +1438,24 @@ private:
     TBool iDnPlaying;
     TInt iLostPkts, iUdpTx, iSigOut, iSigIn, iLastIce;
     TBool iEvCreds, iEvCand, iEvRefl, iEvRtp, iEverConn;
+    // video send
+    RSocket iVSock;
+    CVRecv* iVRecv;
+    TBool iVNet, iVideoEver;
+    TInetAddr iTgv;
+    TInt iVUnits, iKeyReqs, iLastPeerVid, iLastReqVid, iLastVidAct;
 };
 
 void CRecv::RunL()
 {
     if (iOwner.Received(iKind, iStatus.Int(), iPtr, iFrom)) Start(*iSock);
+}
+
+void CVRecv::RunL()
+{
+    TInt e = iStatus.Int();
+    if (e == KErrNone) iOwner.VideoUnit(iPtr);
+    if (e != KErrCancel && e != KErrAbort) Start(*iSock);
 }
 
 static void RunL()

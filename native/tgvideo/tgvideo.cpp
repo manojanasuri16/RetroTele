@@ -8,9 +8,15 @@
  * "tgvideo_frames" (layout: tgvshared.h, read by tgvdisp.pyd).
  *
  * Commands arrive on UDP 127.0.0.1:47012 (ASCII):
- *   S w h fps kbps cam   (re)start the pipeline
+ *   S w h fps kbps cam [rot]  (re)start the pipeline; rot = clockwise degrees baked into the
+ *                        pixels before encoding: only 0 is implemented (landscape); others are logged and ignored
  *   C n                  switch to camera n, keep encoder/decoder, force a keyframe
  *   K                    request a keyframe
+ *   E 1|0                CALL EXPORT on/off: every encoder unit also goes out as one UDP datagram
+ *                        'V'+Annex-B to 127.0.0.1:47014 (tgcallaudio.exe packetizes it into RTP; see
+ *                        callaudio.cpp for why UDP). Turning it on first sends the cached SPS/PPS and
+ *                        asks for a keyframe. While exporting, a camera switch always rebuilds the
+ *                        encoder (clean restart: new SPS/PPS + IDR).
  *   D                    diagnostic ORDER SWEEP: which start orders let the decoder run while
  *                        the camera captures (log lines "order N: ..."), then restart
  *   Q                    quit
@@ -185,6 +191,53 @@ static void Status(TRefByValue<const TDesC8> aFmt, ...)
     b.FormatList(aFmt, l);
     VA_END(l);
     gSend->Send(b);
+}
+
+// ---------------------------------------------------------------- export to the call engine
+static const TInt KVMax = 16400;
+static const TInt KVSlots = 4;
+static TInt gExport = 0;
+static TInt gExpUnits = 0, gExpDrops = 0, gExpPending = 0;
+class CVOut : public CActive
+{
+public:
+    CVOut() : CActive(CActive::EPriorityStandard), iPtr(iBuf, 0, KVMax)
+    {
+        iTo.SetAddress(INET_ADDR(127, 0, 0, 1));
+        iTo.SetPort(47014);
+        CActiveScheduler::Add(this);
+    }
+    ~CVOut() { Cancel(); }
+    TBool Send(const TDesC8& aUnit)
+    {
+        if (IsActive() || !gSockOk || aUnit.Length() < 1 || aUnit.Length() > KVMax - 1) return EFalse;
+        iBuf[0] = 'V';
+        Mem::Copy(iBuf + 1, aUnit.Ptr(), aUnit.Length());
+        iPtr.Set(iBuf, aUnit.Length() + 1, KVMax);
+        gTxSock.SendTo(iPtr, iTo, 0, iStatus);
+        SetActive();
+        return ETrue;
+    }
+    void RunL() { if (iStatus.Int() != KErrNone) gExpDrops++; }
+    void DoCancel() { gTxSock.CancelSend(); }
+private:
+    TUint8 iBuf[KVMax];
+    TPtr8 iPtr;
+    TInetAddr iTo;
+};
+static CVOut* gVOut[KVSlots];
+static void ExportUnit(const TDesC8& aUnit)
+{
+    if (!gExport) return;
+    for (TInt i = 0; i < KVSlots; i++) {
+        if (!gVOut[i]) gVOut[i] = new CVOut;
+        if (gVOut[i] && gVOut[i]->Send(aUnit)) { gExpUnits++; return; }
+    }
+    gExpDrops++;
+}
+static void FreeExport()
+{
+    for (TInt i = 0; i < KVSlots; i++) { delete gVOut[i]; gVOut[i] = NULL; }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -615,6 +668,7 @@ public:
                 if (sps && !vcl) gParams.Zero();
                 if (gParams.Length() + b->iData.Length() <= gParams.MaxLength() && !vcl) gParams.Append(b->iData);
             }
+            ExportUnit(b->iData);
             if (gDecoder && gEncToDec) gDecoder->Write(b->iData, b->iCaptureTimestamp.Int64());
             iRec->ReturnBuffer(b);
         }
@@ -903,6 +957,7 @@ static TInt BeginCam(CCam* c)
     return gOrder == 2 ? c->BeginViewFinder() : c->Begin();
 }
 
+static TInt gRotation = 0;     // degrees baked into the pixels before encoding: 0 only (landscape QCIF)
 static void StartPipeline(TInt aW, TInt aH, TInt aFps, TInt aKbps, TInt aCam)
 {
     StopPipeline();
@@ -968,8 +1023,8 @@ static void SwitchCamera(TInt aNew)
     gCamIdx = aNew;
     HSet(TGV_W_CAM, gCamIdx);
     TBool needDec = EFalse;
-    if (c->iW != gW || c->iH != gHt) {
-        Log(_L8("camera %d offers %dx%d instead of %dx%d: rebuilding codecs"), gCamIdx, c->iW, c->iH, gW, gHt);
+    if (c->iW != gW || c->iH != gHt || (gExport && gOrder == 3)) {
+        Log(_L8("camera %d offers %dx%d (was %dx%d), export %d: rebuilding codecs"), gCamIdx, c->iW, c->iH, gW, gHt, gExport);
         gW = c->iW; gHt = c->iH;
         if (gOrder == 3) { delete gDecoder; gDecoder = NULL; BuildEnc(TSize(gW, gHt)); } else BuildCodecs();
         needDec = (gOrder == 3);
@@ -1277,6 +1332,7 @@ static void RunSweep()
 
 // ---------------------------------------------------------------- commands
 static TInt gBusy = 0;
+static TInt gWantKey = 0;
 static TBuf8<64> gPending;
 
 static TInt ParseInts(const TDesC8& aS, TInt* aOut, TInt aMax)
@@ -1307,6 +1363,7 @@ static void Command(const TDesC8& aCmd)
 {
     if (aCmd.Length() == 0) return;
     if (aCmd[0] == 'Q') { gQuit = 1; if (!gBusy) DoQuit(); return; }
+    if (gBusy && aCmd[0] == 'K') { gWantKey = 1; return; }      // do not let a PLI replace a queued command
     if (gBusy) { gPending.Copy(aCmd.Left(63)); return; }
     gBusy = 1;
     Exec(aCmd);
@@ -1316,16 +1373,19 @@ static void Command(const TDesC8& aCmd)
         Exec(p);
     }
     gBusy = 0;
+    if (gWantKey && !gQuit) { gWantKey = 0; if (gEncoder) gEncoder->KeyFrame(); }
     if (gQuit) DoQuit();
 }
 static void Exec(const TDesC8& aCmd)
 {
-    TInt v[6];
+    TInt v[7];
     Mem::FillZ(v, sizeof(v));
-    TInt n = ParseInts(aCmd.Mid(1), v, 6);
+    TInt n = ParseInts(aCmd.Mid(1), v, 7);
     switch (aCmd[0]) {
     case 'S':
         Log(_L8("cmd S (%d args)"), n);
+        gRotation = (n >= 6) ? v[5] : 0;
+        if (gRotation != 0) Log(_L8("cmd S: rotation %d not implemented, sending landscape"), gRotation);
         if (n >= 5) StartPipeline(v[0], v[1], v[2], v[3], n >= 5 ? v[4] : 0);
         else Log(_L8("cmd S: need 5 numbers"));
         break;
@@ -1340,6 +1400,14 @@ static void Exec(const TDesC8& aCmd)
     case 'K':
         Log(_L8("cmd K"));
         if (gEncoder) gEncoder->KeyFrame();
+        break;
+    case 'E':
+        Log(_L8("cmd E %d (export to call engine)"), v[0]);
+        gExport = v[0] ? 1 : 0;
+        if (gExport) {
+            if (gParams.Length() > 0) ExportUnit(gParams);
+            if (gEncoder) gEncoder->KeyFrame();
+        }
         break;
     default:
         Log(_L8("unknown command"));
@@ -1394,6 +1462,8 @@ static TInt StatTick(TAny*)
     TInt st = H ? H[TGV_W_STATE] : 0;
     Status(_L8("T %d %d %d %d %d %d %d %d %d %d %d %d %d"), st, gCamIdx, gW, gHt, capF, encF, decF, gSt.iLat, bps,
            gSt.iErrors, gSt.iDrops, H ? (TInt)H[TGV_W_ENC_OK] : 0, H ? (TInt)H[TGV_W_DEC_OK] : 0);
+    if (gExport && gSecs % 5 == 4)
+        Log(_L8("export: units=%d drops=%d"), gExpUnits, gExpDrops);
     if (++gSecs % 5 == 0)
         Log(_L8("stats: cap=%d.%d enc=%d.%d dec=%d.%d fps lat=%d ms %d B/s err=%d drops=%d keys=%d"), capF / 10, capF % 10,
             encF / 10, encF % 10, decF / 10, decF % 10, gSt.iLat, bps, gSt.iErrors, gSt.iDrops, gSt.iKeys);
@@ -1444,6 +1514,7 @@ static void RunL()
     tick->Cancel();
     CleanupStack::PopAndDestroy(3);          // tick, rx, gSend
     gSend = NULL;
+    FreeExport();
     gCmdSock.Close();
     gTxSock.Close();
     gSockOk = EFalse;
