@@ -105,3 +105,7 @@ One file, `RetroTele.sis`, installs everything: the app, the native crypto modul
 ## Credits
 
 Emoji images: [Twemoji](https://github.com/twitter/twemoji) by Twitter, Inc and other contributors, licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). The sprite sheets in `pys60/assets/` are built by `tools/emoji/make_emoji.py`.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Third-party components (for example Opus, Nokia's VoIP Audio Services, which is not redistributed here) keep their own licences.
