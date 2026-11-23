@@ -252,6 +252,7 @@ static void test_rtcp(void)
 
 
 /* ---- receiver: packetize with our own sender, depacketize, with and without loss */
+static u32 g_now = 1000;
 static int feed(c277_vrx *r, c277_vtx *v, u32 now, int drop_idx, int *got, u8 *copy, u32 *copy_len)
 {
     pkt *pk = (pkt *)calloc(32, sizeof(pkt));
@@ -261,12 +262,19 @@ static int feed(c277_vrx *r, c277_vtx *v, u32 now, int drop_idx, int *got, u8 *c
         c277_rtp_hdr h;
         if (i == drop_idx) continue;
         CHECK(c277_rtp_parse(pk[i].d, (u32)pk[i].n, &h) == 0);
-        if (c277_vrx_put(r, h.seq, h.ts, h.marker, h.ssrc, h.payload, h.plen)) {
+        g_now += 5;
+        if (c277_vrx_put(r, h.seq, h.ts, h.marker, h.ssrc, h.payload, h.plen, g_now)) {
             ready++;
             if (copy) { memcpy(copy, r->au, r->ready_len); *copy_len = r->ready_len; }
             *got = r->ready_idr;
             c277_vrx_done(r);
         }
+    }
+    if (drop_idx >= 0 && c277_vrx_tick(r, g_now + 200)) {      /* the wait for the missing packet is over */
+        ready++;
+        if (copy) { memcpy(copy, r->au, r->ready_len); *copy_len = r->ready_len; }
+        *got = r->ready_idr;
+        c277_vrx_done(r);
     }
     free(pk);
     return ready;
@@ -333,7 +341,7 @@ static void test_receiver(void)
         pkt1[0] = 0x80; pkt1[1] = 96; pkt1[2] = (u8)((r->next_seq - 5) >> 8); pkt1[3] = (u8)(r->next_seq - 5);
         pkt1[11] = 4; pkt1[12] = 0x41; pkt1[13] = 1;
         CHECK(c277_rtp_parse(pkt1, 14, &h) == 0);
-        CHECK(c277_vrx_put(r, h.seq, h.ts, 1, h.ssrc, h.payload, h.plen) == 0 && r->n_late == 1);
+        CHECK(c277_vrx_put(r, h.seq, h.ts, 1, h.ssrc, h.payload, h.plen, g_now) == 0 && r->n_late == 1);
     }
     /* RR and REMB builders, NACK list parse */
     CHECK(c277_rtcp_build_rr(buf, sizeof(buf), 4, 3, 12, 345, 0x10002, 5) == 32);
@@ -349,6 +357,75 @@ static void test_receiver(void)
     free(v); free(r); free(unit); free(copy);
 }
 
+/* ---- reordering: swapped packets survive, a late retransmission fills a gap, a real loss times out */
+static void test_reorder(void)
+{
+    static const u8 rnd6[6] = { 0x51, 0x23, 0x10, 0x00, 0x00, 0x00 };
+    c277_vtx *v = (c277_vtx *)calloc(1, sizeof(*v));
+    c277_vrx *r = (c277_vrx *)calloc(1, sizeof(*r));
+    u8 *unit = (u8 *)malloc(20000);
+    pkt *pk = (pkt *)calloc(32, sizeof(pkt));
+    c277_rtp_hdr h[32];
+    u32 un, now = 5000;
+    int n, i, got = 0;
+    u8 b[16];
+    c277_rtcp_info ri;
+
+    c277_vtx_init(v, 4, rnd6);
+    c277_vrx_init(r);
+    un = build_unit(unit, 1, 0, 0);
+    c277_vtx_put(v, unit, un, 1000);
+    un = build_unit(unit, 0, 1, 5000);                   /* STAP-A + 6 FU-A */
+    c277_vtx_put(v, unit, un, 1000);
+    n = run_au(v, pk, 32);
+    CHECK(n == 7);
+    for (i = 0; i < n; i++) CHECK(c277_rtp_parse(pk[i].d, (u32)pk[i].n, &h[i]) == 0);
+    /* order 0 2 1 3 4 6 5: a swap in the middle and one at the end */
+    {
+        static const int ord[7] = { 0, 2, 1, 3, 4, 6, 5 };
+        for (i = 0; i < 7; i++) {
+            int k = ord[i];
+            now += 3;
+            if (c277_vrx_put(r, h[k].seq, h[k].ts, h[k].marker, h[k].ssrc, h[k].payload, h[k].plen, now)) got++;
+            if (i == 1) CHECK(r->n_nack == 1 && r->nack[0] == h[1].seq);     /* packet 1 is asked for at once */
+        }
+    }
+    CHECK(got == 1 && r->ready_idr == 1 && r->n_lost == 0 && r->n_drop_au == 0 && r->need_idr == 0);
+    CHECK(r->n_reordered >= 2);
+    c277_vrx_done(r);
+    /* a second unit: packet 2 is lost and then arrives late (a retransmission) within the wait */
+    c277_vtx_put(v, unit, build_unit(unit, 0, 0, 4500), 1100);
+    n = run_au(v, pk, 32);
+    for (i = 0; i < n; i++) CHECK(c277_rtp_parse(pk[i].d, (u32)pk[i].n, &h[i]) == 0);
+    got = 0;
+    for (i = 0; i < n; i++) {
+        if (i == 2) continue;
+        now += 3;
+        if (c277_vrx_put(r, h[i].seq, h[i].ts, h[i].marker, h[i].ssrc, h[i].payload, h[i].plen, now)) got++;
+    }
+    CHECK(got == 0 && r->n_nack == 1 && r->nack[0] == h[2].seq);
+    CHECK(c277_rtcp_build_nack(b, sizeof(b), 4, 3, r->nack[0], 0) == 16);
+    CHECK(c277_rtcp_parse(b, 16, 3, &ri) == 0 && ri.n_nack == 1 && ri.nack_seq[0] == h[2].seq);
+    now += 20;
+    if (c277_vrx_put(r, h[2].seq, h[2].ts, h[2].marker, h[2].ssrc, h[2].payload, h[2].plen, now)) got++;
+    CHECK(got == 1 && r->ready_idr == 0 && r->n_lost == 0 && r->need_idr == 0 && r->n_nack == 0);
+    c277_vrx_done(r);
+    /* the same unit again, but the packet never arrives: after the wait the picture is dropped and a PLI is due */
+    c277_vtx_put(v, unit, build_unit(unit, 0, 0, 4500), 1200);
+    n = run_au(v, pk, 32);
+    for (i = 0; i < n; i++) CHECK(c277_rtp_parse(pk[i].d, (u32)pk[i].n, &h[i]) == 0);
+    got = 0;
+    for (i = 0; i < n; i++) {
+        if (i == 2) continue;
+        now += 3;
+        if (c277_vrx_put(r, h[i].seq, h[i].ts, h[i].marker, h[i].ssrc, h[i].payload, h[i].plen, now)) got++;
+    }
+    CHECK(got == 0 && r->need_idr == 0);
+    CHECK(c277_vrx_tick(r, now + 20) == 0 && r->need_idr == 0);              /* still waiting */
+    CHECK(c277_vrx_tick(r, now + 100) == 0 && r->need_idr == 1 && r->need_pli == 1 && r->n_lost == 1 && r->n_gap_timeout == 1);
+    free(v); free(r); free(unit); free(pk);
+}
+
 int main(void)
 {
     test_sps();
@@ -356,6 +433,7 @@ int main(void)
     test_packetizer();
     test_rtcp();
     test_receiver();
+    test_reorder();
     printf("test_video: %d checks, %d failed\n", g_n, g_fail);
     return g_fail ? 1 : 0;
 }

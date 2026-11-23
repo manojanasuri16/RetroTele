@@ -294,6 +294,38 @@ assert vr.state == cv.S_RXIDLE and vr.status_text() == u"Camera is in use or una
 # full stop also stops the forwarding
 vr.stop()
 assert vr.state == cv.S_IDLE and cax.sent[-2:] == ["V0", "H0"] and vr.fwd_on == 0
+# the real status path: a datagram from the helper reaches a helper that was started only for the
+# peer (0.14.3 bug: the dispatcher ignored it, Python never saw the hello and gave up after 6 s)
+caz = callaudio_fake.CallAudio()
+vz = cv.CallVideo(caz, None, LOG.append)
+del STARTED[:], SENT[:]
+assert vz.start_rx() == 1 and STARTED == ["tgvideo.exe"]
+cv._dispatch(("T hello 0.14.4", ("127.0.0.1", 47012)))
+assert vz.hstate == 2 and vz.rx_lines == 1
+vz.tick()
+assert vz.state == cv.S_RXIDLE and "H1" in caz.sent
+# a missed hello: the helper is pinged every 2 s, and the status line (once a second) also works
+vw = cv.CallVideo(callaudio_fake.CallAudio(), None, None)
+del SENT[:]
+vw.start_rx()
+for i in range(21):
+    vw.tick()
+assert [d for d, a in SENT].count("P") == 2, SENT
+cv._dispatch(("T 2 0 0 0 0 0 0 0 0 0 0 0 0", ("127.0.0.1", 47012)))
+vw.tick()
+assert vw.state == cv.S_RXIDLE
+# our camera video after that: the running helper is reused (no second exe, no hello wait)
+del STARTED[:], SENT[:]
+vw.stop_send()                              # not active: nothing happens
+assert vw.start(cv.CAM_FRONT) == 1 and STARTED == [] and vw.state == cv.S_STARTING
+vw.tick()
+assert [d for d, a in SENT][-2:] == ["L 0", "S 176 144 15 100 1 0"], SENT
+# a helper that is known to be running is reused when started again
+vq = cv.CallVideo(callaudio_fake.CallAudio(), None, None)
+vq.hstate = 2
+del STARTED[:], SENT[:]
+vq.start_rx()
+assert STARTED == [] and SENT[-1][0] == "P", (STARTED, SENT)
 # camera video first, peer picture added later: forwarding starts with the helper
 cay = callaudio_fake.CallAudio()
 vy = cv.CallVideo(cay, None, None)

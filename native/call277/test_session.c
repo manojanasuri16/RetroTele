@@ -797,6 +797,49 @@ static void test_misc(void)
     free(s);
 }
 
+/* the forwarding gate: access units are only handed to the display helper after rx_enable(fwd=1) */
+static void test_rx_forward(void)
+{
+    c277_session *s = (c277_session *)calloc(1, sizeof(*s));
+    static const u8 sps[] = { 0x67, 0x64, 0x00, 0x1f, 0xac, 0x1b, 0x1a, 0x80, 0x84, 0x1e, 0x69, 0xa8, 0x10, 0x10, 0x10, 0x3c, 0x22, 0x11, 0xa8 };
+    static const u8 pps[] = { 0x68, 0xea, 0x43, 0xcb };
+    u8 stap[64], idr[40];
+    const u8 *au = 0;
+    u32 len = 0, k = 0;
+    int is_idr = 0;
+    c277_sps sp;
+    stap[k++] = 0x18; stap[k++] = 0; stap[k++] = sizeof(sps); memcpy(stap + k, sps, sizeof(sps)); k += sizeof(sps);
+    stap[k++] = 0; stap[k++] = sizeof(pps); memcpy(stap + k, pps, sizeof(pps)); k += sizeof(pps);
+    memset(idr, 7, sizeof(idr)); idr[0] = 0x65;
+    c277_vrx_init(&s->vrx);
+    c277_session_rx_enable(s, 1, 0, 150);                 /* wanted, but the helper is not ready: nothing is forwarded */
+    CHECK(c277_vrx_put(&s->vrx, 10, 900, 0, 3, stap, k, 100) == 0);
+    CHECK(c277_vrx_put(&s->vrx, 11, 900, 1, 3, idr, sizeof(idr), 101) == 1);
+    CHECK(c277_session_vrx_take(s, &au, &len, &is_idr) == 0 && s->rx_nofwd == 1);   /* counted, dropped */
+    CHECK(c277_session_vrx_sps_take(s, &sp) == 0);
+    c277_session_rx_enable(s, 1, 1, 150);                 /* the helper says ready: IDR requested, SPS announced */
+    CHECK(s->vrx.need_idr == 1 && s->rx_pli_due == 1 && s->rx_sps_new == 1);
+    CHECK(c277_vrx_put(&s->vrx, 12, 1800, 0, 3, stap, k, 200) == 0);
+    CHECK(c277_vrx_put(&s->vrx, 13, 1800, 1, 3, idr, sizeof(idr), 201) == 1);
+    CHECK(c277_session_vrx_take(s, &au, &len, &is_idr) == 1 && is_idr == 1 && len == 4 + sizeof(sps) + 4 + sizeof(pps) + 4 + sizeof(idr));
+    CHECK(au[4] == 0x67 && au[4 + sizeof(sps) + 4] == 0x68);
+    c277_session_vrx_done(s);
+    CHECK(c277_session_vrx_sps_take(s, &sp) == 1 && sp.profile == 100 && sp.width == 528 && sp.height == 960);
+    /* a swapped pair of P frame packets in the middle still gives both frames */
+    {
+        u8 p1[20], p2[20];
+        memset(p1, 3, sizeof(p1)); p1[0] = 0x41; memset(p2, 4, sizeof(p2)); p2[0] = 0x41;
+        CHECK(c277_vrx_put(&s->vrx, 15, 2700, 1, 3, p2, sizeof(p2), 300) == 0);      /* frame 15 arrives before 14 */
+        CHECK(c277_vrx_put(&s->vrx, 14, 2610, 1, 3, p1, sizeof(p1), 303) == 1);
+        CHECK(c277_session_vrx_take(s, &au, &len, &is_idr) == 1 && len == 4 + sizeof(p1) && is_idr == 0);
+        c277_session_vrx_done(s);                                                    /* releases the buffered frame 15 */
+        CHECK(s->vrx.ready == 1 && s->vrx.ready_len == 4 + sizeof(p2));
+        c277_session_vrx_done(s);
+    }
+    CHECK(s->vrx.n_lost == 0 && s->vrx.n_drop_au == 0);
+    free(s);
+}
+
 int main(int argc, char **argv)
 {
     FILE *f;
@@ -808,6 +851,7 @@ int main(int argc, char **argv)
     n = fread(buf, 1, sizeof(buf) - 1, f); buf[n] = 0; fclose(f);
     g_xc = buf;
     test_rtp();
+    test_rx_forward();
     test_ice_vectors();
     test_ice_pair();
     test_capture();

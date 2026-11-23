@@ -446,32 +446,70 @@ static void vrx_finish(c277_vrx *v)
     v->au_len = 0; v->au_ok = 0; v->au_idr = v->au_sps = v->au_pps = 0;
 }
 
-void c277_vrx_done(c277_vrx *v) { v->ready = 0; }
+static void vrx_drain(c277_vrx *v);
+static void vrx_nack_list(c277_vrx *v);
+static void vrx_skip_gap(c277_vrx *v, u32 now);
+void c277_vrx_done(c277_vrx *v) { v->ready = 0; vrx_drain(v); }
 
-int c277_vrx_put(c277_vrx *v, u16 seq, u32 ts, int marker, u32 ssrc, const u8 *p, u32 n)
+static void vrx_process(c277_vrx *v, u16 seq, u32 ts, int marker, const u8 *p, u32 n);
+
+int c277_vrx_put(c277_vrx *v, u16 seq, u32 ts, int marker, u32 ssrc, const u8 *p, u32 n, u32 now)
 {
-    int t;
+    u16 d;
+    int i, free_i = -1;
     if (n < 1) return 0;
     if (v->ready) { v->ready = 0; v->n_drop_au++; }          /* the consumer was too slow: drop that unit */
     if (!v->started || ssrc != v->ssrc) {
+        memset(v->slot, 0, sizeof(v->slot)); v->nbuf = 0; v->gap_t = 0; v->n_nack = 0;
         v->started = 1; v->ssrc = ssrc; v->next_seq = seq; v->au_len = 0; v->au_ok = 0; v->fu_open = 0; v->in_au = 0;
         v->need_idr = 1; v->need_pli = 1;
         v->base_seq = seq; v->max_ext = seq; v->received = 0; v->expected_prior = 0; v->received_prior = 0;
     }
-    if (seq != v->next_seq) {
-        u16 d = (u16)(seq - v->next_seq);
-        if (d >= 0x8000) { v->n_late++; return 0; }          /* late or duplicate */
-        v->n_lost += d;
-        vrx_damage(v);                                        /* a gap: this picture and the following P frames are unusable */
-        v->next_seq = seq;
-    }
-    v->next_seq = (u16)(seq + 1);
-    v->n_pk++; v->received++;
-    {   /* extended highest sequence */
+    d = (u16)(seq - v->next_seq);
+    if (d >= 0x8000) { v->n_late++; return 0; }              /* late or duplicate */
+    {   /* statistics count every packet that arrives (also those still waiting in the buffer) */
         u32 cyc = v->max_ext & 0xFFFF0000UL, low = v->max_ext & 0xFFFFUL;
         if (seq < low && low - seq > 0x8000UL) cyc += 0x10000UL;
         if ((cyc | seq) > v->max_ext) v->max_ext = cyc | seq;
+        v->received++;
     }
+    if (d == 0) {
+        vrx_process(v, seq, ts, marker, p, n);
+        vrx_drain(v);
+        return v->ready;
+    }
+    /* ahead of a gap: keep it until the missing packets show up or the wait is over */
+    v->n_reordered++;
+    if (n > C277_VRX_PKT_MAX) { v->n_big++; }
+    else {
+        for (i = 0; i < C277_VRX_SLOTS; i++) {
+            if (v->slot[i].used && v->slot[i].seq == seq) { free_i = -2; break; }
+            if (!v->slot[i].used && free_i == -1) free_i = i;
+        }
+        if (free_i >= 0) {
+            v->slot[free_i].used = 1; v->slot[free_i].seq = seq; v->slot[free_i].len = (u16)n;
+            v->slot[free_i].ts = ts; v->slot[free_i].marker = (u8)(marker != 0);
+            memcpy(v->slot[free_i].d, p, n);
+            v->nbuf++;
+        }
+    }
+    if (v->gap_t == 0) v->gap_t = now ? now : 1;
+    vrx_nack_list(v);
+    if (v->nbuf >= 8 || free_i == -1 || (u32)(now - v->gap_t) >= C277_VRX_GAP_MS) vrx_skip_gap(v, now);
+    return v->ready;
+}
+
+int c277_vrx_tick(c277_vrx *v, u32 now)
+{
+    if (v->nbuf > 0 && v->gap_t != 0 && (u32)(now - v->gap_t) >= C277_VRX_GAP_MS) vrx_skip_gap(v, now);
+    return v->ready;
+}
+
+static void vrx_process(c277_vrx *v, u16 seq, u32 ts, int marker, const u8 *p, u32 n)
+{
+    int t;
+    v->next_seq = (u16)(seq + 1);
+    v->n_pk++;
     if (v->in_au && ts != v->au_ts) vrx_damage(v);           /* the marker packet is missing */
     if (!v->in_au) { v->in_au = 1; v->au_ts = ts; v->au_ok = 1; }
     t = p[0] & 31;
@@ -507,7 +545,63 @@ int c277_vrx_put(c277_vrx *v, u16 seq, u32 ts, int marker, u32 ssrc, const u8 *p
         if (!v->au_ok) vrx_damage(v); else vrx_finish(v);
         v->fu_open = 0; v->in_au = 0;
     }
-    return v->ready;
+}
+
+/* process buffered packets that are now in sequence; stops once an access unit is ready */
+static void vrx_drain(c277_vrx *v)
+{
+    int i, found = 1;
+    while (found && !v->ready && v->nbuf > 0) {
+        found = 0;
+        for (i = 0; i < C277_VRX_SLOTS; i++) {
+            if (v->slot[i].used && v->slot[i].seq == v->next_seq) {
+                v->slot[i].used = 0; v->nbuf--;
+                vrx_process(v, v->slot[i].seq, v->slot[i].ts, v->slot[i].marker, v->slot[i].d, v->slot[i].len);
+                found = 1;
+                break;
+            }
+        }
+    }
+    if (v->nbuf == 0) { v->gap_t = 0; v->n_nack = 0; }
+    else vrx_nack_list(v);
+}
+
+/* the missing packets in front of the oldest buffered one (for a NACK) */
+static void vrx_nack_list(c277_vrx *v)
+{
+    int i;
+    u16 best = 0, m;
+    int have = 0;
+    v->n_nack = 0;
+    for (i = 0; i < C277_VRX_SLOTS; i++) {
+        if (!v->slot[i].used) continue;
+        if (!have || (u16)(v->slot[i].seq - v->next_seq) < (u16)(best - v->next_seq)) { best = v->slot[i].seq; have = 1; }
+    }
+    if (!have) return;
+    for (m = v->next_seq; m != best && v->n_nack < C277_VRX_NACK_MAX; m++) {
+        int held = 0;
+        for (i = 0; i < C277_VRX_SLOTS; i++) if (v->slot[i].used && v->slot[i].seq == m) held = 1;
+        if (!held) v->nack[v->n_nack++] = m;
+    }
+}
+
+/* give up waiting: the packets in front of the oldest buffered one are lost */
+static void vrx_skip_gap(c277_vrx *v, u32 now)
+{
+    int i, have = 0;
+    u16 best = 0;
+    for (i = 0; i < C277_VRX_SLOTS; i++) {
+        if (!v->slot[i].used) continue;
+        if (!have || (u16)(v->slot[i].seq - v->next_seq) < (u16)(best - v->next_seq)) { best = v->slot[i].seq; have = 1; }
+    }
+    if (!have) { v->gap_t = 0; return; }
+    v->n_lost += (u16)(best - v->next_seq);
+    v->n_gap_timeout++;
+    vrx_damage(v);
+    v->next_seq = best;
+    v->gap_t = 0;
+    vrx_drain(v);
+    if (v->nbuf > 0) v->gap_t = now ? now : 1;
 }
 
 void c277_vrx_stats(c277_vrx *v, u32 *fraction, u32 *cum_lost, u32 *ext_hi)
@@ -520,4 +614,13 @@ void c277_vrx_stats(c277_vrx *v, u32 *fraction, u32 *cum_lost, u32 *ext_hi)
     if (*fraction > 255) *fraction = 255;
     *cum_lost = lost & 0xFFFFFFUL;
     *ext_hi = v->max_ext;
+}
+
+int c277_rtcp_build_nack(u8 *out, u32 cap, u32 sender, u32 media, u32 pid, u32 blp)
+{
+    if (cap < 16) return -1;
+    out[0] = 0x81; out[1] = 205; put16(out + 2, 3);
+    put32(out + 4, sender); put32(out + 8, media);
+    put16(out + 12, pid); put16(out + 14, blp);
+    return 16;
 }

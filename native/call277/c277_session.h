@@ -109,7 +109,7 @@ typedef struct {
     int rx_sps_new;                              /* rx_sps changed: tell the display helper */
     int rx_pli_due;                              /* send a PLI at the next chance */
     u32 rx_pli_at, rx_rr_next, rx_remb_bps;
-    u32 rx_pli_sent, rx_rr_sent, rx_nack_rtx, rx_ready_n;
+    u32 rx_pli_sent, rx_rr_sent, rx_nack_rtx, rx_ready_n, rx_nofwd, rx_nack_sent, rx_nack_at;
     /* the last 64 video packets for NACK retransmission */
     struct { u16 seq, len; u8 d[1040]; } vhist[64];
 } c277_session;

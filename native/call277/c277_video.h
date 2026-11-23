@@ -90,6 +90,10 @@ int c277_rtcp_build_remb(u8 *out, u32 cap, u32 sender, u32 media, u32 bitrate_bp
  * Packets must arrive in order; a gap or a damaged access unit discards the picture
  * and the stream waits for the next IDR (PLI requested). */
 #define C277_VRX_AU_MAX  32768
+#define C277_VRX_SLOTS   16       /* reorder buffer depth */
+#define C277_VRX_PKT_MAX 1100
+#define C277_VRX_NACK_MAX 8
+#define C277_VRX_GAP_MS  80       /* wait this long (or for 8 later packets) before a gap is declared lost */
 typedef struct {
     int started, in_au, need_idr, ready, ready_idr, need_pli, au_ok, fu_open, au_idr, au_sps, au_pps;
     u32 ssrc, au_ts, au_len, ready_len, ready_ts;
@@ -100,6 +104,12 @@ typedef struct {
     int sps_changed;                       /* new SPS content since the last c277_vrx_sps_take */
     /* RR statistics */
     u32 base_seq, max_ext, received, expected_prior, received_prior;
+    /* reorder buffer: packets that arrived ahead of a gap wait here */
+    struct { u16 seq, len; u32 ts; u8 used, marker; u8 d[C277_VRX_PKT_MAX]; } slot[C277_VRX_SLOTS];
+    int nbuf;
+    u32 gap_t;                             /* when the current gap was first seen (0 = none) */
+    u16 nack[C277_VRX_NACK_MAX];           /* missing sequence numbers worth a NACK */
+    u32 n_nack, n_reordered, n_gap_timeout, n_big;
     /* totals */
     u32 n_pk, n_au, n_idr, n_lost, n_drop_au, n_late, n_wait;
 } c277_vrx;
@@ -107,8 +117,12 @@ typedef struct {
 void c277_vrx_init(c277_vrx *v);
 /* Feeds one RTP packet (video PT). Returns 1 when an access unit is ready in v->au
  * (v->ready_len bytes, v->ready_idr), else 0. v->need_pli says a picture request is due. */
-int  c277_vrx_put(c277_vrx *v, u16 seq, u32 ts, int marker, u32 ssrc, const u8 *payload, u32 plen);
-/* The consumer took the ready unit. */
+int  c277_vrx_put(c277_vrx *v, u16 seq, u32 ts, int marker, u32 ssrc, const u8 *payload, u32 plen, u32 now);
+/* Timer: declares an old gap lost. Returns 1 if an access unit became ready. */
+int  c277_vrx_tick(c277_vrx *v, u32 now);
+/* NACK (RTPFB fmt 1) for one pid + bitmask */
+int c277_rtcp_build_nack(u8 *out, u32 cap, u32 sender, u32 media, u32 pid, u32 blp);
+/* The consumer took the ready unit (buffered packets are processed; check ready again). */
 void c277_vrx_done(c277_vrx *v);
 /* Report block data for an RR: fraction lost since the last call (0..255), cumulative lost, extended highest seq */
 void c277_vrx_stats(c277_vrx *v, u32 *fraction, u32 *cum_lost, u32 *ext_hi);

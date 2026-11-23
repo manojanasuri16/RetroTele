@@ -98,7 +98,7 @@ def _dispatch(res):
         data = res[0]
     elif type(res) is types.StringType:
         data = res
-    if cv is not None and cv.active():
+    if cv is not None and cv.helper_up():
         cv._arm()
         if data:
             cv.on_status(data)
@@ -336,8 +336,11 @@ class CallVideo:
         self.steps = 0
 
     def launch(self, newstate):
-        """Start tgvideo.exe (it waits for commands; the camera is only used after "S")."""
-        self.hstate = -1
+        """Start tgvideo.exe (it waits for commands; the camera is only used after "S"). A helper
+        that is already running (heard earlier) is reused, never started twice."""
+        alive = (self.hstate == 1 or self.hstate == 2)
+        if not alive:
+            self.hstate = -1
         self.ticks = 0
         self.reset_counters()
         self.fwd_on = 0
@@ -352,10 +355,14 @@ class CallVideo:
         except:
             return self.fail(u"Video: cannot open UDP port 47011")
         self._arm()
-        try:
-            e32.start_exe(u"tgvideo.exe", u"")
-        except:
-            return self.fail(u"Video helper tgvideo.exe is missing")
+        if alive:
+            self.log("helper already running, reusing it")
+            self.send("P")                       # it answers with its status line
+        else:
+            try:
+                e32.start_exe(u"tgvideo.exe", u"")
+            except:
+                return self.fail(u"Video helper tgvideo.exe is missing")
         self.state = newstate
         self.timer = e32.Ao_timer()
         self.timer.after(TICK, self.tick)
@@ -526,6 +533,9 @@ class CallVideo:
 
     def step(self):
         hs = self.hstate
+        if hs == -1 and self.ticks > 0 and self.ticks % 10 == 0 and (
+                self.state == S_RXSTART or self.state == S_STARTING):
+            self.send("P")                       # the hello may have been missed: ask again
         if self.state == S_RXSTART:
             if hs == 2:
                 self.send("L 0")

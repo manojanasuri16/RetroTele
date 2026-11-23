@@ -272,7 +272,7 @@ static void peer_video_rtp(c277_session *s, const u8 *body, u32 blen)
     if (c277_rtp_parse(body, blen, &h) < 0 || h.plen < 2) return;
     s->n_peer_vrtp++;
     if (s->rx_want && h.pt == C277_VPT) {
-        if (c277_vrx_put(&s->vrx, h.seq, h.ts, h.marker, h.ssrc, h.payload, h.plen)) s->rx_ready_n++;
+        if (c277_vrx_put(&s->vrx, h.seq, h.ts, h.marker, h.ssrc, h.payload, h.plen, s->cur_now)) s->rx_ready_n++;
         if (s->vrx.sps_changed) {
             s->vrx.sps_changed = 0;
             if (c277_sps_parse(s->vrx.sps, s->vrx.sps_len, &s->rx_sps) == 0) s->rx_sps_new = 1;
@@ -326,7 +326,10 @@ void c277_session_video_enable(c277_session *s, int on)
 void c277_session_rx_enable(c277_session *s, int want, int fwd, u32 remb_kbps)
 {
     s->rx_want = want != 0;
-    if (fwd && !s->rx_fwd) { s->vrx.need_idr = 1; s->rx_pli_due = 1; s->rx_sps_new = s->vrx.sps_len > 0; }
+    if (fwd && !s->rx_fwd) {
+        s->vrx.need_idr = 1; s->rx_pli_due = 1;
+        s->rx_sps_new = s->vrx.sps_len > 0 && c277_sps_parse(s->vrx.sps, s->vrx.sps_len, &s->rx_sps) == 0;
+    }
     s->rx_fwd = fwd != 0;
     s->rx_remb_bps = remb_kbps * 1000UL;
 }
@@ -334,7 +337,7 @@ void c277_session_rx_enable(c277_session *s, int want, int fwd, u32 remb_kbps)
 int c277_session_vrx_take(c277_session *s, const u8 **au, u32 *len, int *idr)
 {
     if (!s->vrx.ready) return 0;
-    if (!s->rx_fwd) { c277_vrx_done(&s->vrx); return 0; }
+    if (!s->rx_fwd) { s->rx_nofwd++; c277_vrx_done(&s->vrx); return 0; }
     *au = s->vrx.au; *len = s->vrx.ready_len; *idr = s->vrx.ready_idr;
     return 1;
 }
@@ -356,6 +359,17 @@ static void rx_tick(c277_session *s, u32 now)
     int k;
     if (!s->rx_want || !s->vrx.started || c277_ice_state(&s->ice) != C277_ICE_CONNECTED ||
         !c277_ice_peer_tag(&s->ice, &peer)) return;
+    c277_vrx_tick(&s->vrx, now);
+    if (s->vrx.n_nack > 0 && have_room(s) && (s->rx_nack_at == 0 || (u32)(now - s->rx_nack_at) >= 30UL)) {
+        u32 pid = s->vrx.nack[0], blp = 0, j;
+        for (j = 1; j < s->vrx.n_nack; j++) {
+            u16 dd = (u16)(s->vrx.nack[j] - (u16)pid);
+            if (dd >= 1 && dd <= 16) blp |= 1UL << (dd - 1);
+        }
+        k = c277_rtcp_build_nack(s->rtpb, C277_OUT_MAX, s->vtx.ssrc, s->vrx.ssrc, pid, blp);
+        if (k > 0) k = c277_conn_build(&s->tr, now, C277_MSG_VIDEO, s->rtpb, (u32)k, 0, s->tmp, C277_OUT_MAX);
+        if (k > 0 && push_wrapped(s, peer, s->tmp, (u32)k) == 0) { s->rx_nack_sent++; s->rx_nack_at = now ? now : 1; }
+    }
     if (s->vrx.need_idr && s->rx_fwd && s->rx_pli_sent > 0 && (u32)(now - s->rx_pli_at) >= 2500UL) s->rx_pli_due = 1;
     if (s->rx_pli_due && have_room(s) && (s->rx_pli_at == 0 || (u32)(now - s->rx_pli_at) >= 800UL)) {
         k = c277_rtcp_build_pli(s->rtpb, C277_OUT_MAX, s->vtx.ssrc, s->vrx.ssrc);

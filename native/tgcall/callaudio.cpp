@@ -744,8 +744,7 @@ public:
             lb.Format(_L8("rx: peer SPS profile %d level %d size %dx%d sent to tgvideo\n"), sp.profile, sp.level, sp.width, sp.height);
             Write(lb);
         }
-        if (!c277_session_vrx_take(iS, &au, &len, &idr)) return;
-        {
+        for (TInt guard = 0; guard < 6 && c277_session_vrx_take(iS, &au, &len, &idr); guard++) {
             TUint8 pk[1210];
             TInt cnt = (TInt)((len + 1199) / 1200);
             if (cnt > 40) cnt = 40;
@@ -758,8 +757,13 @@ public:
                 SendTo(iSock, iTgvRx, pk, n + 5);
             }
             iRxAu++;
+            if (iRxAu <= 5 || iRxAu % 100 == 0) {
+                TBuf8<96> fl;
+                fl.Format(_L8("rx: forwarded unit %d (%d bytes, idr %d, %d fragments) to tgvideo\n"), iRxAu, (TInt)len, idr, cnt);
+                Write(fl);
+            }
+            c277_session_vrx_done(iS);
         }
-        c277_session_vrx_done(iS);
     }
     void CheckIdrRequest()
     {
@@ -814,6 +818,7 @@ public:
         Drain277();
         CheckIdrRequest();
         VideoInfo();
+        PumpRx();
         TInt ice = c277_session_ice_state(iS);
         if (ice != iLastIce) {
             TBuf8<48> b;
@@ -1383,10 +1388,11 @@ public:
             }
             if (iRxWant && iS->vrx.started) {
                 TBuf8<300> rl;
-                rl.Format(_L8("rx %d pk %d au %d idr %d lost %d dropau %d late %d waitau %d pli %d rr %d rtx %d fwd %d sent %d ssrc %d\n"),
+                rl.Format(_L8("rx %d pk %d au %d idr %d lost %d dropau %d late %d waitau %d pli %d rr %d rtx %d fwd %d sent %d ssrc %d reord %d gapto %d nack %d nofwd %d\n"),
                           iTicks, (TInt)iS->vrx.n_pk, (TInt)iS->vrx.n_au, (TInt)iS->vrx.n_idr, (TInt)iS->vrx.n_lost,
                           (TInt)iS->vrx.n_drop_au, (TInt)iS->vrx.n_late, (TInt)iS->vrx.n_wait, (TInt)iS->rx_pli_sent,
-                          (TInt)iS->rx_rr_sent, (TInt)iS->rx_nack_rtx, iRxFwd, iRxAu, (TInt)iS->vrx.ssrc);
+                          (TInt)iS->rx_rr_sent, (TInt)iS->rx_nack_rtx, iRxFwd, iRxAu, (TInt)iS->vrx.ssrc,
+                          (TInt)iS->vrx.n_reordered, (TInt)iS->vrx.n_gap_timeout, (TInt)iS->rx_nack_sent, (TInt)iS->rx_nofwd);
                 Write(rl);
             }
             if (iNetOk && iStatusName.Length()) SendStatus(iStatusName);

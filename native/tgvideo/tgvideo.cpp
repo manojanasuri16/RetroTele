@@ -46,7 +46,7 @@ static RFs gFs;
 static TFileName gLogPath[3];
 static TInt gLogN = 0;
 static TBool gLogOk = EFalse;
-#define TGV_HELPER_VERSION "0.14.3"
+#define TGV_HELPER_VERSION "0.14.4"
 
 static void Log(TRefByValue<const TDesC8> aFmt, ...)
 {
@@ -537,7 +537,7 @@ static CDec* gDecoder;
 static CDec* gRxDec = NULL;
 static const TUint KRxUids[2] = { 0x102073ef, 0x10204bfc };
 static TInt gRxUidIdx = 0, gRxProfile = 0, gRxLevel = 0, gRxW = 0, gRxH = 0, gRxRebuild = 0;
-static TInt gRxAuIn = 0, gRxFed = 0, gRxPicBase = 0, gRxDead = 0;
+static TInt gRxFrags = 0, gRxAuIn = 0, gRxFed = 0, gRxPicBase = 0, gRxDead = 0;
 static const TInt KRxMax = 1300, KRxFragSz = 1200, KRxFragMax = 40;
 struct TRxFrag { TUint8 iAu[KRxFragMax * KRxFragSz]; TUint8 iGot[KRxFragMax]; TInt iId, iCnt, iNGot, iLast, iIdr; };
 static TRxFrag* gRxFrag = NULL;
@@ -593,7 +593,7 @@ static void RxUnit(const TUint8* aAu, TInt aLen, TInt aIdr)
 {
     gRxAuIn++;
     HSet(TGV_W_RX_AU, gRxAuIn);
-    if (gRxAuIn <= 3) Log(_L8("rx: access unit %d, %d bytes, idr=%d"), gRxAuIn, aLen, aIdr);
+    if (gRxAuIn <= 10 || gRxAuIn % 50 == 0) Log(_L8("rx: unit %d, %d bytes, idr=%d (decoder %s, fed %d, pictures %d)"), gRxAuIn, aLen, aIdr, gRxDec ? "up" : "not built", gRxFed, H ? (TInt)H[TGV_W_DEC_COUNT] - gRxPicBase : 0);
     if (gRxDead) return;
     if (gRxDec && gRxRebuild && aIdr) { gRxRebuild = 0; Log(_L8("rx: peer stream changed, rebuilding the decoder")); delete gRxDec; gRxDec = NULL; }
     if (!gRxDec) {
@@ -634,6 +634,8 @@ static void RxPacket(const TDesC8& aD)
         return;
     }
     if (aD[0] != 'R' || aD.Length() < 6 || !gRxFrag) return;
+    gRxFrags++;
+    if (gRxFrags <= 3) Log(_L8("rx: first fragments arrive (fragment %d, id %d idx %d of %d)"), gRxFrags, aD[1], aD[2], aD[3]);
     TInt id = aD[1], idx = aD[2], cnt = aD[3], idr = aD[4], n = aD.Length() - 5;
     TRxFrag& f = *gRxFrag;
     if (cnt < 1 || cnt > KRxFragMax || idx >= cnt || n > KRxFragSz) return;
@@ -1573,6 +1575,9 @@ static void Exec(const TDesC8& aCmd)
         gLoopDec = v[0] ? 1 : 0;
         Log(_L8("cmd L %d (loopback decoder)"), gLoopDec);
         break;
+    case 'P':
+        Status(_L8("T hello " TGV_HELPER_VERSION));     // ping: Python missed the hello
+        break;
     case 'T':
         Log(_L8("cmd T (stop camera + encoder, keep the peer-video decoder)"));
         gExport = 0;
@@ -1654,8 +1659,8 @@ static TInt StatTick(TAny*)
            gSt.iErrors, gSt.iDrops, H ? (TInt)H[TGV_W_ENC_OK] : 0, H ? (TInt)H[TGV_W_DEC_OK] : 0);
     if (gExport && gSecs % 5 == 4)
         Log(_L8("export: units=%d drops=%d"), gExpUnits, gExpDrops);
-    if (gRxAuIn > 0 && gSecs % 5 == 4)
-        Log(_L8("rx: units=%d fed=%d decoded=%d (%d.%d fps) state=%d uid=%d err=%d"), gRxAuIn, gRxFed,
+    if (gRxFrags > 0)
+        Log(_L8("rx: fragments=%d units=%d fed=%d decoded=%d (%d.%d fps) state=%d uid=%d err=%d"), gRxFrags, gRxAuIn, gRxFed,
             H ? (TInt)H[TGV_W_DEC_COUNT] - gRxPicBase : 0, decF / 10, decF % 10, H ? (TInt)H[TGV_W_RX_STATE] : 0,
             gRxUidIdx + 1, H ? (TInt)H[TGV_W_RX_ERR] : 0);
     if (++gSecs % 5 == 0)
