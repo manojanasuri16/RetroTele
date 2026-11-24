@@ -6,7 +6,7 @@ Modern Symbian Telegram apps such as Symbigram need Qt Quick Components (Symbian
 
 ![RetroTele screens](docs/screenshots.png)
 
-## Status (0.16.1)
+## Status (0.16.2)
 
 Tested on a real Nokia N79:
 
@@ -21,6 +21,7 @@ Not supported yet / known issues:
 - The other person's video above 240x480 is not shown until their app steps down (usually within seconds).
 - The other person's video can be choppy at times (software decoding next to our camera and the call audio).
 - Video needs the 2.7.7 call library (Settings > Call version).
+- If call audio ever stays silent, restart the phone (the Nokia VoIP audio service can get stuck).
 
 ## Requirements: a hacked (unlocked) phone
 
