@@ -67,6 +67,7 @@ class CallAudio:
         self.want_route = 1
         self.want_agc = 1         # mic boost: 0 off, 1 normal (AGC), 2 high
         self.want_bt = 1          # Bluetooth headset combination (tgcallaudio KBtCombos), 0..7
+        self.want_btexp = 0       # experimental Bluetooth routing in the helper (off by default)
         self.route_failed = -1    # the helper could not switch to this route (it kept the old one)
         self.bt_links = -1        # connected Bluetooth links the helper sees (-1 unknown)
         self.tel_out = -1         # telephony audio output reported by tgbtroute.exe (5 = Bluetooth)
@@ -403,6 +404,7 @@ class CallAudio:
         self._sendto("R%d" % self.want_route)
         self._sendto("M%d" % self.want_mute)
         self._sendto("A%d" % self.want_agc)
+        self._sendto("J%d" % self.want_btexp)
         self._sendto("X%d" % self.want_bt)
         if self.want_video:
             self._sendto("V1")
@@ -446,6 +448,11 @@ class CallAudio:
             mode = 1
         self.want_agc = mode
         self._sendto("A%d" % mode)
+
+    def set_btexp(self, flag):
+        """Experimental Bluetooth routing in the helper (J1); off (J0) is the 0.16.0 default."""
+        self.want_btexp = flag and 1 or 0
+        self._sendto("J%d" % self.want_btexp)
 
     def set_btmode(self, n):
         """How the helper switches the call audio to a Bluetooth headset (0..7, see the test)."""

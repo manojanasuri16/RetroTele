@@ -438,6 +438,12 @@ public:
     }
     CVoIPAudioDownlinkStream::TVoIPOutputDevice StreamDev()
     {
+        if (!iBtExperimental) {
+            // a connected headset takes "private"/"no preference" audio and stays silent on the
+            // N79 (A2DP-only earbuds, wired headsets): then "Auto" means the loudspeaker
+            if (iWantRoute == 2 && iBtLinks > 0) return CVoIPAudioDownlinkStream::ELoudSpeaker;
+            return RouteDev(iWantRoute);
+        }
         if (iWantRoute == 2 && iBtLinks > 0) {
             TInt d = KBtCombos[iBtCombo].iDev;
             return d == 1 ? CVoIPAudioDownlinkStream::ELoudSpeaker :
@@ -468,8 +474,7 @@ public:
         TBuf8<64> gl;
         gl.Format(_L8("audio: uplink max gain %d, downlink max volume %d\n"), mg, mv);
         Write(gl);
-        iBtLinks = -2;
-        CheckBt();
+        LogOutputs();          /* log only: never re-applies a route (0.15.3 looped here) */
         ReportRoute();
     }
     // ---- network receive; returns ETrue to re-arm the receive at once
@@ -538,8 +543,14 @@ public:
                 TBuf8<48> lb;
                 lb.Format(_L8("control: Bluetooth combination %d\n"), iBtCombo);
                 Write(lb);
-                if (iWantRoute == 2 && iBtLinks > 0 && iBtReady) BtCombo();
+                if (iBtExperimental && iWantRoute == 2 && iBtLinks > 0 && iBtReady && iBtStage == 0 && !iOpenAt) BtCombo();
                 return ETrue;
+            }
+            if (n == 2 && aData[0] == 'J' && (aData[1] == '0' || aData[1] == '1')) {
+                iBtExperimental = aData[1] == '1';
+                TBuf8<48> lb;
+                lb.Format(_L8("control: experimental bluetooth %d\n"), iBtExperimental ? 1 : 0);
+                Write(lb);
             }
             if (n >= 2 && aData[0] == 'Y') {
                 /* a Bluetooth test answer from the user, logged with the levels of the last second */
@@ -733,14 +744,20 @@ public:
     void SetRoute(TInt aRoute)
     {
         TInt prev = iWantRoute;
+        if (aRoute == iWantRoute && iRouteApplied) {
+            TBuf8<64> ub;
+            ub.Format(_L8("route: request %d unchanged (ignored)\n"), aRoute);
+            Write(ub);
+            return;
+        }
         iWantRoute = aRoute;
+        iRouteApplied = ETrue;
+        iRouteCount++;
         TInt rerr = KErrNone;
-        // with a headset: "Bluetooth" and "earpiece" are both private (handset) on the VoIP stream,
-        // tgbtroute picks the accessory or the handset
         if (iStarted && iDn) rerr = iDn->SetAudioDevice(StreamDev());
-        BtWant(iWantRoute);
+        if (iBtExperimental) BtWant(iWantRoute);
         TBuf8<96> lb;
-        lb.Format(_L8("route: request %d -> err %d (uplink frames %d in the last second)\n"), aRoute, rerr, iUpLastSec);
+        lb.Format(_L8("route: request %d (#%d) -> err %d (uplink frames %d in the last second)\n"), aRoute, iRouteCount, rerr, iUpLastSec);
         Write(lb);
         if (rerr != KErrNone) {
             iWantRoute = prev;
@@ -762,25 +779,40 @@ public:
         if (RProperty::Get(KPropertyUidBluetoothCategory, KPropertyKeyBluetoothGetPHYCount, v) != KErrNone) return -1;
         return v;
     }
+    // Once a second. 0.16.0: headsets are NOT supported in calls; this only reads the Bluetooth
+    // link count, logs it and tells Python (for the hint). Nothing here ever changes a route or
+    // touches the streams unless the experimental Bluetooth mode is on (config bt_experimental
+    // = 1 -> control "J1"; off by default, see docs/CALL-277-SPEC.md).
     void CheckBt()
     {
         TInt n = BtLinks();
-        if (iBtProcOpen && !BtAlive() && iBtWant >= 0) BtWant(iBtWant);   /* it crashed: try again */
-        if (iBtStage && NowMs() - iBtReqAt > 3000) BtStep(-1, ETrue);
-        if (iOpenAt && !iStarted && NowMs() - iOpenAt > 4000 && iReopenTries < 3) {
-            iReopenTries++;
-            Write(_L8("audio: streams did not open in 4 s, trying again\n"));
-            CloseStreams();
-            OpenStreams();
+        if (iBtExperimental) {
+            if (iBtStage && NowMs() - iBtReqAt > 3000) BtStep(-1, ETrue);
+            if (iOpenAt && !iStarted && NowMs() - iOpenAt > 4000 && iReopenTries < 3) {
+                iReopenTries++;
+                Write(_L8("audio: streams did not open in 4 s, trying again\n"));
+                CloseStreams();
+                OpenStreams();
+            }
         }
         if (n == iBtLinks) return;
         iBtLinks = n;
-        if (n > 0 && iStarted) BtWant(iWantRoute);
-        TBuf8<160> lb;
-        lb.Format(_L8("route: outputs earpiece(0) loudspeaker(1) auto(2)%S, bluetooth links %d, wanted %d actual %d\n"),
-                  n > 0 ? &_L8(" bluetooth=auto") : &_L8(""), n, iWantRoute, iActualRoute);
-        Write(lb);
+        LogOutputs();
         SendInfo('B', n);
+        if (!iBtExperimental && iStarted && iDn && iWantRoute == 2) {
+            // "Auto" follows the headset event once: loudspeaker while one is connected
+            TInt e = iDn->SetAudioDevice(StreamDev());
+            TBuf8<64> lb;
+            lb.Format(_L8("route: auto -> device %d after the headset change (err %d)\n"), (TInt)StreamDev(), e);
+            Write(lb);
+        }
+    }
+    void LogOutputs()
+    {
+        TBuf8<160> lb;
+        lb.Format(_L8("route: outputs earpiece(0) loudspeaker(1) auto(2), bluetooth links %d%S, wanted %d actual %d, experimental bluetooth %d\n"),
+                  iBtLinks, iBtLinks > 0 ? &_L8(" (headsets not supported: speaker)") : &_L8(""), iWantRoute, iActualRoute, iBtExperimental ? 1 : 0);
+        Write(lb);
     }
     void ReportRoute()
     {
@@ -1916,7 +1948,8 @@ private:
     TInt iPeakIn, iPeakOut;
     c277_agc iAgc;                 /* mic boost */
     TInt iLastUpMs, iLastDnMs, iUpFrames, iUpLastSec, iUpFixAt, iUpFixes, iDnFixAt, iSilFrames, iRouteAt;
-    TBool iUpBroken, iDnBroken, iUpReopen, iEverStarted;
+    TBool iUpBroken, iDnBroken, iUpReopen, iEverStarted, iBtExperimental, iRouteApplied;
+    TInt iRouteCount;
     TInt iActualRoute, iBtLinks;
     RProcess iBtProc;
     TBool iBtProcOpen, iBtReady, iBtUnavailable;

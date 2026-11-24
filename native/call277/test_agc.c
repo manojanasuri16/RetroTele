@@ -74,7 +74,7 @@ int main(void)
     int pk, hs, i, pi, ri, po, gd, gt, lim, peaks[4] = { 300, 600, 1000, 2000 };
     CHECK(c277_agc_db10(4096) == 0 && c277_agc_db10(8192) == 60 && c277_agc_db10(32768) == 180);
     CHECK(c277_agc_db10(2048) == -60);
-    /* quiet speech gets louder (normal: up to +18 dB, aiming at about -6 dBFS peaks) */
+    /* quiet speech gets louder (normal: up to +12 dB, aiming at about -6 dBFS peaks) */
     for (i = 0; i < 4; i++) {
         c277_agc_init(&a, C277_AGC_NORMAL);
         pk = run(&a, 8, peaks[i], 15, &hs);
@@ -83,7 +83,8 @@ int main(void)
                peaks[i], pk, hs, gd / 10, gd % 10, gt);
         CHECK(pk >= peaks[i] * 3);                         /* at least +9.5 dB */
         CHECK(pk <= 24576 + 2048);                         /* no harder than the limiter knee */
-        if (peaks[i] >= 1000) CHECK(pk >= 8000);           /* -12 dBFS or louder */
+        if (peaks[i] >= 2000) CHECK(pk >= 7000);           /* about -13 dBFS or louder */
+        CHECK(gt < 60);                                    /* real speech is not gated out */
         CHECK(hs <= 15 * 2 + 8 + pk / 8);                  /* pauses: hiss not boosted beyond +6 dB */
         CHECK(lim == 0);
     }
@@ -107,8 +108,8 @@ int main(void)
         c277_agc_stats(&a, &pi, &ri, &po, &gd, &gt, &lim);
         printf("peaky speech: input rms %d (first second), gain %d.%d dB, output peak %d\n",
                (int)isqrt_ll(sq / 8000), gd / 10, gd % 10, outpk);
-        CHECK(gd >= 120);                                   /* boosted by 12 dB or more */
-        CHECK(outpk >= 12000 && outpk <= 26000);
+        CHECK(gd >= 110);                                   /* boosted by about 12 dB (the normal maximum) */
+        CHECK(outpk >= 8000 && outpk <= 26000);
     }
     /* high mode is louder for very quiet speech */
     c277_agc_init(&a, C277_AGC_HIGH);
@@ -150,7 +151,23 @@ int main(void)
     CHECK(pi > 0 && ri > 0 && ri < pi && po == pi && gd == 0);
     /* mode change at run time */
     c277_agc_set_mode(&a, C277_AGC_HIGH);
-    CHECK(a.mode == C277_AGC_HIGH && a.gain == 4 * 4096);
+    CHECK(a.mode == C277_AGC_HIGH && a.gain == 2 * 4096);
+    /* quiet but real speech (peaks 400, rms ~30, mic hiss 8) is never gated out: most speech
+     * frames get the speech gain, which rises well above the pause gain */
+    {
+        int t, speechf = 0, gatedf = 0;
+        c277_agc_init(&a, C277_AGC_NORMAL);
+        for (t = 0; t < 6 * 8000; t += 160) {
+            int before = a.st_gated, ph = t % 2800;
+            speech(f, 160, t, 400, 8);
+            c277_agc_process(&a, f, 160);
+            if (t >= 2 * 8000 && ph >= 400 && ph + 160 <= 1200) { speechf++; if (a.st_gated > before) gatedf++; }
+        }
+        printf("quiet real speech: %d of %d speech frames gated, gain %d.%d dB\n", gatedf, speechf,
+               c277_agc_db10(a.gain) / 10, c277_agc_db10(a.gain) % 10);
+        CHECK(speechf > 0 && gatedf == 0);
+        CHECK(a.gain >= 3 * 4096);                         /* about +9.5 dB or more */
+    }
     printf("test_agc: %d checks, %d failed\n", g_n, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -4,8 +4,8 @@
  * digital AGC runs before the Opus encoder: per 20 ms frame (8 kHz, 160 samples) it measures
  * peak and mean level, aims at about -6 dBFS peak / -17 dBFS RMS, attacks at once (and a soft
  * limiter catches what is left), releases about 3 dB per second, never raises the gain on
- * frames that are near the noise floor (background hiss is not pumped up), max +18 dB (normal)
- * or +24 dB (high). Integer only; no division in the per-sample loop.
+ * frames that are near the noise floor (background hiss is not pumped up), max +12 dB (normal)
+ * or +18 dB (high). Integer only; no division in the per-sample loop.
  */
 #ifndef C277_AGC_H
 #define C277_AGC_H

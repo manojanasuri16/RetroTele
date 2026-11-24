@@ -6,6 +6,22 @@ Modern Symbian Telegram apps such as Symbigram need Qt Quick Components (Symbian
 
 ![RetroTele screens](docs/screenshots.png)
 
+## Status (0.16.0)
+
+Tested on a real Nokia N79:
+
+- chats: log in (incl. two-step password), read, write, reply, edit, delete, forward, pictures, files, music, emoji
+- Telegram voice calls with the official apps (call library 2.7.7), both directions
+- video calls: our camera video to the other side, and the other person's video on our screen (software H.264 decoder), in either order
+- sound through the **phone speaker** or the **phone earpiece**, with the **phone's own microphone**; mic boost in calls (Settings), mute, call options
+
+Not supported yet / known issues:
+
+- **Bluetooth and wired headsets in calls.** The N79 shows modern earbuds (e.g. Galaxy Buds 2 Pro) as a music (A2DP) device only, without a hands-free link, and a wired headset stayed silent too. With a headset connected the call keeps using the phone speaker and microphone and shows a hint. (An experimental Bluetooth routing exists behind a config flag, see docs/CALL-277-SPEC.md.)
+- The other person's video above 240x480 is not shown until their app steps down (usually within seconds).
+- The other person's video can be choppy at times (software decoding next to our camera and the call audio).
+- Video needs the 2.7.7 call library (Settings > Call version).
+
 ## Requirements: a hacked (unlocked) phone
 
 **RetroTele needs a hacked phone.** Its call helpers (`tgcallaudio.exe` and the other native helpers in `RetroTele.sis`) are built with the capabilities **MultimediaDD, ReadDeviceData and WriteDeviceData**, which are needed for the phone's audio and camera/video hardware. A self-signed package on a stock S60 3rd Edition phone can only be granted the user-grantable capabilities (NetworkServices, LocalServices, ReadUserData, WriteUserData, UserEnvironment, Location), so on a stock phone the install is refused. The rest of the package (the app and the `.pyd` modules) uses only user-grantable capabilities.

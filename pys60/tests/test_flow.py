@@ -461,7 +461,7 @@ mlabels = [m[0] for m in appuifw.app.menu]
 assert u"Mute microphone" in mlabels and u"Sound: Speaker" in mlabels and u"Hang up" in mlabels, mlabels
 assert u"Add person to call" not in mlabels and len(mlabels) <= 5, mlabels
 sub = [m[1] for m in appuifw.app.menu if m[0][:6] == u"Sound:"][0]
-assert [x[0] for x in sub] == [u"Speaker", u"Earpiece", u"Auto (headset if connected)"], sub
+assert [x[0] for x in sub] == [u"Speaker", u"Phone earpiece", u"Auto"], sub
 app.view.canvas.keys[ord("1")]()
 assert fa.sent[-1] == "M1" and app.call_muted()
 t = screen_text()
@@ -489,8 +489,35 @@ fa.route_failed = 2
 fa.helper_info(0, 0)
 assert app.client.cs["state"] == "connected" and fa.route_failed == -1
 assert app.toast_text[1].find(u"Bluetooth / auto not available") >= 0, app.toast_text
-# a Bluetooth headset connects during the call: the menu offers it and, as the user only used the
-# cycle key before, nothing is switched automatically; in a fresh state it is
+# 0.16.0 default: headsets are not supported. A headset connecting during the call gives a hint
+# once, the sound stays on the phone (earpiece -> speaker), no Bluetooth entries, no route loop
+assert app.cfg.get("bt_experimental") is None and "J0" in fa.sent, fa.sent
+fa.route_user = 0
+fa.bt_links = 1
+n_sent = len(fa.sent)
+fa.helper_info(0, 0)
+assert app.toast_text[1] == retrotele.HEADSET_HINT, app.toast_text
+assert fa.want_route == 1 and "R2" not in fa.sent[n_sent:], fa.sent[n_sent:]
+mb = [m for m in appuifw.app.menu if m[0][:6] == u"Sound:"][0]
+assert [x[0] for x in mb[1]] == [u"Speaker", u"Phone earpiece", u"Auto"], mb
+assert u"Bluetooth test" not in [m[0] for m in appuifw.app.menu]
+mb[1][1][1]()                                   # earpiece with a headset: hint, stays on the speaker
+assert fa.want_route == 1 and fa.sent.count("R0") == fa.sent[:n_sent].count("R0"), fa.sent[n_sent:]
+mb[1][2][1]()                                   # auto: sent once, shown as Speaker
+assert fa.sent[-1] == "R2" and screen_text().find(u"[2] Sound | Speaker") >= 0, screen_text()
+k = len(fa.sent)
+for i in range(5):
+    fa.helper_info(0, 1)                         # repeated status updates: nothing re-sent
+mb = [m for m in appuifw.app.menu if m[0][:6] == u"Sound:"][0]
+mb[1][2][1]()                                   # the same choice again: not re-sent either
+assert len(fa.sent) == k, fa.sent[k:]
+assert app.client.cs["state"] == "connected" and fa.running
+fa.bt_links = 0
+fa.helper_info(0, 1)
+# the experimental Bluetooth mode (config bt_experimental = 1, with a verified bt_mode)
+app.cfg.set("bt_experimental", "1")
+app.cfg.set("bt_mode", "1")
+fa.set_route(1)
 fa.route_user = 0
 fa.bt_links = 1
 fa.helper_info(0, 0)
@@ -525,6 +552,7 @@ fa.helper_info(0, 1)
 assert [m for m in appuifw.app.menu if m[0][:6] == u"Sound:"][0][0] == u"Sound: Auto"   # the test chose route 2
 assert u"Bluetooth test" not in [m[0] for m in appuifw.app.menu]
 assert app.client.cs["state"] == "connected" and fa.running
+app.cfg.set("bt_experimental", "0")
 # Options menu opened and cancelled (also its Sound output submenu): no menu callback runs and the
 # call goes on. If the right softkey fires with the Cancel (some S60 builds), it asks first.
 assert app.client.cs["state"] == "connected" and fa.running

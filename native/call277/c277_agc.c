@@ -5,12 +5,12 @@
 #define PEAK_T_N   16384             /* -6 dBFS */
 #define PEAK_T_H   20000             /* about -4 dBFS */
 #define MEAN_T     3600              /* mean abs ~ RMS -17 dBFS (speech peaks then near -6 dBFS) */
-#define MAX_G_N    (8 * ONE)         /* +18 dB */
-#define MAX_G_H    (16 * ONE)        /* +24 dB */
+#define MAX_G_N    (4 * ONE)         /* +12 dB (0.16.0: conservative normal) */
+#define MAX_G_H    (8 * ONE)         /* +18 dB */
 #define MIN_G      (ONE / 4)
 #define GATE_G     (2 * ONE)         /* gain held in pauses at most +6 dB (hiss not boosted more) */
 #define START_G_N  (2 * ONE)
-#define START_G_H  (4 * ONE)
+#define START_G_H  (2 * ONE)
 #define MIN_SPEECH 40                /* mean abs below this is never speech (-58 dBFS) */
 #define MIN_PEAK   300               /* peaks below this are never speech (-41 dBFS) */
 #define KNEE       24576             /* soft limiter starts at -2.5 dBFS */
