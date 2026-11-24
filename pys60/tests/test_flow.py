@@ -461,7 +461,7 @@ mlabels = [m[0] for m in appuifw.app.menu]
 assert u"Mute microphone" in mlabels and u"Sound: Speaker" in mlabels and u"Hang up" in mlabels, mlabels
 assert u"Add person to call" not in mlabels and len(mlabels) <= 5, mlabels
 sub = [m[1] for m in appuifw.app.menu if m[0][:6] == u"Sound:"][0]
-assert [x[0] for x in sub] == [u"Speaker", u"Phone earpiece", u"Auto"], sub
+assert [x[0] for x in sub] == [u"Speaker", u"Phone earpiece"], sub
 app.view.canvas.keys[ord("1")]()
 assert fa.sent[-1] == "M1" and app.call_muted()
 t = screen_text()
@@ -469,17 +469,23 @@ assert t.find(u"[1] Mic | Muted") >= 0, t
 assert u"Unmute microphone" in [m[0] for m in appuifw.app.menu]
 app.view.canvas.keys[ord("1")]()
 assert fa.sent[-1] == "M0" and screen_text().find(u"[1] Mic | On") >= 0
-app.view.canvas.keys[ord("2")]()
-assert fa.sent[-1] == "R2" and screen_text().find(u"[2] Sound | Auto") >= 0
+# key 2 toggles speaker <-> phone earpiece (0.16.1), every press is sent
 app.view.canvas.keys[ord("2")]()
 assert fa.sent[-1] == "R0" and screen_text().find(u"[2] Sound | Earpiece") >= 0
 app.view.canvas.keys[ord("2")]()
 assert fa.sent[-1] == "R1" and screen_text().find(u"[2] Sound | Speaker") >= 0
+app.view.canvas.keys[ord("2")]()
+assert fa.sent[-1] == "R0"
+sub[0][1]()
+assert fa.sent[-1] == "R1"
+k = len(fa.sent)
+sub[0][1]()                                     # the same output again is sent again (the helper needs it)
+assert fa.sent[k:] == ["R1"], fa.sent[k:]
 sub[1][1]()
 assert fa.sent[-1] == "R0"
-# 0.15.1: a failing route change (e.g. Bluetooth) never ends the call
+# 0.15.1: a failing route change never ends the call
 fa.route_raises = 1
-sub[2][1]()
+sub[0][1]()
 app.view.canvas.keys[ord("2")]()
 assert app.client.cs["state"] == "connected" and fa.running and fa.sent[-1] == "R0", fa.sent[-3:]
 assert app.toast_text is not None and app.toast_text[1].find(u"Could not switch") >= 0, app.toast_text
@@ -489,28 +495,24 @@ fa.route_failed = 2
 fa.helper_info(0, 0)
 assert app.client.cs["state"] == "connected" and fa.route_failed == -1
 assert app.toast_text[1].find(u"Bluetooth / auto not available") >= 0, app.toast_text
-# 0.16.0 default: headsets are not supported. A headset connecting during the call gives a hint
-# once, the sound stays on the phone (earpiece -> speaker), no Bluetooth entries, no route loop
+# 0.16.1 default: headsets are ignored. A headset connecting changes nothing visible: no hint,
+# no route sent, the menu stays Speaker / Phone earpiece, key 2 keeps toggling
 assert app.cfg.get("bt_experimental") is None and "J0" in fa.sent, fa.sent
 fa.route_user = 0
 fa.bt_links = 1
+fa.set_route(1)
+toast0 = app.toast_text
 n_sent = len(fa.sent)
-fa.helper_info(0, 0)
-assert app.toast_text[1] == retrotele.HEADSET_HINT, app.toast_text
-assert fa.want_route == 1 and "R2" not in fa.sent[n_sent:], fa.sent[n_sent:]
-mb = [m for m in appuifw.app.menu if m[0][:6] == u"Sound:"][0]
-assert [x[0] for x in mb[1]] == [u"Speaker", u"Phone earpiece", u"Auto"], mb
-assert u"Bluetooth test" not in [m[0] for m in appuifw.app.menu]
-mb[1][1][1]()                                   # earpiece with a headset: hint, stays on the speaker
-assert fa.want_route == 1 and fa.sent.count("R0") == fa.sent[:n_sent].count("R0"), fa.sent[n_sent:]
-mb[1][2][1]()                                   # auto: sent once, shown as Speaker
-assert fa.sent[-1] == "R2" and screen_text().find(u"[2] Sound | Speaker") >= 0, screen_text()
-k = len(fa.sent)
 for i in range(5):
-    fa.helper_info(0, 1)                         # repeated status updates: nothing re-sent
+    fa.helper_info(0, 1)                         # status updates: nothing sent
+assert fa.sent[n_sent:] == [] and app.toast_text == toast0, (fa.sent[n_sent:], app.toast_text)
 mb = [m for m in appuifw.app.menu if m[0][:6] == u"Sound:"][0]
-mb[1][2][1]()                                   # the same choice again: not re-sent either
-assert len(fa.sent) == k, fa.sent[k:]
+assert [x[0] for x in mb[1]] == [u"Speaker", u"Phone earpiece"], mb
+assert mb[0] == u"Sound: Speaker" and u"Bluetooth test" not in [m[0] for m in appuifw.app.menu]
+mb[1][1][1]()                                   # earpiece with a headset connected: as chosen
+assert fa.sent[-1] == "R0" and screen_text().find(u"[2] Sound | Earpiece") >= 0
+app.view.canvas.keys[ord("2")]()
+assert fa.sent[-1] == "R1" and screen_text().find(u"[2] Sound | Speaker") >= 0
 assert app.client.cs["state"] == "connected" and fa.running
 fa.bt_links = 0
 fa.helper_info(0, 1)

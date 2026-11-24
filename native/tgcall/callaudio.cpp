@@ -438,12 +438,7 @@ public:
     }
     CVoIPAudioDownlinkStream::TVoIPOutputDevice StreamDev()
     {
-        if (!iBtExperimental) {
-            // a connected headset takes "private"/"no preference" audio and stays silent on the
-            // N79 (A2DP-only earbuds, wired headsets): then "Auto" means the loudspeaker
-            if (iWantRoute == 2 && iBtLinks > 0) return CVoIPAudioDownlinkStream::ELoudSpeaker;
-            return RouteDev(iWantRoute);
-        }
+        if (!iBtExperimental) return RouteDev(iWantRoute);
         if (iWantRoute == 2 && iBtLinks > 0) {
             TInt d = KBtCombos[iBtCombo].iDev;
             return d == 1 ? CVoIPAudioDownlinkStream::ELoudSpeaker :
@@ -476,6 +471,7 @@ public:
         Write(gl);
         LogOutputs();          /* log only: never re-applies a route (0.15.3 looped here) */
         ReportRoute();
+        if (!iBtExperimental) ForcePhoneOutput();   /* once, now that the streams run */
     }
     // ---- network receive; returns ETrue to re-arm the receive at once
     TBool Received(TInt aKind, TInt aErr, const TDesC8& aData, const TInetAddr& aFrom)
@@ -661,6 +657,24 @@ public:
         Write(lb);
         if (e == KErrNone) { iBtProc.Resume(); iBtProcOpen = ETrue; iBtReady = EFalse; }
     }
+    // 0.16.1: keep the call on the PHONE's loudspeaker / earpiece and microphone even when a
+    // wired or Bluetooth headset is attached (the audio policy would otherwise hand the VoIP
+    // streams to it: no sound, no mic). tgbtroute.exe (Telephony Audio Routing, proven on the
+    // N79: SetOutputL(2 handset / 3 loudspeaker) completes and reads back) is started once per
+    // call and asked for 'R l' or 'R h' after the streams started and on every route change.
+    // If it cannot start or reports "unavailable", nothing else happens (plain VoIP route).
+    // The VoIP streams are never closed or re-opened for this.
+    void ForcePhoneOutput()
+    {
+        if (iBtUnavailable) return;
+        iBtWant = iWantRoute == 1 ? 1 : 0;
+        if (!BtAlive()) {
+            if (iBtStarts >= 1) return;          /* one start per call; a crash is not retried */
+            BtStart();
+            return;                              /* "ready" sends the request */
+        }
+        if (iBtReady) BtApply();
+    }
     void BtWant(TInt aRoute)
     {
         // 0 handset, 1 loudspeaker, 2 Bluetooth/auto: only when a headset is connected
@@ -733,7 +747,7 @@ public:
         lx.SkipSpace();
         lx.Val(out);
         if (what == _L8("ready")) { iBtReady = ETrue; BtApply(); }
-        else if (what == _L8("unavailable")) { iBtUnavailable = ETrue; SendInfo('O', 2); }
+        else if (what == _L8("unavailable")) { iBtUnavailable = ETrue; if (iBtExperimental) SendInfo('O', 2); }
         // telephony outputs: 2 handset, 3 loudspeaker, 4 wired, 5 Bluetooth accessory
         if (out >= 0) {
             iBtOut = out;
@@ -743,19 +757,15 @@ public:
     }
     void SetRoute(TInt aRoute)
     {
+        // 0.16.1: every request is applied, also an unchanged one: the request repeated after
+        // the streams started is what makes the downlink play (0.16.0 ignored it: no sound)
         TInt prev = iWantRoute;
-        if (aRoute == iWantRoute && iRouteApplied) {
-            TBuf8<64> ub;
-            ub.Format(_L8("route: request %d unchanged (ignored)\n"), aRoute);
-            Write(ub);
-            return;
-        }
         iWantRoute = aRoute;
-        iRouteApplied = ETrue;
         iRouteCount++;
         TInt rerr = KErrNone;
         if (iStarted && iDn) rerr = iDn->SetAudioDevice(StreamDev());
         if (iBtExperimental) BtWant(iWantRoute);
+        else if (iStarted) ForcePhoneOutput();
         TBuf8<96> lb;
         lb.Format(_L8("route: request %d (#%d) -> err %d (uplink frames %d in the last second)\n"), aRoute, iRouteCount, rerr, iUpLastSec);
         Write(lb);
@@ -799,13 +809,6 @@ public:
         iBtLinks = n;
         LogOutputs();
         SendInfo('B', n);
-        if (!iBtExperimental && iStarted && iDn && iWantRoute == 2) {
-            // "Auto" follows the headset event once: loudspeaker while one is connected
-            TInt e = iDn->SetAudioDevice(StreamDev());
-            TBuf8<64> lb;
-            lb.Format(_L8("route: auto -> device %d after the headset change (err %d)\n"), (TInt)StreamDev(), e);
-            Write(lb);
-        }
     }
     void LogOutputs()
     {
@@ -1948,7 +1951,7 @@ private:
     TInt iPeakIn, iPeakOut;
     c277_agc iAgc;                 /* mic boost */
     TInt iLastUpMs, iLastDnMs, iUpFrames, iUpLastSec, iUpFixAt, iUpFixes, iDnFixAt, iSilFrames, iRouteAt;
-    TBool iUpBroken, iDnBroken, iUpReopen, iEverStarted, iBtExperimental, iRouteApplied;
+    TBool iUpBroken, iDnBroken, iUpReopen, iEverStarted, iBtExperimental;
     TInt iRouteCount;
     TInt iActualRoute, iBtLinks;
     RProcess iBtProc;

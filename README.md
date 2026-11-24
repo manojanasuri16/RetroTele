@@ -6,7 +6,7 @@ Modern Symbian Telegram apps such as Symbigram need Qt Quick Components (Symbian
 
 ![RetroTele screens](docs/screenshots.png)
 
-## Status (0.16.0)
+## Status (0.16.1)
 
 Tested on a real Nokia N79:
 
@@ -17,7 +17,7 @@ Tested on a real Nokia N79:
 
 Not supported yet / known issues:
 
-- **Bluetooth and wired headsets in calls.** The N79 shows modern earbuds (e.g. Galaxy Buds 2 Pro) as a music (A2DP) device only, without a hands-free link, and a wired headset stayed silent too. With a headset connected the call keeps using the phone speaker and microphone and shows a hint. (An experimental Bluetooth routing exists behind a config flag, see docs/CALL-277-SPEC.md.)
+- **Bluetooth and wired headsets in calls.** They are ignored: calls always use the phone microphone and the phone speaker or earpiece (key 2 toggles); RetroTele asks the phone to keep the call audio on its own speaker/earpiece even when a headset is connected. (Modern earbuds such as the Galaxy Buds 2 Pro connect to the N79 for music (A2DP) only. An experimental Bluetooth routing exists behind a config flag, see docs/CALL-277-SPEC.md.)
 - The other person's video above 240x480 is not shown until their app steps down (usually within seconds).
 - The other person's video can be choppy at times (software decoding next to our camera and the call audio).
 - Video needs the 2.7.7 call library (Settings > Call version).

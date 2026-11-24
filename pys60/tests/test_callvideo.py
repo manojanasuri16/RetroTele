@@ -410,6 +410,14 @@ a.set_agc(7); assert sent[-1] == "A1"                  # bad value: normal
 a._handle("O 2"); assert a.route_failed == 2
 a._handle("B 1"); assert a.bt_links == 1
 a._handle("T 5"); assert a.tel_out == 5           # tgbtroute: Bluetooth accessory active
+# 0.16.1: the route goes out when the helper is ready AND again when the call is connected, even
+# unchanged (the second request, after the VoIP streams started, is what makes the speaker play)
+del sent[:]
+a.state = "connecting"
+a._set_state("connected")
+assert "R%d" % a.want_route in sent, sent
+a.set_route(a.want_route)
+assert sent[-1] == "R%d" % a.want_route
 del sent[:]
 a._send_controls()
 assert "W1" in sent and "H1" in sent    # resent when the helper starts late

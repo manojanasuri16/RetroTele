@@ -11,8 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.16.0"  # single source of truth: build_sis.sh reads this
-HEADSET_HINT = u"Headsets are not supported yet: sound uses the phone speaker and microphone"
+VERSION = u"0.16.1"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -1892,7 +1891,6 @@ class App:
             ca.set_agc(self.mic_boost())
             ca.set_btexp(self.bt_experimental())
             ca.set_btmode(self.bt_mode())
-            self.call_hs_hint = 0
         except:
             self.log("mic boost / bt mode: " + err_text())
         if self.client.call_version == "2.7.7" and self.cfg.get("video_rx") != "0":
@@ -1974,18 +1972,9 @@ class App:
             self.call_bt_seen = bt
             self.log("bluetooth links %d, sound output %d (chosen by user: %d)" % (
                 bt, getattr(ca, "want_route", -1), getattr(ca, "route_user", 0)))
-            if bt > 0 and not self.bt_experimental():
-                # 0.16.0: headsets are not supported in calls (A2DP-only earbuds and wired
-                # headsets stayed silent on the N79): the call stays on the phone speaker
-                if not getattr(self, "call_hs_hint", 0):
-                    self.call_hs_hint = 1
-                    try:
-                        self.show_toast(u"Headset", HEADSET_HINT)
-                    except:
-                        pass
-                if getattr(ca, "want_route", 1) == 0:
-                    self.call_set_route(1)
-            elif (bt > 0 and self.bt_experimental() and self.cfg.get("bt_mode") is not None and
+            # 0.16.1: headsets are ignored (the helper keeps the phone's speaker/earpiece and
+            # mic through tgbtroute); only the experimental mode reacts to them
+            if (bt > 0 and self.bt_experimental() and self.cfg.get("bt_mode") is not None and
                     not getattr(ca, "route_user", 0) and getattr(ca, "want_route", 2) != 2):
                 # experimental only, and only with a combination the user verified in the test
                 self.call_set_route(2)
@@ -2049,9 +2038,7 @@ class App:
             return u"Earpiece"
         if r == 1:
             return u"Speaker"
-        if self.call_bt() and not self.bt_experimental():
-            return u"Speaker"                   # "Auto" with a headset connected: loudspeaker
-        if self.call_bt():
+        if self.call_bt() and self.bt_experimental():
             ca = self.call_audio
             to = getattr(ca, "tel_out", -1)
             if to == 5 or to == -1:
@@ -2075,22 +2062,8 @@ class App:
         ca = self.call_audio
         if ca is None:
             return
-        if n == 0 and self.call_bt() and not self.bt_experimental():
-            # the earpiece is "private" audio, which a connected headset takes (and stays silent)
-            try:
-                self.show_toast(u"Headset", HEADSET_HINT)
-            except:
-                pass
-            n = 1
-        if getattr(ca, "want_route", -1) == n and getattr(ca, "route_sent", 0):
-            try:
-                self.redraw()
-            except:
-                pass
-            return                              # one request per change
         try:
             ca.set_route(n)
-            ca.route_sent = 1
         except:
             self.log("route %d: %s" % (n, err_text()))
             try:
@@ -2107,7 +2080,12 @@ class App:
         if ca is None:
             return
         ca.route_user = 1
-        self.call_set_route((ca.want_route + 1) % 3)
+        if self.bt_experimental():
+            self.call_set_route((ca.want_route + 1) % 3)
+        elif ca.want_route == 1:
+            self.call_set_route(0)            # key 2: speaker <-> phone earpiece
+        else:
+            self.call_set_route(1)
 
     # ---------------------------------------------------------- send-only video (2.7.7 calls)
 
@@ -2323,8 +2301,7 @@ class App:
                 else:
                     m.append((u"Sound: " + self.call_route_name(), (
                         (u"Speaker", lambda self=self: self.call_pick_route(1)),
-                        (u"Phone earpiece", lambda self=self: self.call_pick_route(0)),
-                        (u"Auto", lambda self=self: self.call_pick_route(2)))))
+                        (u"Phone earpiece", lambda self=self: self.call_pick_route(0)))))
                 if self.call_bt() and self.bt_experimental():
                     m.append((u"Bluetooth test", self.call_bt_test))
                 if self.call_video_ok():
