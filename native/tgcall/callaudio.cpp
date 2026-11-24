@@ -469,9 +469,9 @@ public:
         TBuf8<64> gl;
         gl.Format(_L8("audio: uplink max gain %d, downlink max volume %d\n"), mg, mv);
         Write(gl);
-        LogOutputs();          /* log only: never re-applies a route (0.15.3 looped here) */
+        iBtLinks = -2;
+        CheckBt();
         ReportRoute();
-        if (!iBtExperimental) ForcePhoneOutput();   /* once, now that the streams run */
     }
     // ---- network receive; returns ETrue to re-arm the receive at once
     TBool Received(TInt aKind, TInt aErr, const TDesC8& aData, const TInetAddr& aFrom)
@@ -765,7 +765,6 @@ public:
         TInt rerr = KErrNone;
         if (iStarted && iDn) rerr = iDn->SetAudioDevice(StreamDev());
         if (iBtExperimental) BtWant(iWantRoute);
-        else if (iStarted) ForcePhoneOutput();
         TBuf8<96> lb;
         lb.Format(_L8("route: request %d (#%d) -> err %d (uplink frames %d in the last second)\n"), aRoute, iRouteCount, rerr, iUpLastSec);
         Write(lb);
