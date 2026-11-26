@@ -946,7 +946,14 @@ class ChatView(CanvasView):
 
     def layout(self, g, m, maxw, group):
         """Lines and size of one bubble (cached)."""
-        ck = (m["id"], m["text"], m["media"], maxw, m.get("edited", 0))
+        pol = m.get("poll")
+        psig = None
+        if pol is not None:
+            votes = []
+            for a in pol.get("answers", []):
+                votes.append((a.get("voters", 0), a.get("chosen", 0)))
+            psig = (pol.get("total", 0), tuple(votes))
+        ck = (m["id"], m["text"], m["media"], maxw, m.get("edited", 0), psig)
         lay = self.layout_cache.get(ck)
         if lay is not None:
             return lay
@@ -998,6 +1005,20 @@ class ChatView(CanvasView):
                 sub = to_u(au["performer"]) + u"  " + sub
             body.append(("audio", fit(g, au.get("title", ""), "text", inner - 36)))
             body.append(("audio2", fit(g, sub, "small", inner - 36)))
+        elif pol is not None:
+            for l in wrap(g, m["media"], "text", inner, 2):
+                body.append(("media", l))
+            total = pol.get("total", 0)
+            for a in pol.get("answers", []):
+                t = u"   " + to_u(a.get("text", ""))
+                if a.get("chosen"):
+                    t = u" * " + to_u(a.get("text", ""))
+                if total:
+                    t = t + u"  %d%%" % (a.get("voters", 0) * 100 / total)
+                for l in wrap(g, t, "text", inner, 2):
+                    body.append(("text", l))
+            if total:
+                body.append(("text", u"%d votes" % total))
         elif m["media"]:
             for l in wrap(g, m["media"], "text", inner, 3):
                 body.append(("media", l))

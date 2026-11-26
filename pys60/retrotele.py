@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.16.2"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.17.1"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -393,6 +393,9 @@ class App:
         self.call_return = "chats"
         self.redraw_armed = 0
         self.cache_armed = 0
+        self.focused = 1           # 0 while RetroTele is in the background
+        self.jump_mid = None       # (chat, message id) to scroll to after loading
+        self.poll_msg = None       # message whose poll the "poll" screen shows
         self.avatars = tgui.Avatars(self, self.dir + "avatar.jpg")
         mdir = self.dir + "media\\"
         try:
@@ -464,7 +467,6 @@ class App:
         if self.client is None:
             return int(time.time())
         return self.client.server_time()
-
     def hhmm(self, ts):
         if not ts:
             return u""
@@ -481,6 +483,24 @@ class App:
                 self.redraw()
         self.net.later(3.5, clear)
         self.redraw()
+
+    def app_focus(self, fg):
+        """appuifw.app.focus: 1 = in front, 0 = background. Notifications for new messages
+        switch to a system popup while RetroTele is in the background."""
+        if fg:
+            self.focused = 1
+        else:
+            self.focused = 0
+
+    def notify_mode(self):
+        """0 off, 1 in-app banner, 2 system popup (Settings > Notifications)."""
+        try:
+            m = int(self.cfg.get("notify", "1"))
+        except:
+            m = 1
+        if m < 0 or m > 2:
+            m = 1
+        return m
 
     def set_screen(self, mode):
         boot_log("screen %s (%s)" % (self.screen, mode))
@@ -1156,6 +1176,7 @@ class App:
             m.append((u"Write message", self.compose))
         m.append((u"Reply to selected", self.reply_selected))
         m.append((u"Read selected message", self.read_selected))
+        m.append((u"Search in chat", self.search_chat))
         if key[0] == "u" and self.client.peer(key)["kind"] == "user":
             m.append((u"Telegram call", lambda self=self, k=key: self.telegram_call(k)))
         if key[0] == "u" and self.client.peer(key).get("phone"):
@@ -1222,6 +1243,10 @@ class App:
                     del self.msgs[k]
         if key == self.chat_key:
             self.redraw()
+            jm = self.jump_mid
+            if jm is not None and jm[0] == key:
+                if not self.focus_message(key, jm[1]):
+                    self.fetch_around(key, jm[1])
             if msgs and not older:
                 d = self.dialog_for(key)
                 if d is None or d.get("unread") or d.get("mark"):
@@ -1230,6 +1255,91 @@ class App:
                     d["unread"] = 0
                     d["mark"] = 0
                     self.dialogs_changed()
+
+    # ---------------------------------------------------------- search in a chat
+
+    def search_chat(self):
+        key = self.chat_key
+        if key is None:
+            return
+        q = appuifw.query(u"Search messages in this chat", "text")
+        if not q:
+            return
+        q = to_u(q).strip()
+        if not q:
+            return
+        self.status(u"Searching...")
+        self.client.search_messages(key, q, lambda msgs, self=self, key=key:
+                                    self.got_search(key, msgs), self.load_failed)
+
+    def got_search(self, key, msgs):
+        self.done_wait()
+        if key != self.chat_key:
+            return
+        if not msgs:
+            appuifw.note(u"No message found.", "info")
+            return
+        names = []
+        for m in msgs:
+            t = to_u(self.client.preview(m))
+            if not t:
+                t = u"(no text)"
+            head = self.hhmm(m["date"])
+            if self.client.is_group(key) and m.get("from_key") and not m["out"]:
+                head = head + u" " + to_u(self.client.short_name(m["from_key"]))
+            names.append(one_line(head + u"  " + t, 70))
+        i = appuifw.selection_list(names, 1)
+        if i is not None:
+            self.jump_to_message(key, msgs[i]["id"])
+
+    def jump_to_message(self, key, mid):
+        """Show a message in its chat, loading the page around it when needed."""
+        self.jump_mid = (key, mid)
+        if self.screen != "chat" or self.chat_key != key:
+            self.open_chat(key)
+            return
+        if self.focus_message(key, mid):
+            return
+        self.fetch_around(key, mid)
+
+    def focus_message(self, key, mid):
+        view = self.view
+        if not isinstance(view, tgui.ChatView) or view.key_ != key:
+            return 0
+        msgs = self.msgs.get(key, [])
+        for i in range(len(msgs)):
+            if msgs[i]["id"] == mid:
+                self.jump_mid = None
+                view.sel = i
+                view.draw()
+                return 1
+        return 0
+
+    def fetch_around(self, key, mid):
+        self.status(u"Finding message...")
+        self.client.get_history(key, lambda msgs, self=self, key=key:
+                                self.got_around(key, msgs), self.load_failed,
+                                offset_id=mid + 1)
+
+    def got_around(self, key, msgs):
+        self.done_wait()
+        byid = {}
+        for m in self.msgs.get(key, []):
+            byid[m["id"]] = m
+        for m in msgs:
+            byid[m["id"]] = m
+        ids = byid.keys()
+        ids.sort()
+        merged = []
+        for i in ids:
+            merged.append(byid[i])
+        self.msgs[key] = merged
+        jm = self.jump_mid
+        self.jump_mid = None
+        if jm is not None and jm[0] == key and not self.focus_message(key, jm[1]):
+            appuifw.note(u"That message is not available any more.", "info")
+        if key == self.chat_key:
+            self.redraw()
 
     def jump_latest(self):
         if isinstance(self.view, tgui.ChatView):
@@ -1264,6 +1374,15 @@ class App:
         if m.get("audio"):
             items.insert(0, u"Play")
             acts.insert(0, lambda self=self, m=m: self.play_audio(m))
+        if m.get("poll"):
+            items.append(u"Poll results")
+            acts.append(lambda self=self, m=m: self.show_poll(m))
+            if not m["poll"].get("closed") and self.client.can_write(self.chat_key):
+                items.append(u"Vote in poll")
+                acts.append(lambda self=self, m=m: self.vote_poll(m))
+        if m.get("buttons"):
+            items.append(u"Bot buttons")
+            acts.append(lambda self=self, m=m: self.bot_buttons(m))
         if not m["service"]:
             items.append(u"Forward")
             acts.append(lambda self=self, m=m: self.forward_message(m))
@@ -1400,6 +1519,153 @@ class App:
         menu.append((u"Back", self.back_to_chat))
         appuifw.app.menu = menu
         appuifw.app.exit_key_handler = self.back_to_chat
+
+    # ---------------------------------------------------------- polls and bot buttons
+
+    def poll_text(self, m):
+        p = m["poll"]
+        total = p.get("total", 0)
+        lines = [to_u(p.get("question") or u"Poll")]
+        if total:
+            lines.append(u"%d votes" % total)
+        lines.append(u"")
+        for a in p.get("answers", []):
+            t = u"   " + to_u(a.get("text", ""))
+            if a.get("chosen"):
+                t = u" * " + to_u(a.get("text", ""))
+            if total:
+                t = t + u"  %d%% (%d)" % (a.get("voters", 0) * 100 / total,
+                                          a.get("voters", 0))
+            lines.append(t)
+        notes = []
+        if p.get("multiple"):
+            notes.append(u"multiple choice")
+        if p.get("quiz"):
+            notes.append(u"quiz")
+        if p.get("closed"):
+            notes.append(u"closed")
+        if notes:
+            lines.append(u"")
+            lines.append(u", ".join(notes))
+        if p.get("chosen"):
+            lines.append(u"* is your vote")
+        return u"\n".join(lines)
+
+    def show_poll(self, m):
+        if m is None or m.get("poll") is None:
+            return
+        self.poll_msg = m
+        self.screen = "poll"
+        self.set_screen("normal")
+        t = appuifw.Text()
+        t.set(self.poll_text(m))
+        appuifw.app.body = t
+        appuifw.app.title = u"Poll"
+        menu = []
+        if not m["poll"].get("closed") and self.client.can_write(self.chat_key):
+            menu.append((u"Vote", lambda self=self, m=m: self.vote_poll(m)))
+        menu.append((u"Back", self.back_to_chat))
+        appuifw.app.menu = menu
+        appuifw.app.exit_key_handler = self.back_to_chat
+
+    def vote_poll(self, m):
+        p = m["poll"]
+        names = []
+        options = []
+        for a in p.get("answers", []):
+            t = to_u(a.get("text", ""))
+            if p.get("multiple") and a.get("chosen"):
+                t = u"[x] " + t
+            names.append(one_line(t, 60))
+            options.append(a.get("option"))
+        if not names:
+            return
+        i = appuifw.selection_list(names, 1)
+        if i is None:
+            return
+        opt = options[i]
+        chosen = []
+        if p.get("multiple"):
+            for a in p.get("answers", []):
+                if a.get("chosen") and a.get("option") != opt:
+                    chosen.append(a.get("option"))
+            if not (opt in chosen):
+                chosen.append(opt)
+        else:
+            chosen.append(opt)
+        self.status(u"Voting...")
+
+        def ok(res, self=self, m=m, chosen=chosen):
+            self.done_wait()
+            self.voted_locally(m["poll"], chosen)
+            self.show_poll(m)
+        self.client.send_vote(self.chat_key, m["id"], chosen, ok, self.send_failed)
+
+    def voted_locally(self, p, chosen):
+        """Show the vote at once; the server's updateMessagePoll follows a moment later."""
+        total = p.get("total", 0)
+        for a in p.get("answers", []):
+            was = a.get("chosen", 0)
+            now = 0
+            if a.get("option") in chosen:
+                now = 1
+            if now and not was:
+                a["voters"] = a.get("voters", 0) + 1
+                total = total + 1
+            elif was and not now:
+                a["voters"] = max(a.get("voters", 1) - 1, 0)
+                total = max(total - 1, 0)
+            a["chosen"] = now
+        p["chosen"] = chosen
+        p["total"] = total
+
+    def poll_changed(self, poll_id, results):
+        hit = 0
+        for k in self.msgs.keys():
+            for m in self.msgs[k]:
+                p = m.get("poll")
+                if p is not None and p.get("id") == poll_id:
+                    tgclient.apply_poll_results(p, results)
+                    self.poll_msg = m
+                    hit = 1
+        if not hit:
+            return
+        if self.screen == "poll":
+            self.show_poll(self.poll_msg)
+        self.redraw_soon()
+
+    def bot_buttons(self, m):
+        btns = m.get("buttons") or []
+        if not btns:
+            return
+        names = []
+        for b in btns:
+            names.append(one_line(to_u(b.get("text", "")), 60))
+        i = appuifw.selection_list(names, 1)
+        if i is None:
+            return
+        b = btns[i]
+        key = self.chat_key
+        if b.get("kind") == "callback":
+            self.status(u"Sending...")
+
+            def reload(self=self, key=key):
+                if self.screen == "chat" and self.chat_key == key:
+                    self.reload_chat()
+
+            def ok(res, self=self, reload=reload):
+                self.done_wait()
+                t = to_u(res.get("message") or "")
+                link = to_u(res.get("url") or "")
+                if t:
+                    appuifw.note(t, "info")
+                elif link:
+                    appuifw.note(u"Link:\n" + link, "info")
+                # the bot's reply is a separate update: load it in a moment
+                self.net.later(1, reload)
+            self.client.bot_callback(key, m["id"], b.get("data", ""), ok, self.send_failed)
+        else:
+            appuifw.note(u"Link:\n" + to_u(b.get("url", "")), "info")
 
     def view_profile(self):
         key = self.chat_key
@@ -2376,7 +2642,10 @@ class App:
 
     def new_message(self, key, msg):
         self.add_message(key, msg)
-        viewing = key == self.chat_key and self.screen in ("chat", "text", "compose", "filepick")
+        # only a chat on screen in front counts as read: in the background the message
+        # stays unread and its notification is shown
+        viewing = (self.focused and key == self.chat_key and
+                   self.screen in ("chat", "text", "compose", "filepick", "poll"))
         if viewing and not msg["out"]:
             self.client.mark_read(key, msg["id"])
         d = self.dialog_for(key)
@@ -2399,12 +2668,25 @@ class App:
             d["unread"] = d.get("unread", 0) + 1
         self.move_to_top(d)
         self.dialogs_changed()
-        if not msg["out"] and not viewing and not d.get("muted"):
-            who = self.client.peer_name(key)
+        if not msg["out"] and not viewing and not d.get("muted") and self.notify_mode():
+            who = to_u(self.client.peer_name(key))
             text = to_u(self.client.preview(msg))
             if self.client.is_group(key) and msg.get("from_key"):
                 text = to_u(self.client.short_name(msg["from_key"])) + u": " + text
-            self.show_toast(to_u(who), text)
+            if self.notify_mode() == 2 or not self.focused:
+                # a global note (third argument) is shown by S60 even when RetroTele is
+                # in the background, over whatever application is in front
+                try:
+                    appuifw.note(who + u"\n" + text, "info", 1)
+                except TypeError:
+                    try:
+                        appuifw.note(who + u"\n" + text, "info")
+                    except:
+                        self.show_toast(who, text)
+                except:
+                    self.show_toast(who, text)
+            else:
+                self.show_toast(who, text)
         else:
             self.redraw_soon()
 
@@ -2559,7 +2841,10 @@ class App:
         if self.cfg.get("verify", default) == "1":
             fm = u"Fast mode: off (full check)"
         mb = [u"Mic boost in calls: off", u"Mic boost in calls: normal", u"Mic boost in calls: high"][self.mic_boost()]
-        items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder", ap, fm, mb]
+        nm = [u"Notifications: off", u"Notifications: banner",
+              u"Notifications: system popup"][self.notify_mode()]
+        items = [u"Access point", u"Telegram API key", u"Log out", u"Show data folder", ap, fm, mb,
+                 nm]
         i = appuifw.popup_menu(items, u"Settings")
         if i == 0:
             if self.setup_ap(1):
@@ -2599,6 +2884,14 @@ class App:
                         ca.set_agc(j)
                     except:
                         pass
+        elif i == 7:
+            m = (self.notify_mode() + 1) % 3
+            self.cfg.set("notify", str(m))
+            self.cfg.save()
+            appuifw.note([u"Notifications off.",
+                          u"In-app banner for new messages.",
+                          u"System popup for new messages, also while RetroTele is in the "
+                          u"background."][m], "info")
         elif i == 4:
             if self.auto_photos():
                 self.cfg.set("auto_photos", "0")
@@ -2674,6 +2967,10 @@ class App:
     def run(self):
         appuifw.app.title = APP
         appuifw.app.exit_key_handler = self.exit
+        try:
+            appuifw.app.focus = self.app_focus
+        except:
+            pass
         self.set_screen("large")
         self.view = tgui.WelcomeView(self, [u"Starting..."])
         self.view.show()

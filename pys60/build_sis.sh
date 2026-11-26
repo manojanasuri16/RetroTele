@@ -45,6 +45,14 @@ if [ -f native/tgnative.pyd ] && [ "$NATIVE" != 0 ]; then
   EXTRAS="--extrasdir=extras"
   echo "including native/tgnative.pyd"
 fi
+# tgcall.pyd: live audio + the Opus benchmark behind Settings > Call test. Without it the
+# device check says "tgcall module missing", so the baseline package ships it.
+if [ -f native/tgcall.pyd ]; then
+  mkdir -p build/app/extras/sys/bin
+  cp native/tgcall.pyd build/app/extras/sys/bin/
+  EXTRAS="--extrasdir=extras"
+  echo "including native/tgcall.pyd (call test)"
+fi
 # the call audio helper: runs the call itself (Opus, VoIP audio, relay protocol)
 if [ -f native/tgcallaudio.exe ]; then
   mkdir -p build/app/extras/sys/bin
@@ -77,6 +85,11 @@ OPTS="--uid=0xE7A3D5C2 --appname=RetroTele --version=$VERSION \
   --heapsize=4k,24M --cert=cert/retrotele_cert.pem --privkey=cert/retrotele_key.pem $EXTRAS"
 rm -f dist/RetroTele-card.sis
 rm -f dist/RetroTele-full.sis
+# RetroTele-app-only.sis: the app on its own, debugging only. It carries no Nokia components, so
+# there is no call audio unless Nokia's VoIP Audio Services is installed on the SAME drive (that
+# package puts VoIPAudioSession.dll, VoIPAudioIntfc.dll and VoIPAudioServer.exe in \sys\bin).
+# Without them e32.start_exe fails with KErrNotFound, the call connects, the video helper still
+# starts and the call is silent. A phone build ships dist/RetroTele.sis.
 $PY tools/py2sis_rscfix.py "$(dirname $ENS)" $OPTS --drive=any build/app dist/RetroTele-app-only.sis \
   </dev/null >build/py2sis.log
 grep "rscfix" build/py2sis.log || true

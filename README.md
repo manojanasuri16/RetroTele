@@ -124,6 +124,8 @@ One file, `RetroTele.sis`, installs everything:
 
 The two Nokia components belong to their owners and are included only for convenience; if a rights holder asks, they will be removed from the package. Already-installed copies in the same version are kept by the installer. The phone hack (Open4All, see Requirements) is still needed: bundling cannot grant the helpers' capabilities. Not bundled: the Python script shell (not needed). `pys60/build_sis.sh` builds it with `ensymble mergesis` (it also makes `RetroTele-app-only.sis`, for debugging only) and lists the embedded packages with `tools/sisinfo.py`.
 
+`RetroTele-app-only.sis` leaves both Nokia components out, so it has no call audio unless they are already on the phone: the call audio helper needs Nokia's **VoIP Audio Services on its own drive** (that package puts `VoIPAudioSession.dll`, `VoIPAudioIntfc.dll` and `VoIPAudioServer.exe` into `\sys\bin`, next to the helper). Without them `e32.start_exe` fails with `KErrNotFound`, the call still connects and the video helper still starts, so the call is just silent: check for the audio service before looking at the call code.
+
 ## Credits
 
 Emoji images: [Twemoji](https://github.com/twitter/twemoji) by Twitter, Inc and other contributors, licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). The sprite sheets in `pys60/assets/` are built by `tools/emoji/make_emoji.py`.

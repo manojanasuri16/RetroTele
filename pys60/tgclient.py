@@ -243,6 +243,64 @@ def audio_info(doc):
                     "thumb_size": ""}}
 
 
+BUTTON_LINKS = ("inlineButtonTypeUrl", "inlineButtonTypeUrlAuth", "inlineButtonTypeWebView")
+
+
+def button_list(rm):
+    """Inline keyboard under a message -> [{"text", "kind", "data" / "url"}]."""
+    out = []
+    if type(rm) is not type({}) or rm.get("_") != "replyInlineMarkup":
+        return out
+    for row in rm.get("rows", []):
+        for b in row.get("buttons", []):
+            t = b.get("type") or {}
+            n = t.get("_")
+            text = b.get("text") or ""
+            if n == "inlineButtonTypeCallback":
+                out.append({"text": text, "kind": "callback", "data": t.get("data", "")})
+            elif n in BUTTON_LINKS:
+                out.append({"text": text, "kind": "url", "url": t.get("url", "")})
+            elif n == "inlineButtonTypeCopy":
+                out.append({"text": text, "kind": "copy", "url": t.get("copy_text", "")})
+    return out
+
+
+def apply_poll_results(p, res):
+    """Copy voters / chosen flags from pollResults into a poll_info dict."""
+    if not (res or {}).get("results"):
+        if (res or {}).has_key("total_voters"):
+            p["total"] = res.get("total_voters", 0)
+        return
+    got = {}
+    for r in res.get("results", []):
+        got[r.get("option")] = r
+    chosen = []
+    for a in p.get("answers", []):
+        r = got.get(a.get("option"))
+        if r is not None:
+            a["voters"] = r.get("voters", 0)
+            a["chosen"] = r.get("chosen", 0) and 1 or 0
+            a["correct"] = r.get("correct", 0) and 1 or 0
+        if a.get("chosen"):
+            chosen.append(a.get("option"))
+    p["chosen"] = chosen
+    if res.has_key("total_voters"):
+        p["total"] = res.get("total_voters", 0)
+
+
+def poll_info(media):
+    """messageMediaPoll -> question, answers and the votes counted so far."""
+    p = media.get("poll") or {}
+    d = {"id": p.get("id", 0), "question": text_of(p.get("question") or ""),
+         "answers": [], "total": 0, "chosen": [], "closed": p.get("closed", 0),
+         "quiz": p.get("quiz", 0), "multiple": p.get("multiple_choice", 0)}
+    for a in p.get("answers", []):
+        d["answers"].append({"text": text_of(a.get("text") or ""), "option": a.get("option"),
+                             "voters": 0, "chosen": 0, "correct": 0})
+    apply_poll_results(d, media.get("results") or {})
+    return d
+
+
 class Client:
     def __init__(self, net, schema, ui, store, api_id, api_hash, version="1.0.0"):
         self.net = net
@@ -713,7 +771,8 @@ class Client:
         d = {"id": m.get("id", 0), "key": key, "out": m.get("out", 0),
              "date": m.get("date", 0), "text": "", "media": "", "reply_to": 0,
              "edited": 0, "fwd": "", "service": 0, "from": "", "from_key": None,
-             "photo": None, "sticker": None, "audio": None}
+             "photo": None, "sticker": None, "audio": None, "poll": None,
+             "buttons": None}
         if n == "messageEmpty":
             d["text"] = "Deleted message"
             d["service"] = 1
@@ -768,7 +827,8 @@ class Client:
                     pass
             elif mn == "messageMediaPoll":
                 try:
-                    label = "Poll: " + text_of(media["poll"]["question"])
+                    d["poll"] = poll_info(media)
+                    label = "Poll: " + d["poll"]["question"]
                 except:
                     pass
             elif mn == "messageMediaGeo" or mn == "messageMediaVenue":
@@ -781,6 +841,9 @@ class Client:
                 label = "Contact: " + ((media.get("first_name") or "") + " " +
                                        (media.get("phone_number") or "")).strip()
             d["media"] = label
+        btns = button_list(m.get("reply_markup"))
+        if btns:
+            d["buttons"] = btns
         return d
 
     def action_text(self, a, who):
@@ -925,6 +988,23 @@ class Client:
                    "offset_id": offset_id, "offset_date": 0, "add_offset": 0,
                    "limit": limit, "max_id": 0, "min_id": 0, "hash": 0}, ok, on_err)
 
+    def search_messages(self, key, query, on_ok, on_err, limit=20, offset_id=0):
+        """messages.search in one chat, newest first."""
+        if type(query) is type(u""):
+            query = query.encode("utf-8")
+
+        def ok(res, self=self, on_ok=on_ok):
+            out = []
+            for m in res.get("messages", []):
+                if m.get("_") != "message":
+                    continue
+                out.append(self.norm_message(m))
+            on_ok(out)
+        self.call({"_": "messages.search", "peer": self.input_peer(key), "q": query,
+                   "filter": {"_": "inputMessagesFilterEmpty"}, "min_date": 0,
+                   "max_date": 0, "offset_id": offset_id, "add_offset": 0,
+                   "limit": limit, "max_id": 0, "min_id": 0, "hash": 0}, ok, on_err)
+
     def send_text(self, key, text, on_ok, on_err, reply_to=0):
         if type(text) is type(u""):
             text = text.encode("utf-8")
@@ -1025,6 +1105,19 @@ class Client:
                    "peer": {"_": "inputNotifyPeer", "peer": self.input_peer(key)},
                    "settings": {"_": "inputPeerNotifySettings", "mute_until": until}},
                   on_ok, on_err)
+
+    def send_vote(self, key, msg_id, options, on_ok, on_err):
+        """Vote in a poll: options is the list of pollAnswer.option bytes."""
+        def ok(res, self=self, on_ok=on_ok):
+            self.handle_updates(res)
+            on_ok(res)
+        self.call({"_": "messages.sendVote", "peer": self.input_peer(key),
+                   "msg_id": msg_id, "options": options}, ok, on_err)
+
+    def bot_callback(self, key, msg_id, data, on_ok, on_err):
+        """Press an inline button of a bot message."""
+        self.call({"_": "messages.getBotCallbackAnswer", "peer": self.input_peer(key),
+                   "msg_id": msg_id, "data": data}, on_ok, on_err)
 
     def forward(self, from_key, ids, to_key, on_ok, on_err):
         rids = []
@@ -1493,6 +1586,8 @@ class Client:
                 self.ui.call_signaling(data)
         elif n == "updatePhoneCall":
             self.call_update(x.get("phone_call") or {})
+        elif n == "updateMessagePoll":
+            self.ui.poll_changed(x.get("poll_id", 0), x.get("results") or {})
         elif n == "updateUserTyping" or n == "updateChatUserTyping":
             pass
         elif n == "updateChannelTooLong":
