@@ -107,6 +107,7 @@ def emoji_index():
     idx = _emoji["index"]
     if idx is None:
         idx = {}
+        n = 0
         try:
             f = open(ASSET_DIR[0] + "emoji.txt", "rb")
             for line in f.read().split("\n"):
@@ -172,8 +173,64 @@ def prep(text):
     return u"".join(out)
 
 
+def react_label(r):
+    """The "<emoji> <count>" text a reaction chip shows (prepped, so the phone's
+    font is never asked for an emoji glyph it does not have)."""
+    return prep(r["emoji"]) + u" " + to_u("%d" % r["count"])
+
+
 def has_emoji(t):
     return t and max(t) >= u"\ue000"
+
+
+# ---------------------------------------------------------------- file cards
+# A document (PDF, zip, APK, doc...) gets a card of its own in the bubble:
+# coloured badge with the type, the file name and its size.
+
+FILE_KINDS = {
+    "pdf": (u"PDF", 0xD93025),
+    "zip": (u"ZIP", 0x8A6D00), "rar": (u"RAR", 0x8A6D00), "7z": (u"7Z", 0x8A6D00),
+    "gz": (u"GZ", 0x8A6D00), "tar": (u"TAR", 0x8A6D00),
+    "apk": (u"APK", 0x2E7D32), "sis": (u"SIS", 0x2E7D32), "sisx": (u"SIS", 0x2E7D32),
+    "jar": (u"JAR", 0x2E7D32), "jad": (u"JAD", 0x2E7D32),
+    "doc": (u"DOC", 0x2F6FBF), "docx": (u"DOC", 0x2F6FBF),
+    "odt": (u"ODT", 0x2F6FBF), "rtf": (u"RTF", 0x2F6FBF),
+    "xls": (u"XLS", 0x1E7B4F), "xlsx": (u"XLS", 0x1E7B4F),
+    "ods": (u"ODS", 0x1E7B4F), "csv": (u"CSV", 0x1E7B4F),
+    "ppt": (u"PPT", 0xC05621), "pptx": (u"PPT", 0xC05621),
+    "odp": (u"ODP", 0xC05621),
+    "txt": (u"TXT", 0x607D8B), "log": (u"LOG", 0x607D8B),
+    "json": (u"JSON", 0x607D8B), "xml": (u"XML", 0x607D8B),
+    "mp3": (u"MP3", 0x7B4FB0), "mp4": (u"MP4", 0x7B4FB0),
+    "3gp": (u"3GP", 0x7B4FB0), "mkv": (u"MKV", 0x7B4FB0),
+    "jpg": (u"JPG", 0x3B7FA8), "png": (u"PNG", 0x3B7FA8),
+}
+
+
+def file_size(n):
+    n = int(n or 0)
+    if n >= 1048576:
+        return u"%.1f MB" % (n / 1048576.0)
+    if n >= 1024:
+        return u"%d KB" % (n / 1024)
+    return u"%d B" % n
+
+
+def file_badge(f):
+    """(text, colour) for the little square on the left of a file card."""
+    e = to_u(f.get("ext", u"")).lower()
+    k = FILE_KINDS.get(e)
+    if k is not None:
+        return k
+    if e:
+        return (e[:3].upper(), 0x607D8B)
+    return (u"FILE", 0x607D8B)
+
+
+def file_meta(f):
+    """The second line of a file card: the type and the size."""
+    b = file_badge(f)[0]
+    return b + u" \xb7 " + file_size(f.get("size", 0))
 
 
 def _split(t):
@@ -683,9 +740,26 @@ class ChatListView(CanvasView):
         self.cur = 0
         self.top = 0
         self.tab_scroll = 0
+        self.archived = 0         # 1 while the archived chats are listed
 
     def rows(self):
+        if self.archived:
+            return self.app.archived_rows()
         return self.app.tab_rows(self.tab)
+
+    def show_archived(self):
+        self.archived = 1
+        self.cur = 0
+        self.top = 0
+        self.app.archived_opened()
+        self.draw()
+
+    def close_archived(self):
+        self.archived = 0
+        self.cur = 0
+        self.top = 0
+        self.app.archived_closed()
+        self.draw()
 
     def key(self, k):
         rows = self.rows()
@@ -703,14 +777,19 @@ class ChatListView(CanvasView):
             if self.cur >= n - 3:
                 self.app.near_end(self.tab)
         elif k == "left" or k == "right":
-            tabs = self.app.tabs()
-            if k == "left":
-                self.tab = (self.tab - 1) % len(tabs)
+            if self.archived:
+                if k == "left":
+                    self.close_archived()
+                    return
             else:
-                self.tab = (self.tab + 1) % len(tabs)
-            self.cur = 0
-            self.top = 0
-            self.app.tab_changed(self.tab)
+                tabs = self.app.tabs()
+                if k == "left":
+                    self.tab = (self.tab - 1) % len(tabs)
+                else:
+                    self.tab = (self.tab + 1) % len(tabs)
+                self.cur = 0
+                self.top = 0
+                self.app.tab_changed(self.tab)
         elif k == "select":
             if 0 <= self.cur < n:
                 self.app.open_row(rows[self.cur])
@@ -720,6 +799,9 @@ class ChatListView(CanvasView):
         elif k in ("8",):
             return self.key("down")
         elif k == "4":
+            if self.archived:
+                self.close_archived()
+                return
             return self.key("left")
         elif k == "6":
             return self.key("right")
@@ -739,42 +821,56 @@ class ChatListView(CanvasView):
         sub = None
         if not app.is_online:
             sub = u"Waiting for network..."
-        self.header(g, w, u"RetroTele", sub)
-        # tabs
+        # the tab names come from your folders and can carry emoji: swap them for
+        # the phone's own pictures, otherwise S60 draws boxes ("[][]")
         tabs = app.tabs()
-        ty = self.HEADER_H
-        g.rectangle((0, ty, w, ty + self.TABS_H), fill=BLUE)
-        xs = []
-        x = 0
-        for t in tabs:
-            label = to_u(t[0])
-            tw = width(g, label, "tab") + 20
-            xs.append((x, tw, label, t))
-            x = x + tw
-        if self.tab >= len(xs):
-            self.tab = 0
-        sx, sw, sl, st = xs[self.tab]
-        if sx - self.tab_scroll < 0:
-            self.tab_scroll = sx
-        if sx + sw - self.tab_scroll > w:
-            self.tab_scroll = sx + sw - w
-        i = 0
-        for x, tw, label, t in xs:
-            xx = x - self.tab_scroll
-            if xx + tw >= 0 and xx <= w:
-                colour = HEADER_SUB
-                if i == self.tab:
-                    colour = WHITE
-                    g.rectangle((xx + 6, ty + self.TABS_H - 3, xx + tw - 6, ty + self.TABS_H),
-                                fill=WHITE)
-                g.text((xx + 10, ty + 19), label, fill=colour, font=font("tab"))
-                badge = t[1]
-                if badge:
-                    pass
-            i = i + 1
-        # rows
-        rows = self.rows()
-        y0 = ty + self.TABS_H
+        if self.archived:
+            rows = self.rows()
+            self.header(g, w, u"Archived", u"%d chats" % len(rows))
+            y0 = self.HEADER_H
+        else:
+            self.header(g, w, u"RetroTele", sub)
+            # tabs
+            ty = self.HEADER_H
+            g.rectangle((0, ty, w, ty + self.TABS_H), fill=BLUE)
+            xs = []
+            x = 0
+            try:
+                badges = app.tab_badges()
+            except:
+                badges = []
+            i = 0
+            for t in tabs:
+                label = prep(to_u(t[0]))
+                n = 0
+                if i < len(badges):
+                    n = badges[i]
+                if n:
+                    label = label + u" (%d)" % n
+                tw = width(g, label, "tab") + 20
+                xs.append((x, tw, label, t))
+                x = x + tw
+                i = i + 1
+            if self.tab >= len(xs):
+                self.tab = 0
+            sx, sw, sl, st = xs[self.tab]
+            if sx - self.tab_scroll < 0:
+                self.tab_scroll = sx
+            if sx + sw - self.tab_scroll > w:
+                self.tab_scroll = sx + sw - w
+            i = 0
+            for x, tw, label, t in xs:
+                xx = x - self.tab_scroll
+                if xx + tw >= 0 and xx <= w:
+                    colour = HEADER_SUB
+                    if i == self.tab:
+                        colour = WHITE
+                        g.rectangle((xx + 6, ty + self.TABS_H - 3,
+                                     xx + tw - 6, ty + self.TABS_H), fill=WHITE)
+                    txt(g, xx + 10, ty + 19, label, colour, "tab", "b")
+                i = i + 1
+            y0 = ty + self.TABS_H
+            rows = self.rows()
         visible = max((h - y0) / self.ROW_H, 1)
         if self.cur >= len(rows):
             self.cur = max(len(rows) - 1, 0)
@@ -783,7 +879,10 @@ class ChatListView(CanvasView):
         if self.cur >= self.top + visible:
             self.top = self.cur - visible + 1
         if not rows:
-            msg = app.empty_text(self.tab)
+            if self.archived:
+                msg = u"No archived chats"
+            else:
+                msg = app.empty_text(self.tab)
             g.text(((w - width(g, msg, "text")) / 2, y0 + 60), msg, fill=GREY,
                    font=font("text"))
         y = y0
@@ -800,6 +899,42 @@ class ChatListView(CanvasView):
         cl = app.client
         key = r["key"]
         RH = self.ROW_H
+        if r.get("archived_row"):
+            # the Archived entry at the top of All chats, like the Telegram app
+            if sel:
+                g.rectangle((0, y, w, y + RH), fill=BLUE)
+                c_name = WHITE
+                c_sub = WHITE
+            else:
+                c_name = TEXT
+                c_sub = GREY
+            rrect(g, 8, y + 7, 48, y + 47, 10, (sel and 0x8CBCF0) or 0xDDE3E8)
+            ic = (sel and WHITE) or GREY
+            g.rectangle((20, y + 22, 36, y + 35), outline=ic)
+            g.line((18, y + 19, 38, y + 19), outline=ic)
+            g.line((26, y + 27, 30, y + 27), outline=ic)
+            g.text((58, y + 22), u"Archived", fill=c_name, font=font("name"))
+            badge = u""
+            if r.get("unread"):
+                badge = unicode(str(r["unread"]))
+            bw = 0
+            if badge:
+                bw = max(width(g, badge, "smallb") + 12, 22)
+                bc = BLUE
+                fc = WHITE
+                if sel:
+                    bc = WHITE
+                    fc = BLUE
+                rrect(g, w - 8 - bw, y + 30, w - 8, y + 50, 10, bc)
+                g.text((w - 8 - bw + (bw - width(g, badge, "smallb")) / 2, y + 45),
+                       badge, fill=fc, font=font("smallb"))
+                bw = bw + 6
+            g.text((58, y + 44),
+                   fit(g, r.get("preview", u""), "text", w - 66 - bw), fill=c_sub,
+                   font=font("text"))
+            if not sel:
+                g.line((58, y + RH - 1, w, y + RH - 1), outline=LINE)
+            return
         if sel:
             g.rectangle((0, y, w, y + RH), fill=BLUE)
             c_name = WHITE
@@ -953,7 +1088,10 @@ class ChatView(CanvasView):
             for a in pol.get("answers", []):
                 votes.append((a.get("voters", 0), a.get("chosen", 0)))
             psig = (pol.get("total", 0), tuple(votes))
-        ck = (m["id"], m["text"], m["media"], maxw, m.get("edited", 0), psig)
+        reacts = m.get("reactions") or []
+        rsig = [(r["emoji"], r["count"]) for r in reacts]
+        ck = (m["id"], m["text"], m["media"], maxw, m.get("edited", 0), psig,
+              tuple(rsig), self.app.tz)
         lay = self.layout_cache.get(ck)
         if lay is not None:
             return lay
@@ -1019,6 +1157,12 @@ class ChatView(CanvasView):
                     body.append(("text", l))
             if total:
                 body.append(("text", u"%d votes" % total))
+        elif m.get("file") and not m.get("photo"):
+            f = m["file"]
+            name = to_u(f.get("name") or u"File")
+            cw = min(self.FILE_W, inner)
+            body.append(("file", (fit(g, name, "smallb", cw - 48),
+                                  file_meta(f), file_badge(f), cw)))
         elif m["media"]:
             for l in wrap(g, m["media"], "text", inner, 3):
                 body.append(("media", l))
@@ -1039,9 +1183,12 @@ class ChatView(CanvasView):
                 bw = max(bw, width(g, l, "small"))
         last_w = 0
         for kind, l in body:
-            last_w = width(g, l, "text")
-            if kind == "audio" or kind == "audio2":
-                last_w = last_w + 36
+            if kind == "file":
+                last_w = l[3]
+            else:
+                last_w = width(g, l, "text")
+                if kind == "audio" or kind == "audio2":
+                    last_w = last_w + 36
             bw = max(bw, last_w)
         h = self.PAD
         for kind, l in head:
@@ -1054,7 +1201,11 @@ class ChatView(CanvasView):
             h = h + photo[1] + 4
             if not head:
                 h = h - self.PAD + 3
-        h = h + len(body) * 18
+        for kind, l in body:
+            if kind == "file":
+                h = h + self.FILE_H
+            else:
+                h = h + 18
         # time on the last line if it fits, else on its own line
         meta_own_line = 1
         if body and last_w + mw + 8 <= inner:
@@ -1062,9 +1213,23 @@ class ChatView(CanvasView):
             bw = max(bw, last_w + mw + 8)
         if meta_own_line:
             h = h + 15
+        rh = 0
+        if reacts:
+            rw = 0
+            k = 0
+            for r in reacts:
+                if k >= 3:
+                    break
+                lab = react_label(r)
+                rw = rw + width(g, lab, "small") + 14
+                k = k + 1
+            bw = max(bw, rw)
+            h = h + 20
+            rh = 1
         h = h + 6
         lay = {"service": 0, "head": head, "body": body, "meta": meta, "mw": mw,
-               "own": meta_own_line, "w": bw + 2 * self.PAD, "h": h, "photo": photo}
+               "own": meta_own_line, "w": bw + 2 * self.PAD, "h": h, "photo": photo,
+               "react": rh}
         self.layout_cache[ck] = lay
         return lay
 
@@ -1172,6 +1337,24 @@ class ChatView(CanvasView):
                     cl.is_online(key))
         self.toast(g, w, h)
 
+    FILE_W = 190          # suggested width of a file card
+    FILE_H = 48           # its height, room included
+
+    def paint_file(self, g, x, y, card, bg):
+        """The card inside a document bubble: coloured type badge, name, size."""
+        name, meta, badge = card[0], card[1], card[2]
+        label = badge[0]
+        col = badge[1]
+        cw = card[3]
+        rrect(g, x, y + 2, x + cw, y + 44, 8, 0xEDF1F5)
+        g.line((x + 1, y + 2, x + cw - 1, y + 2), outline=LINE)
+        rrect(g, x + 6, y + 8, x + 36, y + 38, 5, col)
+        lab = fit(g, label, "smallb", 26)
+        g.text((x + 6 + (30 - width(g, lab, "smallb")) / 2, y + 29), lab, fill=WHITE,
+               font=font("smallb"))
+        txt(g, x + 42, y + 20, name, TEXT, "smallb", bg)
+        txt(g, x + 42, y + 36, meta, GREY, "small", bg)
+
     def paint_msg(self, g, w, y, m, lay, sel):
         if lay["service"]:
             bw = lay["w"]
@@ -1237,6 +1420,10 @@ class ChatView(CanvasView):
                 ty = ty - P + 3 + ph + 4
         first_audio = 1
         for kind, l in lay["body"]:
+            if kind == "file":
+                self.paint_file(g, x1 + P, ty, l, bg)
+                ty = ty + self.FILE_H
+                continue
             if kind == "audio":
                 if first_audio:
                     ac = BLUE
@@ -1265,14 +1452,142 @@ class ChatView(CanvasView):
             mc = TIME_OUT
         mx = x2 - P - lay["mw"]
         my = y2 - 6
+        if lay.get("react"):
+            my = y2 - 24
         g.text((mx, my), lay["meta"], fill=mc, font=font("small"))
         if m["out"]:
             read = m["id"] <= self.app.read_out(self.key_)
             tick(g, x2 - P - 13, my - 9, mc, read)
+        if lay.get("react") and m.get("reactions"):
+            rx = x1 + 5
+            ry = y2 - 19
+            k = 0
+            for r in m["reactions"]:
+                if k >= 3:
+                    break
+                lab = react_label(r)
+                wd = width(g, lab, "small") + 10
+                if rx + wd > x2 - 5:
+                    break
+                bg = 0xE8F1FC
+                if r.get("chosen"):
+                    bg = 0xCFE3FA
+                rrect(g, rx, ry, rx + wd, ry + 15, 7, bg)
+                txt(g, rx + 5, ry + 11, lab, BLUE_DARK, "small", "w")
+                rx = rx + wd + 4
+                k = k + 1
+
+
+# ---------------------------------------------------------------- reactions
+
+
+def emoji_k(e):
+    """Emoji text or UTF-8 bytes -> its sprite sheet index, or -1 if there is no
+    picture for it."""
+    t = prep(e)
+    if not t:
+        return -1
+    o = ord(t[0])
+    if SENT <= o <= SENT_END:
+        return o - SENT
+    return -1
+
+
+class ReactView(CanvasView):
+    """The reaction bar: a strip of emoji to scroll left and right, then pick.
+    app.reaction_list holds the emoticons Telegram accepts in this chat."""
+
+    STEP = 50
+    BOX = 40
+
+    def __init__(self, app, key, msg):
+        CanvasView.__init__(self, app)
+        self.key_ = key
+        self.msg = msg
+        self.emojis = []
+        for e in app.reaction_list:
+            if emoji_k(e) >= 0:
+                self.emojis.append(e)
+        if not self.emojis:
+            self.emojis = list(app.reaction_list)
+        self.slots = len(self.emojis) + 1      # the last slot removes our reaction
+        self.i = 0
+        self.scroll = 0
+
+    def count(self, e):
+        n = 0
+        for r in self.msg.get("reactions") or []:
+            if r.get("emoji") == e:
+                n = r.get("count", 0)
+        return n
+
+    def key(self, k):
+        if k == "left" or k == "4":
+            if self.i > 0:
+                self.i = self.i - 1
+            self.draw()
+            return
+        if k == "right" or k == "6":
+            if self.i < self.slots - 1:
+                self.i = self.i + 1
+            self.draw()
+            return
+        if k == "select" or k == "5" or k == "0":
+            self.choose()
+            return
+        self.draw()
+
+    def choose(self):
+        if self.i >= len(self.emojis):
+            self.app.send_reaction(self.msg, "")
+        else:
+            self.app.send_reaction(self.msg, self.emojis[self.i])
+
+    def paint(self, g, w, h):
+        g.clear(WHITE)
+        self.header(g, w, u"React", self.app.client.peer_name(self.key_))
+        y = self.HEADER_H + 20
+        g.text((12, y), u"Left / right to scroll, Select to send", fill=GREY,
+               font=font("small"))
+        top = y + 12
+        g.rectangle((0, top, w, top + 72), fill=0xF1F3F5)
+        want = self.i * self.STEP + self.STEP / 2 - w / 2
+        self.scroll = max(0, min(want, max(self.slots * self.STEP - w, 0)))
+        i = 0
+        while i < self.slots:
+            x = i * self.STEP - self.scroll + 5
+            if x > -self.STEP and x < w:
+                if i == self.i:
+                    rrect(g, x - 4, top + 8, x + self.BOX + 4, top + 64, 9, 0xCFE3FA)
+                if i < len(self.emojis):
+                    k = emoji_k(self.emojis[i])
+                    if k >= 0:
+                        big_emoji(g, x, top + 14, k)
+                    else:
+                        g.text((x + 12, top + 40), u"?", fill=TEXT, font=font("title"))
+                    n = self.count(self.emojis[i])
+                    if n:
+                        t = to_u("%d" % n)
+                        g.text((x + self.BOX - width(g, t, "small"), top + 62), t,
+                               fill=GREY, font=font("small"))
+                else:
+                    g.ellipse((x + 5, top + 17, x + 35, top + 47), fill=0xDDE3E8)
+                    g.line((x + 14, top + 26, x + 26, top + 38), outline=0x6B7680)
+                    g.line((x + 26, top + 26, x + 14, top + 38), outline=0x6B7680)
+            i = i + 1
+        ly = top + 98
+        if self.i >= len(self.emojis):
+            label = u"No reaction (remove mine)"
+        else:
+            label = u"Reaction %d of %d" % (self.i + 1, len(self.emojis))
+            n = self.count(self.emojis[self.i])
+            if n:
+                label = label + u", used %d times" % n
+        g.text((12, ly), label, fill=TEXT, font=font("text"))
+        self.toast(g, w, h)
 
 
 # ---------------------------------------------------------------- photos
-
 
 def _photo_methods():
     def paint_photo(self, g, x, y, pw, ph, info):

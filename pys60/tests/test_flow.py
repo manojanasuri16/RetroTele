@@ -170,6 +170,9 @@ def handle(f):
                  "title": "Nokia Tune", "performer": "Nokia"}]}}}]}
     if n == "messages.readHistory":
         return {"_": "messages.affectedMessages", "pts": 2, "pts_count": 1}
+    if n == "messages.setTyping":
+        state.setdefault("typing", []).append(f["action"]["_"])
+        return 1
     if n == "messages.sendMessage":
         state["sent"] = state.get("sent", 10) + 1
         if state["sent"] == 11:
@@ -299,14 +302,19 @@ print "chats:", txt
 assert txt.find(u"Alice B") >= 0 and txt.find(u"hey there") >= 0 and txt.find(u"Book club") >= 0, txt
 assert not errors, errors
 
-# tabs: Unread (1), Personal, Groups (shows the group), the Work folder, Contacts
+# tabs in the Telegram app's order: All first, then your own folders, then ours
+tabs = app.tabs()
+assert [t[0] for t in tabs][:2] == [u"All", u"Work"], [t[0] for t in tabs]
 press("right")
-assert app.list_view.tab == 1 and len(app.tab_rows(1)) == 1
-press("right"); press("right")
-groups = app.tab_rows(3)
+assert app.list_view.tab == 1 and [r["key"] for r in app.tab_rows(1)] == ["c900"], \
+    app.tab_rows(1)
+groups_i = [i for i in range(len(tabs)) if tabs[i][1] == "groups"][0]
+app.list_view.tab = groups_i
+app.tab_changed(groups_i)
+app.net.run()
+groups = app.tab_rows(groups_i)
 assert len(groups) == 1 and groups[0]["key"] == "c900", groups
 gt = screen_text(); assert gt.find(u"Cyan: ") >= 0 and gt.find(u"lol") >= 0, gt
-tabs = app.tabs()
 work = [i for i in range(len(tabs)) if tabs[i][0] == u"Work"][0]
 assert [r["key"] for r in app.tab_rows(work)] == ["c900"], app.tab_rows(work)
 contacts_tab = len(tabs) - 1
@@ -314,7 +322,18 @@ app.list_view.tab = contacts_tab; app.tab_changed(contacts_tab); app.net.run()
 ct = screen_text()
 print "contacts:", ct
 assert ct.find(u"Alice B") >= 0 and ct.find(u"online") >= 0, ct
-app.list_view.tab = 0; app.list_view.cur = 0
+app.list_view.tab = 0; app.list_view.cur = 1    # row 0 is the Archived entry
+press("select")
+assert app.screen == "chat"
+# the Archived entry opens the archived chats, and Back returns to All
+app.back_to_chats()
+app.list_view.cur = 0
+press("select")
+assert app.list_view.archived and app.screen == "chats"
+assert [r["key"] for r in app.list_view.rows()] == ["u42", "c900"], app.list_view.rows()
+press("left")
+assert not app.list_view.archived
+app.list_view.cur = 1
 press("select")
 assert app.screen == "chat"
 txt = screen_text()
@@ -691,6 +710,8 @@ def check_parts(kind, size, psize=65536):
 app.back_to_chat()
 appuifw.app.menu = []; app.update_chat_menu()
 assert u"Attach file" in [m[0] for m in appuifw.app.menu], appuifw.app.menu
+assert u"Send voice note" in [m[0] for m in appuifw.app.menu], appuifw.app.menu
+assert u"Send video note" in [m[0] for m in appuifw.app.menu], appuifw.app.menu
 assert not [e for e in errors]
 
 # 1. tiny picture -> inputFile + inputMediaUploadedPhoto, md5 of the whole file
@@ -771,6 +792,27 @@ assert m["attributes"][-1]["file_name"] == "clip.mp4"
 p6b = os.path.join(UP, "odd.3gp"); open(p6b, "wb").write("junk" * 100)
 upload_ui(p6b)
 assert up["media"][0]["media"]["attributes"] == [{"_": "documentAttributeFilename", "file_name": "odd.3gp"}]
+
+# 6b. voice note and video note: the picked recording goes out as a note
+p8 = mkfile("memo.wav", 4000)
+reset_up(); answers[:] = [1]
+app.note_mode = "voice"
+app.file_picked(p8); app.net.run()
+m = up["media"][0]["media"]
+assert m["attributes"] == [{"_": "documentAttributeAudio", "duration": 0, "voice": 1}], m
+assert app.note_mode is None
+reset_up(); answers[:] = [1]
+app.note_mode = "video"
+app.file_picked(p6); app.net.run()
+m = up["media"][0]["media"]
+aa = m["attributes"][0]
+assert aa["_"] == "documentAttributeVideo" and aa["round_message"] == 1 and aa["w"] == 320, aa
+# a non-recording is refused instead of being sent with the wrong type
+del notes[:]; reset_up()
+app.note_mode = "voice"
+app.file_picked(p2); app.net.run()
+assert notes and notes[-1].find(u"voice note") >= 0, notes
+assert not up["media"] and app.note_mode is None
 
 # 7. cancel in the middle
 sz = 5 * 65536

@@ -11,7 +11,7 @@ import sys
 import appuifw
 import e32
 
-VERSION = u"0.17.1"  # single source of truth: build_sis.sh reads this
+VERSION = u"0.19.3"  # single source of truth: build_sis.sh reads this
 APP = u"RetroTele"
 
 _LOGFILE = None
@@ -143,6 +143,7 @@ def find_schema():
 
 
 ERRORS = {
+    "REACTION_INVALID": u"This chat does not allow that reaction.",
     "FILE_PARTS_INVALID": u"The file could not be split for upload. Try again.",
     "FILE_PART_INVALID": u"Telegram rejected a part of the file. Try again.",
     "FILE_PART_TOO_BIG": u"Telegram rejected a part of the file as too big.",
@@ -334,11 +335,32 @@ class PhoneNet:
 
 def local_offset(server_now):
     """Seconds to add to a UTC timestamp to get the phone's wall clock.
-    Works whether time.time() on the phone is UTC or local."""
+
+    The phone's own clock is the authority: localtime() and gmtime() of the same
+    instant differ by exactly the zone offset (+19800 in India), so the chat
+    times follow the phone even when time.time() is UTC. time.timezone is the
+    fallback (Symbian usually leaves it at 0), and the server time is the last
+    resort.
+    """
+    try:
+        t = time.time()
+        off = int(round((calendar.timegm(time.localtime(t)) -
+                         calendar.timegm(time.gmtime(t))) / 900.0)) * 900
+        if off:
+            return off
+    except:
+        pass
+    try:
+        tz = time.timezone
+        if time.daylight and time.localtime(time.time())[8]:
+            tz = time.altzone
+        if tz:
+            return int(round(-tz / 900.0)) * 900
+    except:
+        pass
     try:
         wall = calendar.timegm(time.localtime(time.time()))
-        off = wall - server_now
-        return int(round(off / 900.0)) * 900
+        return int(round((wall - server_now) / 900.0)) * 900
     except:
         return 0
 
@@ -378,7 +400,10 @@ class App:
         self.is_online = 0
         self.busy = u""
         self.apo = None
-        self.tz = 0
+        self.tz = local_offset(time.time())   # India: +19800, from the phone's clock
+        self.note_mode = None     # None, "voice" or "video": the next pick is a note
+        self.clipboard = u""        # last text copied (PyS60 has no system clipboard)
+        self.reaction_list = list(self.REACTION_FALLBACK)
         self.hash_job = None
         self.toast_text = None
         self.toast_gen = 0
@@ -461,6 +486,7 @@ class App:
             self.busy = u""
             s = self.client.session()
             self.tz = local_offset(time.time() + s.time_offset)
+            self.log("timezone offset %d s" % self.tz)
         self.redraw()
 
     def now(self):
@@ -487,10 +513,14 @@ class App:
     def app_focus(self, fg):
         """appuifw.app.focus: 1 = in front, 0 = background. Notifications for new messages
         switch to a system popup while RetroTele is in the background."""
+        now = 0
         if fg:
-            self.focused = 1
-        else:
-            self.focused = 0
+            now = 1
+        if now != self.focused:
+            # this line in E:\retrotele_log.txt is the proof the handler runs
+            boot_log("focus: %d (screen %s, notify %d)" % (
+                now, getattr(self, "screen", "?"), self.notify_mode()))
+        self.focused = now
 
     def notify_mode(self):
         """0 off, 1 in-app banner, 2 system popup (Settings > Notifications)."""
@@ -616,6 +646,14 @@ class App:
             self.exit()
             return
         boot_log("schema layer %d" % self.schema.layer)
+        boot_log("timezone offset %d s" % self.tz)
+        try:
+            # 1 in front, 0 in the background: without this the app never knows
+            # it is behind another application, so no global note was shown
+            appuifw.app.focus = self.app_focus
+            boot_log("focus: handler installed")
+        except:
+            self.log("focus handler: " + str(sys.exc_info()[1]))
         while not self.cfg.get("api_id") or not self.cfg.get("api_hash"):
             if not self.ask_api():
                 if appuifw.query(u"RetroTele cannot work without api_id. Exit?", "query"):
@@ -840,18 +878,22 @@ class App:
     # ---------------------------------------------------------- chat list data
 
     def tabs(self):
-        tabs = list(BUILTIN_TABS)
-        have = {}
-        for t in tabs:
-            have[t[0].lower()] = 1
+        """The tab bar, in the order the Telegram app on the phone shows them:
+        All first, then your folders in the server's order, then our own tabs.
+        Archived is not a tab: it is the first row of All chats."""
+        tabs = [(u"All", "all")]
+        have = {"all": 1}
         for f in self.filters:
             title = to_u(f["title"]).strip()
             if not title:
                 title = u"Folder"
             if have.has_key(title.lower()):
                 continue
+            have[title.lower()] = 1
             tabs.append((title, ("folder", f)))
-        tabs.append((u"Archived", "archived"))
+        for t in BUILTIN_TABS:
+            if not have.has_key(t[0].lower()):
+                tabs.append(t)
         tabs.append((u"Contacts", "contacts"))
         return tabs
 
@@ -863,7 +905,82 @@ class App:
         d["online"] = r["key"][0] == "u" and self.client.is_online(r["key"])
         d["sender"] = to_u(r.get("sender", ""))
         d["preview"] = to_u(r.get("preview", ""))
+        t = self.client.typing_text(r["key"])
+        if t is not None:
+            d["preview"] = to_u(t)
         return d
+
+    def tab_match(self, spec, r):
+        """Does this chat belong in this tab? (the badges count kinds directly)"""
+        if spec == "all" or spec == "archived":
+            return 1
+        if spec == "unread":
+            return bool(r.get("unread") or r.get("mark"))
+        if spec == "personal" or spec == "groups" or spec == "channels":
+            kind = self.client.peer(r["key"])["kind"]
+            if spec == "personal":
+                return kind in ("user", "bot", "self")
+            if spec == "groups":
+                return kind in ("group", "supergroup")
+            return kind == "channel"
+        if type(spec) is types.TupleType:
+            return self.client.in_filter(spec[1], r)
+        return 1
+
+    def tab_badges(self):
+        """Unread chats per folder tab, in one pass over the chats.
+
+        The tab bar asks for all of them once per repaint: asking per tab walked
+        the chat list once per folder, which is slow on the N79.
+        """
+        tabs = self.tabs()
+        cl = self.client
+        need_kind = 0
+        fidx = []
+        i = 0
+        for t in tabs:
+            spec = t[1]
+            if spec == "personal" or spec == "groups" or spec == "channels":
+                need_kind = 1
+            elif type(spec) is types.TupleType:
+                fidx.append(i)
+            i = i + 1
+        by_kind = {}
+        hits = {}
+        n_all = 0
+        for r in self.dialogs or []:
+            if not (r.get("unread") or r.get("mark")):
+                continue
+            n_all = n_all + 1
+            if need_kind:
+                kind = cl.peer(r["key"])["kind"]
+                by_kind[kind] = by_kind.get(kind, 0) + 1
+            for i in fidx:
+                if cl.in_filter(tabs[i][1][1], r):
+                    hits[i] = hits.get(i, 0) + 1
+        out = []
+        i = 0
+        for t in tabs:
+            spec = t[1]
+            n = 0
+            if spec == "all" or spec == "unread":
+                n = n_all
+            elif spec == "personal":
+                n = by_kind.get("user", 0) + by_kind.get("bot", 0) + by_kind.get("self", 0)
+            elif spec == "groups":
+                n = by_kind.get("group", 0) + by_kind.get("supergroup", 0)
+            elif spec == "channels":
+                n = by_kind.get("channel", 0)
+            elif type(spec) is types.TupleType:
+                n = hits.get(i, 0)
+            elif spec == "archived":
+                # archived chats are not in self.dialogs
+                for r in self.archived or []:
+                    if r.get("unread"):
+                        n = n + 1
+            out.append(n)
+            i = i + 1
+        return out
 
     def tab_rows(self, i):
         tabs = self.tabs()
@@ -893,25 +1010,46 @@ class App:
                                  "unread": 0, "top": 0})
             self.rows_cache[ck] = rows
             return rows
-        if spec == "archived":
-            src = self.archived or []
+        if spec == "all":
+            ar = self.archived_row()
+            if ar is not None:
+                rows.append(ar)
         for r in src:
-            ok = 1
-            kind = cl.peer(r["key"])["kind"]
-            if spec == "unread":
-                ok = r.get("unread") or r.get("mark")
-            elif spec == "personal":
-                ok = kind in ("user", "bot", "self")
-            elif spec == "groups":
-                ok = kind in ("group", "supergroup")
-            elif spec == "channels":
-                ok = kind == "channel"
-            elif type(spec) is types.TupleType:
-                ok = cl.in_filter(spec[1], r)
-            if ok:
+            if self.tab_match(spec, r):
                 rows.append(self.decorate(r))
         self.rows_cache[ck] = rows
         return rows
+
+    def archived_row(self):
+        """The Archived entry at the top of All chats (None when nothing is archived)."""
+        rows = self.archived or []
+        if not rows:
+            return None
+        n = 0
+        for r in rows:
+            n = n + (r.get("unread") or 0)
+        label = u"%d chats" % len(rows)
+        if len(rows) == 1:
+            label = u"1 chat"
+        return {"archived_row": 1, "key": "archived", "unread": n, "mark": 0,
+                "preview": label, "sender": u"", "time": u"", "top": 0, "out": 0,
+                "muted": 0, "read_out": 0}
+
+    def archived_rows(self):
+        rows = []
+        for r in self.archived or []:
+            rows.append(self.decorate(r))
+        return rows
+
+    def archived_opened(self):
+        self.update_list_menu()
+        appuifw.app.exit_key_handler = self.list_view.close_archived
+        if self.archived is None:
+            self.client.get_dialogs(self.got_archived, self.load_failed, 25, None, 1)
+
+    def archived_closed(self):
+        self.update_list_menu()
+        appuifw.app.exit_key_handler = self.exit
 
     def dialogs_changed(self):
         self.rows_cache = {}
@@ -921,8 +1059,6 @@ class App:
         spec = self.tabs()[tab][1]
         if spec == "contacts" and self.contacts is None:
             return u"Loading contacts..."
-        if spec == "archived" and self.archived is None:
-            return u"Loading..."
         if not self.dialogs and self.busy:
             return u"Loading chats..."
         if spec == "unread":
@@ -933,10 +1069,7 @@ class App:
         spec = self.tabs()[tab][1]
         if spec == "contacts" and self.contacts is None:
             self.client.get_contacts(self.got_contacts, self.load_failed)
-        elif spec == "archived" and self.archived is None:
-            self.client.get_dialogs(self.got_archived, self.load_failed, 25, None, 1)
-        elif spec != "all" and spec != "contacts" and spec != "archived" and \
-                len(self.dialogs) < 60:
+        elif spec != "all" and spec != "contacts" and len(self.dialogs) < 60:
             self.load_more_dialogs()
         self.update_list_menu()
 
@@ -948,11 +1081,12 @@ class App:
     def got_archived(self, rows, more):
         self.archived = rows
         self.rows_cache = {}
-        self.redraw()
+        if self.screen == "chats":
+            self.redraw()
 
     def near_end(self, tab):
         spec = self.tabs()[tab][1]
-        if spec != "contacts" and spec != "archived" and self.more_dialogs:
+        if spec != "contacts" and self.more_dialogs:
             self.load_more_dialogs()
 
     def load_dialogs(self):
@@ -960,6 +1094,9 @@ class App:
         self.loading_dialogs = 1
         self.client.get_dialogs(self.got_dialogs, self.load_failed, 20)
         self.client.get_filters(self.got_filters, lambda e: None)
+        if self.archived is None:
+            # needed for the Archived row at the top of All chats
+            self.client.get_dialogs(self.got_archived, lambda e: None, 20, None, 1)
 
     def got_dialogs(self, rows, more):
         self.loading_dialogs = 0
@@ -1019,6 +1156,7 @@ class App:
     def show_chats(self):
         self.screen = "chats"
         self.chat_key = None
+        self.list_view.archived = 0
         self.set_screen("large")
         self.view = self.list_view
         self.view.show()
@@ -1032,7 +1170,8 @@ class App:
              (u"Search chats", self.search),
              (u"New chat (@username)", self.new_chat)]
         r = self.list_view.current()
-        if r is not None and r["key"][0] == "u" and self.client.peer(r["key"]).get("phone"):
+        if r is not None and not r.get("archived_row") and r["key"][0] == "u" and \
+                self.client.peer(r["key"]).get("phone"):
             m.append((u"Call " + one_line(self.client.short_name(r["key"]), 20),
                       lambda self=self, k=r["key"]: self.call_peer(k)))
         if self.upload is not None:
@@ -1050,6 +1189,9 @@ class App:
             self.open_row(r)
 
     def open_row(self, r):
+        if r.get("archived_row"):
+            self.list_view.show_archived()
+            return
         self.open_chat(r["key"])
 
     def refresh_all(self):
@@ -1094,10 +1236,10 @@ class App:
                                      self.load_failed)
 
     def mark_tab_read(self):
-        rows = self.tab_rows(self.list_view.tab)
+        rows = self.list_view.rows()
         n = 0
         for r in rows:
-            if r.get("unread") and not r.get("contact_row"):
+            if r.get("unread") and not r.get("contact_row") and not r.get("archived_row"):
                 self.client.mark_read(r["key"], r.get("top", 0))
                 d = self.dialog_for(r["key"])
                 if d is not None:
@@ -1186,6 +1328,8 @@ class App:
             m.append((u"Cancel upload", self.cancel_upload))
         elif self.client.can_write(key):
             m.append((u"Attach file", self.attach_file))
+            m.append((u"Send voice note", lambda self=self: self.attach_file("voice")))
+            m.append((u"Send video note", lambda self=self: self.attach_file("video")))
         m = m + [(u"Load older messages", self.load_older),
                  (u"Jump to latest", self.jump_latest),
                  (u"View profile", self.view_profile),
@@ -1371,9 +1515,22 @@ class App:
         if self.client.can_write(self.chat_key) and not m["service"]:
             items.append(u"Reply")
             acts.append(lambda self=self, m=m: self.compose(m["id"]))
-        if m.get("audio"):
-            items.insert(0, u"Play")
+        # media first: play or open in the phone's own player / reader
+        au = m.get("audio")
+        fi = m.get("file")
+        video = bool(fi and fi.get("mime", "")[:6] == "video/")
+        if au and tgclient.audio_playable(au):
+            items.insert(0, u"Play audio")
             acts.insert(0, lambda self=self, m=m: self.play_audio(m))
+        elif au or video:
+            label = u"Play voice message"
+            if video:
+                label = u"Play video"
+            items.insert(0, label)
+            acts.insert(0, lambda self=self, m=m: self.open_media(m))
+        elif fi:
+            items.insert(0, u"Open file")
+            acts.insert(0, lambda self=self, m=m: self.open_media(m))
         if m.get("poll"):
             items.append(u"Poll results")
             acts.append(lambda self=self, m=m: self.show_poll(m))
@@ -1386,9 +1543,23 @@ class App:
         if not m["service"]:
             items.append(u"Forward")
             acts.append(lambda self=self, m=m: self.forward_message(m))
-        if m.get("photo"):
+        if m.get("photo") and not video:
             items.append(u"View picture")
             acts.append(lambda self=self, m=m: self.view_photo(m))
+        if m.get("photo_file"):
+            items.append(u"Save picture (original)")
+            acts.append(lambda self=self, m=m: self.save_photo(m))
+        if au and tgclient.audio_playable(au):
+            items.append(u"Save audio")
+            acts.append(lambda self=self, m=m: self.save_audio(m))
+        elif fi:
+            label = u"Save file"
+            if au:
+                label = u"Save voice message"
+            elif video:
+                label = u"Save video"
+            items.append(label)
+            acts.append(lambda self=self, m=m: self.save_file(m))
         items.append(u"Read full message")
         acts.append(lambda self=self, m=m: self.show_text(m))
         if m["out"] and not m["service"] and not m["media"] and m["text"]:
@@ -1401,18 +1572,328 @@ class App:
                 m["from_key"][0] == "u":
             items.append(u"Message " + to_u(self.client.short_name(m["from_key"])))
             acts.append(lambda self=self, k=m["from_key"]: self.open_chat(k))
+        if m["text"] and not m["service"]:
+            items.append(u"Copy text")
+            acts.append(lambda self=self, m=m: self.copy_text(m))
+        if m["id"] and not m["service"]:
+            items.append(u"React")
+            acts.append(lambda self=self, m=m: self.react(m))
         i = appuifw.popup_menu(items)
         if i is not None:
             acts[i]()
 
+    def copy_text(self, m):
+        """Copy into RetroTele's own clipboard: PyS60 1.4.5 has no system one, so
+        Copy here and Paste in the message box."""
+        text = m.get("text") or u""
+        if not text:
+            appuifw.note(u"Nothing to copy.", "info")
+            return
+        self.clipboard = to_u(text)
+        try:
+            appuifw.app.set_clipboard(self.clipboard)
+        except:
+            pass                   # no system clipboard on this build
+        self.show_toast(u"Copied", u"Paste it with Options > Paste while writing")
+
+    # Telegram's default reactions as UTF-8 bytes: the phone's unicode type is
+    # UCS-2, so an astral emoji decoded here would be two bogus code points
+    REACTION_FALLBACK = ("\xf0\x9f\x91\x8d", "\xe2\x9d\xa4", "\xf0\x9f\x94\xa5",
+                         "\xf0\x9f\xa5\xb0", "\xf0\x9f\x91\x8f", "\xf0\x9f\x98\x81",
+                         "\xf0\x9f\xa4\x94", "\xf0\x9f\xa4\xaf", "\xf0\x9f\x98\xb1",
+                         "\xf0\x9f\xa4\xac", "\xf0\x9f\x98\xa2", "\xf0\x9f\x98\x8d",
+                         "\xf0\x9f\xa4\xa9", "\xf0\x9f\x98\xae", "\xf0\x9f\x98\xa1",
+                         "\xf0\x9f\x98\x85", "\xf0\x9f\xa4\xa3", "\xf0\x9f\xa5\xb2",
+                         "\xf0\x9f\xa4\x97", "\xf0\x9f\x92\xa9")
+
+    def react(self, m):
+        """Open the reaction strip for this message. Replacing the app body while a
+        popup menu is still closing crashes S60, so it is queued just after it."""
+        self.log("react: opening strip, chat %s message %s" % (self.chat_key, m["id"]))
+        self.net.later(0.25, lambda self=self, m=m: self.show_react_strip(m))
+
+    def show_react_strip(self, m):
+        try:
+            self.screen = "react"
+            self.set_screen("large")
+            v = tgui.ReactView(self, self.chat_key, m)
+            self.view = v
+            v.show()
+            appuifw.app.menu = [(u"Send reaction", v.choose), (u"Back", self.close_react)]
+            appuifw.app.exit_key_handler = self.close_react
+            self.log("react: strip shown, %d emoji" % len(v.emojis))
+        except:
+            self.log("react: " + err_text())
+            self.back_to_chat()
+            self.show_toast(u"React", u"Could not open the reaction bar")
+
+    def close_react(self):
+        self.log("react: closed without sending")
+        self.back_to_chat()
+
+    def apply_reaction(self, m, emoji):
+        """Show the reaction in the bubble at once; the server's update follows a
+        moment later and replaces these counts with the real ones."""
+        old = None
+        for r in m.get("reactions") or []:
+            if r.get("chosen"):
+                old = r
+        rs = []
+        for r in m.get("reactions") or []:
+            if r is not old:
+                rs.append(r)
+        if emoji:
+            hit = None
+            for r in rs:
+                if r.get("emoji") == emoji:
+                    hit = r
+            if hit is None:
+                rs.append({"emoji": emoji, "count": 1, "chosen": 1})
+            else:
+                hit["chosen"] = 1
+        m["reactions"] = rs
+
+    def send_reaction(self, m, emoji):
+        """Send one reaction (or remove ours, with an empty emoji)."""
+        key = self.chat_key
+        mid = m["id"]
+        if emoji:
+            self.log("react: picked %s for message %s" % (emoji, mid))
+        else:
+            self.log("react: picked remove for message %s" % mid)
+        self.apply_reaction(m, emoji)
+
+        def ok(res, self=self, m=m):
+            self.done_wait()
+            self.log("react: sent, bubble now has %d reactions" %
+                     len(m.get("reactions") or []))
+            self.back_to_chat()
+        self.status(u"Reacting...")
+        self.client.send_reaction(key, mid, emoji, ok, self.send_failed)
+
+    def typing_changed(self, key):
+        """Show the typing line at once, then redraw when it expires.
+        The chat list caches its rows, so the cache is dropped too."""
+        self.rows_cache = {}
+        self.log("typing: %s -> %s (screen %s, chat %s)" % (
+            key, self.client.typing_text(key), getattr(self, "screen", "?"), self.chat_key))
+        self.redraw_soon()
+        self.net.later(7, self.typing_expired)
+
+    def typing_expired(self):
+        self.rows_cache = {}
+        self.log("typing: cleared")
+        self.redraw_soon()
+
+    def reactions_changed(self, key, mid, rs):
+        n = -1
+        for m in self.msgs.get(key, []):
+            if m["id"] == mid:
+                n = len(rs)
+                m["reactions"] = rs
+        self.log("react: update %s message %s -> %d reactions (screen %s)" % (
+            key, mid, n, getattr(self, "screen", "?")))
+        if key == self.chat_key:
+            self.redraw_soon()
+
+    def media_path(self, info):
+        """Playback cache inside the media folder; saving uses save_path()."""
+        return self.media.folder + info["id"] + "." + info["ext"]
+
+    SAVE_FOLDERS = {"image": u"Pictures", "video": u"Videos", "audio": u"Sounds"}
+
+    def save_folder(self, kind):
+        """Pictures / Videos / Sounds / Files inside the media folder, made on demand."""
+        name = self.SAVE_FOLDERS.get(kind, u"Files")
+        base = self.media.folder + name.encode("utf-8")
+        try:
+            if not os.path.isdir(base):
+                os.mkdir(base)
+        except:
+            self.log("save folder: " + str(sys.exc_info()[1]))
+            return self.media.folder
+        return base + os.sep
+
+    def save_name(self, name, fallback):
+        """The sender's own file name, made safe for a memory card."""
+        if not name:
+            name = fallback
+        name = to_u(name)
+        try:
+            name = fileinfo.base_name(name)
+        except:
+            pass
+        out = []
+        for c in name:
+            if c in u"\\/:*?\"<>|" or ord(c) < 32:
+                out.append(u"_")
+            else:
+                out.append(c)
+        name = u"".join(out).strip()
+        if not name:
+            name = to_u(fallback)
+        try:
+            return name.encode("utf-8")
+        except:
+            return name
+
+    def save_path(self, info, kind, fallback):
+        """Where a saved file goes: Media/Pictures, Videos, Sounds or Files, with
+        the name it had. Returns (path, already_saved)."""
+        folder = self.save_folder(kind)
+        base = self.save_name(info.get("name") or "", fallback)
+        path = folder + base
+        n = 2
+        while os.path.exists(path):
+            if os.path.getsize(path) == info.get("size", 0):
+                return path, 1
+            dot = base.rfind(".")
+            if dot > 0:
+                path = folder + base[:dot] + " (" + str(n) + ")" + base[dot:]
+            else:
+                path = folder + base + " (" + str(n) + ")"
+            n = n + 1
+        return path, 0
+
+    def save_file(self, m):
+        """Save a video, document or voice note to Pictures/Videos/Sounds/Files."""
+        info = m.get("file")
+        if not info:
+            appuifw.note(u"This message has no file to save.", "info")
+            return
+        name = to_u(info.get("name") or "")
+        kind = "file"
+        if info.get("voice") or fileinfo.is_audio(name):
+            kind = "audio"
+        elif fileinfo.is_video(name):
+            kind = "video"
+        elif fileinfo.is_image(name):
+            kind = "image"
+        fallback = "file_" + str(info.get("id")) + "." + (info.get("ext") or "bin")
+        path, saved = self.save_path(info, kind, fallback)
+        if saved:
+            appuifw.note(u"Already saved:\n" + to_u(path), "info")
+            return
+        self.download_to(info, path, u"Saved")
+
+    def save_photo(self, m):
+        """Save the original-size photo, not the small preview the chat shows."""
+        info = m.get("photo_file")
+        if not info:
+            appuifw.note(u"This message has no picture to save.", "info")
+            return
+        if (info.get("name") or "") == "photo.jpg":
+            # Telegram's generic photo name: number them so two do not collide
+            info = dict(info)
+            info["name"] = ""
+        path, saved = self.save_path(info, "image",
+                                     "photo_" + str(info.get("id")) + ".jpg")
+        if saved:
+            appuifw.note(u"Already saved:\n" + to_u(path), "info")
+            return
+        self.download_to(info, path, u"Picture saved")
+
+    def save_audio(self, m):
+        """Save a music file to Media/Sounds with its own name."""
+        info = m.get("audio")
+        if not info:
+            appuifw.note(u"This message has no audio to save.", "info")
+            return
+        fallback = to_u(info.get("title") or "audio") + u"." + (info.get("ext") or "mp3")
+        path, saved = self.save_path(info, "audio", fallback)
+        if saved:
+            appuifw.note(u"Already saved:\n" + to_u(path), "info")
+            return
+        self.download_to(info, path, u"Audio saved")
+
+    def open_media(self, m):
+        """Open a video, voice note or document with the phone's own application:
+        its video or music player, PDF reader or zip manager."""
+        info = m.get("file") or m.get("audio")
+        if not info:
+            appuifw.note(u"This message has nothing to open.", "info")
+            return
+        path = self.media_path(info)
+        if os.path.exists(path):
+            self.open_in_phone(path)
+            return
+        self.download_to(info, path, u"Saved", self.open_in_phone)
+
+    def open_in_phone(self, path):
+        """Hand a saved file to the app the phone has registered for it."""
+        try:
+            lock = e32.Ao_lock()
+            h = appuifw.Content_handler(lambda: lock.signal())
+            try:
+                h.open_standalone(to_u(path))
+            except AttributeError:
+                h.open(to_u(path))
+            return
+        except:
+            self.log("open %s: %s" % (path, str(sys.exc_info()[1])))
+        appuifw.note(u"No app on this phone opens that file.\nIt is saved in:\n" +
+                     to_u(self.media.folder), "info")
+
+    def download_to(self, info, path, title, then=None):
+        """Download one file to path, with progress and a guard against saving it twice.
+        The big-download warning is the same one play_audio uses on pure-Python crypto."""
+        if not hasattr(self, "downloads"):
+            self.downloads = {}
+        if self.downloads.has_key(info["id"]):
+            appuifw.note(u"Still downloading. It finishes in the background; select the "
+                         u"message again after that.", "info")
+            return
+        size = max(info.get("size", 0), 1)
+        if not tgcrypto.NATIVE and size > 524288:
+            mb = size / 1048576.0
+            mins = int(size / 5000 / 60) + 1
+            if not appuifw.query(u"Save %.1f MB? On this phone that takes about %d min. "
+                                 u"It continues in the background and resumes if you "
+                                 u"exit." % (mb, mins), "query"):
+                return
+        have = 0
+        try:
+            have = os.path.getsize(path + ".part")
+        except:
+            pass
+        self.downloads[info["id"]] = 1
+        t0 = time.time()
+
+        def progress(done, self=self, size=size, t0=t0, have=have):
+            el = time.time() - t0
+            left = u""
+            if el > 5 and done > have:
+                rate = (done - have) / el
+                left = u", %d min left" % (int((size - done) / max(rate, 1) / 60) + 1)
+            self.status(u"Saving %d%% (%.1f/%.1f MB%s)" % (
+                min(done * 100 / size, 99), done / 1048576.0, size / 1048576.0, left))
+
+        def ok(p, self=self, info=info, title=title, then=then):
+            if self.downloads.has_key(info["id"]):
+                del self.downloads[info["id"]]
+            self.done_wait()
+            name = info.get("name") or u""
+            if name:
+                title = title + u" " + to_u(name)
+            appuifw.note(to_u(title) + u":\n" + to_u(p), "info")
+            if then is not None:
+                then(p)
+
+        def fail(e, self=self, info=info):
+            if self.downloads.has_key(info["id"]):
+                del self.downloads[info["id"]]
+            self.load_failed(e)
+        self.status(u"Saving...")
+        self.client.download(info, path, ok, fail, progress)
+
     def play_audio(self, m):
         info = m["audio"]
-        if info["voice"] or info["ext"] in ("ogg", "opus", "oga", "flac"):
+        if not tgclient.audio_playable(info):
             appuifw.note(u"This is an Opus/OGG recording, which the N79 can't play yet. "
-                         u"Support is planned together with the native crypto module.",
-                         "info")
+                         u"You can still save it to the phone: Options > "
+                         u"Save voice message.", "info")
             return
-        path = self.media.folder + info["id"] + "." + info["ext"]
+        path = self.media_path(info)
         if os.path.exists(path):
             self.open_player(info, path)
             return
@@ -1768,10 +2249,41 @@ class App:
         else:
             self.editor.set(self.drafts.get(key, u""))
         appuifw.app.body = self.editor
-        appuifw.app.menu = [(u"Send", self.send_now), (u"Cancel", self.cancel_compose)]
+        if not editing:
+            self.client.set_typing(key)
+            self.net.later(4, self.keep_typing)
+        menu = [(u"Send", self.send_now), (u"Cancel", self.cancel_compose)]
+        if self.clipboard:
+            menu.insert(0, (u"Paste", self.paste))
+        appuifw.app.menu = menu
         appuifw.app.exit_key_handler = self.cancel_compose
 
+    def keep_typing(self):
+        """messages.setTyping runs out after a few seconds, so renew it while the
+        message box stays open with text in it."""
+        if self.screen != "compose" or self.chat_key is None:
+            return
+        try:
+            text = self.editor.get().strip()
+        except:
+            text = u""
+        if text:
+            self.client.set_typing(self.chat_key)
+        self.net.later(4, self.keep_typing)
+
+    def paste(self):
+        if not self.clipboard:
+            appuifw.note(u"Nothing has been copied yet.", "info")
+            return
+        try:
+            cur = self.editor.get()
+        except:
+            cur = u""
+        self.editor.set(cur + self.clipboard)
+
     def cancel_compose(self):
+        if self.chat_key is not None:
+            self.client.set_typing(self.chat_key, 1)
         text = self.editor.get().strip()
         if getattr(self, "editing", None) is not None:
             self.editing = None
@@ -1785,6 +2297,8 @@ class App:
 
     def send_now(self):
         text = self.editor.get().replace(u"\u2029", u"\n").strip()
+        if self.chat_key is not None:
+            self.client.set_typing(self.chat_key, 1)
         if not text:
             appuifw.note(u"Type a message first.", "info")
             return
@@ -1827,13 +2341,16 @@ class App:
 
     # ---------------------------------------------------------- attach file
 
-    def attach_file(self):
+    def attach_file(self, mode=None):
+        """Pick a file and send it. mode "voice" / "video" sends it as a voice
+        note or a round video note instead of a normal file."""
         key = self.chat_key
         if key is None or not self.client.can_write(key):
             return
         if self.upload is not None:
             appuifw.note(u"An upload is already running.", "info")
             return
+        self.note_mode = mode
         start = self.cfg.get("last_dir") or ""
         try:
             start = unicode(start, "utf-8")
@@ -1857,11 +2374,14 @@ class App:
 
     def pick_cancelled(self):
         self.picker = None
+        self.note_mode = None
         self.back_to_chat()
 
     def file_picked(self, paths):
         self.picker = None
         self.back_to_chat()
+        mode = self.note_mode
+        self.note_mode = None
         if type(paths) is not type([]):
             paths = [paths]
         items = []
@@ -1883,6 +2403,17 @@ class App:
             total = total + size
         if not items:
             return
+        if mode is not None and len(items) == 1:
+            name0 = items[0][1]
+            if mode == "voice" and not fileinfo.is_audio(name0):
+                appuifw.note(u"Pick a recording (mp3, wav, amr or ogg) to send as a "
+                             u"voice note.", "info")
+                return
+            if mode == "video" and not fileinfo.is_video(name0):
+                appuifw.note(u"Pick a video (mp4 or 3gp) to send as a video note.", "info")
+                return
+        elif mode is not None:
+            mode = None          # several files: send them as ordinary files
         title = one_line(items[0][1], 30)
         if len(items) > 1:
             title = u"%d files" % len(items)
@@ -1909,7 +2440,7 @@ class App:
                                  "query"):
                 return
         self.queue = {"items": items, "i": 0, "caption": caption, "key": self.chat_key,
-                      "sent": 0}
+                      "sent": 0, "note": mode}
         self.next_upload()
 
     def next_upload(self):
@@ -1918,9 +2449,9 @@ class App:
         caption = u""
         if q["i"] == 0:
             caption = q["caption"]
-        self.start_upload(q["key"], path, name, size, caption)
+        self.start_upload(q["key"], path, name, size, caption, q.get("note"))
 
-    def start_upload(self, key, path, name, size, caption):
+    def start_upload(self, key, path, name, size, caption, note=None):
         self.upload = {"name": name, "size": size, "pct": -1, "key": key, "h": None}
         self.upload_progress(0, size)
         reply_to = 0
@@ -1928,7 +2459,7 @@ class App:
             key, path, caption, reply_to,
             self.upload_progress,
             lambda r, self=self, name=name: self.upload_done(name),
-            self.upload_failed)
+            self.upload_failed, note)
         if self.upload is not None:
             self.upload["h"] = h
         self.update_menu_for_upload()
@@ -2673,6 +3204,8 @@ class App:
             text = to_u(self.client.preview(msg))
             if self.client.is_group(key) and msg.get("from_key"):
                 text = to_u(self.client.short_name(msg["from_key"])) + u": " + text
+            self.log("notify: %s focused=%d mode=%d" % (key, self.focused,
+                                                       self.notify_mode()))
             if self.notify_mode() == 2 or not self.focused:
                 # a global note (third argument) is shown by S60 even when RetroTele is
                 # in the background, over whatever application is in front
@@ -2885,13 +3418,16 @@ class App:
                     except:
                         pass
         elif i == 7:
-            m = (self.notify_mode() + 1) % 3
-            self.cfg.set("notify", str(m))
-            self.cfg.save()
-            appuifw.note([u"Notifications off.",
-                          u"In-app banner for new messages.",
-                          u"System popup for new messages, also while RetroTele is in the "
-                          u"background."][m], "info")
+            j = appuifw.popup_menu([u"Off", u"In-app banner",
+                                    u"Popup for every message"], u"Notifications")
+            if j is not None and j >= 0:
+                self.cfg.set("notify", str(j))
+                self.cfg.save()
+                appuifw.note([u"Notifications off.",
+                              u"Small banner inside RetroTele, and a small note when it is "
+                              u"in the background.",
+                              u"A small note for every new message, in front or in the "
+                              u"background."][j], "info")
         elif i == 4:
             if self.auto_photos():
                 self.cfg.set("auto_photos", "0")

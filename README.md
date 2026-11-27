@@ -6,17 +6,21 @@ Modern Symbian Telegram apps such as Symbigram need Qt Quick Components (Symbian
 
 ![RetroTele screens](docs/screenshots.png)
 
-## Status (0.16.2)
+## Status (0.19.3)
 
-Tested on a real Nokia N79:
+Tested on a real Nokia N79 (marked *N79* below; the 0.19.3 reaction, typing, presence and saving
+changes still need a run on the phone, their log lines are in `E:\retrotele_log.txt`):
 
-- chats: log in (incl. two-step password), read, write, reply, edit, delete, forward, pictures, files, music, emoji
-- Telegram voice calls with the official apps (call library 2.7.7), both directions
-- video calls: our camera video to the other side, and the other person's video on our screen (software H.264 decoder), in either order
-- sound through the **phone speaker** or the **phone earpiece**, with the **phone's own microphone**; mic boost in calls (Settings), mute, call options
+- chats: log in (incl. two-step password), read, write, reply, edit, delete, forward, pictures, files, music, emoji (N79)
+- search in chats, polls and bot buttons (N79)
+- reactions, typing indicators, the Archived entry at the top of All, copy text (to check on 0.19.3)
+- Telegram voice calls with the official apps (call library 2.7.7), both directions (N79)
+- video calls: our camera video to the other side, and the other person's video on our screen (software H.264 decoder), in either order (N79)
+- sound through the **phone speaker** or the **phone earpiece**, with the **phone's own microphone**; mic boost in calls (Settings), mute, call options (N79)
 
 Not supported yet / known issues:
 
+- **Voice and video notes are sent from a file, not recorded in the app.** Python for S60 1.4.5 has no microphone recording API, so record with the phone's Recorder (or a video clip) first, then use *Send voice note* / *Send video note*. Incoming voice notes are Opus/OGG, which the N79 cannot decode.
 - **Bluetooth and wired headsets in calls.** They are ignored: calls always use the phone microphone and the phone speaker or earpiece (key 2 toggles); RetroTele asks the phone to keep the call audio on its own speaker/earpiece even when a headset is connected. (Modern earbuds such as the Galaxy Buds 2 Pro connect to the N79 for music (A2DP) only. An experimental Bluetooth routing exists behind a config flag, see docs/CALL-277-SPEC.md.)
 - The other person's video above 240x480 is not shown until their app steps down (usually within seconds).
 - The other person's video can be choppy at times (software decoding next to our camera and the call audio).
@@ -38,16 +42,22 @@ If it isn't on, the install fails with **"Update error"** or **"requested applic
 ## Features
 
 - Telegram-style look: blue header, round avatars (initials or the chat's photo thumbnail), unread badges, online dots, chat bubbles, read ticks
-- Tabs: **All, Unread, Personal, Groups, Channels**, your own Telegram folders, **Archived** and **Contacts**. Switch with left/right.
+- Tabs in the same order as Telegram for Android: **All**, then your own folders, then **Unread, Personal, Groups, Channels, Archived** and **Contacts**. Switch with left/right.
 - Log in with your phone number and the code Telegram sends you, including the two-step verification password
 - Read chats and load older messages automatically by scrolling up. Replies, forwards and media show as labels such as `Photo`, `Voice message 0:04` and `Sticker`.
 - Write messages and reply to a selected one. Any number key in a chat starts a message.
 - **Edit**, **delete** (for you, or for everyone) and **forward** messages
 - **Pictures:** photos, GIFs and videos show a preview in the chat (a blurry one at once, then the real picture). Select a message, then *View picture* to see it full screen. Downloads can be turned off in Settings.
-- **Music and audio files** (MP3, M4A, AAC, AMR, WAV): select the message > Play. The file downloads once to the memory card, then plays with a play/pause button and position bar (4/6 skip 10 s). Voice messages use Opus/OGG, which the N79 can't decode yet.
+- **Music and audio files** (MP3, M4A, AAC, AMR, WAV): select the message > *Play audio* (play/pause, position bar, 4/6 skip 10 s) or *Save audio* to the media folder. Voice messages use Opus/OGG, which the N79 has no decoder for, so they are handed to the phone's own player (*Play voice message*), with *Save voice message* next to it.
+- **Send files, voice notes and round video notes**: Options > Attach file picks one or more files (any type, with captions). *Send voice note* and *Send video note* send a recording or clip that is already on the phone as a voice message or a round video message.
+- **Save any file**: select a document, video, GIF or voice note and choose *Save video* / *Save file*: it downloads with progress, a big-file warning and resume. Saves stay organised and keep the sender's file name: pictures in `media\Pictures\`, videos in `media\Videos\`, music and voice notes in `media\Sounds\`, everything else in `media\Files\` (under `E:\RetroTele\` or `C:\Data\RetroTele\`). A file that is already there is not downloaded again. *Save picture (original)* saves a photo at its largest size instead of the 320 px chat preview.
+- **Open files with the phone's own apps**: *Open file* downloads a PDF/zip/anything and starts the app registered for that type; *Play video* does the same with the phone's video player.
 - **Emoji** are drawn as pictures (the phone's fonts have none), and **stickers** show as their big emoji
 - An **incoming Telegram call** pops up so you can decline it, call back by phone, or reply with a message
-- Live incoming messages with a pop-up banner (muted chats stay quiet), plus read receipts and online status
+- Live incoming messages with a small banner, or a small global note while RetroTele is in the background (muted chats stay quiet); choose Off / In-app banner / Popup in Settings. Plus read receipts and online status
+- **Typing indicator** both ways: they see `typing...` while you write; their typing shows in the chat header and in the chat-list row
+- **Reactions**: select a message > React and pick from a scrollable strip of emoji (left/right to scroll, Select to send; the last slot removes your reaction). The chips under the bubble update live
+- **Copy text** from the message menu, then *Paste* it in the message box (this Python has no system clipboard), and the folder tabs show how many chats are unread
 - Search your chats and contacts, or open any @username
 - **Call** a contact's phone number as a normal phone call
 - **Telegram voice calls** with the official Telegram apps (call library version 2.7.7), with full-duplex audio, and **send-only video** (your camera is sent to the other side, with a self-view; the other side's video isn't shown)
@@ -55,7 +65,7 @@ If it isn't on, the install fails with **"Update error"** or **"requested applic
 - **Profile** of any chat (Options > View profile, or right key in a chat): big photo, status, phone, username, bio or description, members, and Mute/Unmute
 - **Fast mode** (on by default): received data is decrypted but its SHA-256 integrity hash isn't checked, which makes loading 2-3x faster on the phone. Switch it off in Settings for the full check. Big packets are decrypted in slices so keys keep working meanwhile.
 
-There's no secret chats, file/video download or playback of GIFs or animated stickers (they are MP4/WebP/Lottie, which Python for S60 1.4.5 can't decode). Voice messages use Opus/OGG, which the N79 can't decode yet.
+There's no secret chats, no video or GIF **playback** (MP4/WebP/Lottie, which Python for S60 1.4.5 can't decode) and voice messages use Opus/OGG, which the N79 can't decode yet. Their files can still be downloaded with *Save file* / *Save voice message*, and photos at full size with *Save picture (original)*; the downloaded files are shown with their full path, since the phone has no generic "open with" API for the app to call.
 
 ### Keys
 

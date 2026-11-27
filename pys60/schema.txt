@@ -1822,6 +1822,7 @@ F 9342ca07 messages.getBotCallbackAnswer flags:# game:flags.1?true peer:InputPee
 F e470bcfd messages.getPeerDialogs peers:Vector<InputDialogPeer> =messages.PeerDialogs
 F 10ea6184 messages.sendVote peer:InputPeer msg_id:int options:Vector<bytes> =Updates
 F efd48c89 messages.getDialogFilters =messages.DialogFilters
+F d30d78d4 messages.sendReaction flags:# big:flags.1?true add_to_recent:flags.2?true peer:InputPeer msg_id:int reaction:flags.0?Vector<Reaction> =Updates
 F edd4882a updates.getState =updates.State
 F 19c2f763 updates.getDifference flags:# pts:int pts_limit:flags.1?int pts_total_limit:flags.0?int date:int qts:int qts_limit:flags.2?int =updates.Difference
 F 03173d78 updates.getChannelDifference flags:# force:flags.0?true channel:InputChannel filter:ChannelMessagesFilter pts:int limit:int =updates.ChannelDifference

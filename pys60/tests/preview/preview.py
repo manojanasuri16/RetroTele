@@ -102,6 +102,12 @@ VIDEO = {"_": "document", "id": 98, "access_hash": 1, "file_reference": "r", "da
 STICKER = {"_": "document", "id": 97, "access_hash": 1, "file_reference": "r", "date": 0, "dc_id": 2,
            "mime_type": "image/webp", "size": 1, "thumbs": [],
            "attributes": [{"_": "documentAttributeSticker", "alt": "\xf0\x9f\x98\x82", "stickerset": {"_": "inputStickerSetEmpty"}}]}
+PDF = {"_": "document", "id": 96, "access_hash": 1, "file_reference": "r", "date": 0, "dc_id": 2,
+       "mime_type": "application/pdf", "size": 2411724, "thumbs": [],
+       "attributes": [{"_": "documentAttributeFilename", "file_name": "N79 user guide.pdf"}]}
+ZIP = {"_": "document", "id": 95, "access_hash": 1, "file_reference": "r", "date": 0, "dc_id": 2,
+       "mime_type": "application/zip", "size": 880000, "thumbs": [],
+       "attributes": [{"_": "documentAttributeFilename", "file_name": "RetroTele-backup.zip"}]}
 
 HISTORY = [
     {"_": "messageService", "id": 4380, "peer_id": P("h700"), "from_id": {"_": "peerUser", "user_id": 14},
@@ -109,11 +115,18 @@ HISTORY = [
     M("h700", 4390, 13, "Anyone got Opera Mini 4.4 working on the N79? Mine keeps closing "
       "after the splash screen.", 86000),
     M("h700", 4391, 14, "Try the S60v3 signed build, the unsigned one crashes", 85000,
-      reply_to={"_": "messageReplyHeader", "reply_to_msg_id": 4390}),
+      reply_to={"_": "messageReplyHeader", "reply_to_msg_id": 4390},
+      reactions={"_": "messageReactions", "results": [
+          {"_": "reactionCount", "reaction": {"_": "reactionEmoji", "emoticon": "\xf0\x9f\x91\x8d"},
+           "count": 4, "chosen_order": 0},
+          {"_": "reactionCount", "reaction": {"_": "reactionEmoji", "emoticon": "\xf0\x9f\x94\xa5"},
+           "count": 2}]}),
     M("h700", 4395, 13, "My N79 setup", 4000, media={"_": "messageMediaPhoto", "photo": PHOTO}),
     M("h700", 4396, 7, "Running RetroTele on my N79 right now \xf0\x9f\x98\x8e\xf0\x9f\x94\xa5", 3000, 1),
     M("h700", 4397, 14, "", 2500, media={"_": "messageMediaDocument", "document": STICKER}),
     M("h700", 4399, 14, "", 2000, media={"_": "messageMediaDocument", "document": VIDEO}),
+    M("h700", 4402, 13, "", 1800, media={"_": "messageMediaDocument", "document": PDF}),
+    M("h700", 4403, 13, "", 1700, media={"_": "messageMediaDocument", "document": ZIP}),
     M("h700", 4398, 13, "Also, cool cats", 1200,
       fwd_from={"_": "messageFwdHeader", "from_name": "Cat Facts", "date": 0}),
 ]
@@ -166,7 +179,7 @@ class FakeSession:
             res = {"_": "messages.dialogFilters", "filters": [
                 {"_": "dialogFilter", "id": 3, "title": {"_": "textWithEntities", "text": "Work", "entities": []},
                  "pinned_peers": [], "include_peers": [], "exclude_peers": [], "groups": 1},
-                {"_": "dialogFilter", "id": 4, "title": {"_": "textWithEntities", "text": "Family", "entities": []},
+                {"_": "dialogFilter", "id": 4, "title": {"_": "textWithEntities", "text": u"Family \U0001F3E0", "entities": []},
                  "pinned_peers": [], "include_peers": [], "exclude_peers": []}]}
         elif n == "messages.getHistory":
             k = tgclient.input_peer_key(f["peer"], 7)
@@ -227,11 +240,24 @@ snap("1-welcome")
 app.store.set("user_id", 7); app.store.set("dc2_key", "00")
 app.client.me = 7
 app.logged_in(); app.net.run()
+# archived chats show as the first row of All (the folder-1 request returns none here)
+app.archived = [app.dialogs[1], app.dialogs[0]]
+app.rows_cache = {}
 app.list_view.cur = 1
 snap("2-chats")
-app.list_view.tab = 1; app.tab_changed(1); app.list_view.cur = 0
+app.list_view.show_archived()
+snap("2b-archived")
+app.list_view.close_archived()
+def tab_index(spec):
+    for _i, _t in enumerate(app.tabs()):
+        if _t[1] == spec:
+            return _i
+    return 0
+
+
+app.list_view.tab = tab_index("unread"); app.tab_changed(app.list_view.tab); app.list_view.cur = 0
 snap("3-unread")
-app.list_view.tab = 3; app.tab_changed(3)
+app.list_view.tab = tab_index("groups"); app.tab_changed(app.list_view.tab)
 snap("4-groups")
 tabs = app.tabs()
 app.list_view.tab = len(tabs) - 1; app.tab_changed(len(tabs) - 1); app.net.run()
@@ -242,6 +268,19 @@ app.view.draw(); app.net.run()
 snap("6-group-chat")
 app.view.sel = 4
 snap("7-selected")
+for _i, _m in enumerate(app.msgs["h700"]):
+    if _m["id"] == 4391:
+        app.view.sel = _i
+app.view.draw()
+snap("7b-reactions")
+app.screen = "react"
+app.reaction_list = list(app.REACTION_FALLBACK)
+rv = tgui.ReactView(app, "h700", app.msgs["h700"][_i])
+app.view = rv
+rv.show()
+snap("7c-react-strip")
+rv.i = 4
+snap("7d-react-strip-scrolled")
 app.back_to_chats()
 app.open_chat("u11"); app.net.run()
 app.read_outs["u11"] = 71

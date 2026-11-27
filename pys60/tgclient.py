@@ -237,10 +237,108 @@ def audio_info(doc):
     return {"id": "f%d" % doc["id"], "dc": doc.get("dc_id", 0), "size": doc.get("size", 0),
             "mime": mime, "ext": ext, "voice": a.get("voice", 0),
             "duration": int(a.get("duration", 0)), "title": title,
+            "name": name or (title + "." + ext),
             "performer": a.get("performer") or "",
             "loc": {"_": "inputDocumentFileLocation", "id": doc["id"],
                     "access_hash": doc["access_hash"], "file_reference": doc["file_reference"],
                     "thumb_size": ""}}
+
+
+FILE_EXT = {"video/mp4": "mp4", "video/3gpp": "3gp", "video/quicktime": "mov",
+            "video/x-matroska": "mkv", "video/x-msvideo": "avi", "video/webm": "webm",
+            "application/pdf": "pdf", "application/zip": "zip",
+            "application/x-rar-compressed": "rar", "application/x-7z-compressed": "7z",
+            "application/vnd.android.package-archive": "apk", "text/plain": "txt",
+            "application/json": "json", "message/rfc822": "eml",
+            "application/msword": "doc",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+            "application/vnd.ms-excel": "xls",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+            "application/vnd.ms-powerpoint": "ppt",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx"}
+
+
+def doc_name(doc):
+    for a in doc.get("attributes", []):
+        if a["_"] == "documentAttributeFilename":
+            return a.get("file_name", "")
+    return ""
+
+
+def doc_ext(doc, name=""):
+    """Extension for a saved document: the file name first, then the MIME type."""
+    if not name:
+        name = doc_name(doc)
+    dot = name.rfind(".")
+    if dot > 0 and len(name) - dot <= 6:
+        ext = name[dot + 1:].lower()
+        if ext.isalnum():
+            return ext
+    ext = FILE_EXT.get((doc or {}).get("mime_type", ""), "")
+    if not ext:
+        tail = (doc or {}).get("mime_type", "").split("/")[-1].split(";")[0].lower()
+        ok = 1
+        for c in tail:
+            if c not in "abcdefghijklmnopqrstuvwxyz0123456789":
+                ok = 0
+        if ok and len(tail) > 0 and len(tail) <= 5:
+            ext = tail
+    if not ext:
+        ext = "bin"
+    return ext
+
+
+def doc_file(doc):
+    """Download details of the whole document: video, PDF, archive, voice note.
+
+    Unlike doc_preview (a JPEG thumbnail) this is the file itself, so it can be
+    saved to the memory card. audio_info() is the same thing plus the player
+    metadata, so a music file is saved by playing it.
+    """
+    if type(doc) is not type({}) or doc.get("_") != "document":
+        return None
+    name = doc_name(doc)
+    ext = doc_ext(doc, name)
+    return {"id": "f%d" % doc["id"], "dc": doc.get("dc_id", 0),
+            "size": doc.get("size", 0), "mime": doc.get("mime_type", ""),
+            "ext": ext, "name": name or ("file." + ext),
+            "loc": {"_" : "inputDocumentFileLocation", "id": doc["id"],
+                    "access_hash": doc["access_hash"],
+                    "file_reference": doc["file_reference"], "thumb_size": ""}}
+
+
+def photo_full(ph):
+    """The original (largest) size of a photo, for saving it at full resolution."""
+    if type(ph) is not type({}) or ph.get("_") != "photo":
+        return None
+    best = None
+    for sz in ph.get("sizes") or []:
+        if sz.get("_") not in ("photoSize", "photoSizeProgressive", "photoCachedSize"):
+            continue
+        if best is None or sz.get("w", 0) * sz.get("h", 0) > best.get("w", 0) * best.get("h", 0):
+            best = sz
+    if best is None:
+        return None
+    t = best.get("type", "")
+    return {"id": "p%d%s" % (ph["id"], t), "dc": ph.get("dc_id", 0),
+            "w": best.get("w", 0), "h": best.get("h", 0), "stripped": None,
+            "badge": "", "full": 1, "ext": "jpg", "name": "photo.jpg",
+            "size": best.get("size", 0),
+            "loc": {"_" : "inputPhotoFileLocation", "id": ph["id"],
+                    "access_hash": ph["access_hash"],
+                    "file_reference": ph["file_reference"], "thumb_size": t}}
+
+
+def audio_playable(info):
+    """Can the phone play this? MP3, M4A/AAC, WAV and AMR yes; voice notes are
+    Opus/OGG and there is no Opus decoder on the N79 yet."""
+    if info is None:
+        return 0
+    if info.get("voice"):
+        return 0
+    if info.get("ext") in ("ogg", "opus", "oga", "flac"):
+        return 0
+    return 1
 
 
 BUTTON_LINKS = ("inlineButtonTypeUrl", "inlineButtonTypeUrlAuth", "inlineButtonTypeWebView")
@@ -288,6 +386,42 @@ def apply_poll_results(p, res):
         p["total"] = res.get("total_voters", 0)
 
 
+TYPING_ACTIONS = {
+    "sendMessageTypingAction": "typing...",
+    "sendMessageRecordAudioAction": "recording audio...",
+    "sendMessageRecordVideoAction": "recording video...",
+    "sendMessageRecordRoundAction": "recording a video note...",
+    "sendMessageUploadPhotoAction": "sending a photo...",
+    "sendMessageUploadVideoAction": "sending a video...",
+    "sendMessageUploadAudioAction": "sending audio...",
+    "sendMessageUploadDocumentAction": "sending a file...",
+    "sendMessageUploadRoundAction": "sending a video note...",
+    "sendMessageGeoLocationAction": "sending a location...",
+    "sendMessageChooseStickerAction": "choosing a sticker...",
+}
+
+
+def reaction_emoji(r):
+    """Reaction -> its emoji. Custom (animated) emoji have no picture here."""
+    if type(r) is not type({}) or r.get("_") != "reactionEmoji":
+        return ""
+    return r.get("emoticon", "")
+
+
+def reactions_of(mr):
+    """messageReactions -> the chips under a bubble: [{emoji, count, chosen}]."""
+    out = []
+    if type(mr) is not type({}):
+        return out
+    for r in mr.get("results", []) or []:
+        e = reaction_emoji(r.get("reaction"))
+        if not e:
+            continue
+        out.append({"emoji": e, "count": r.get("count", 0),
+                    "chosen": r.get("chosen_order") is not None})
+    return out
+
+
 def poll_info(media):
     """messageMediaPoll -> question, answers and the votes counted so far."""
     p = media.get("poll") or {}
@@ -314,6 +448,7 @@ class Client:
         self.sessions = {}
         self.main_dc = int(store.get("main_dc", "2"))
         self.peers = {}        # key -> info dict (see peer_info)
+        self.typing = {}       # key -> (expiry time, "Alice" in groups or "")
         self.cs = None         # current Telegram call
         self.dh = None         # cached (g, p) from messages.getDhConfig
         self.verify = 0        # full msg_key check on received data (slow)
@@ -622,6 +757,14 @@ class Client:
         status = u.get("status")
         if status is None and old is not None:
             status = old.get("status")
+        elif status is not None and old is not None:
+            # dialogs often carry the coarse "last seen recently" for someone whose
+            # live update already said online: keep the precise status while it lasts
+            was = old.get("status") or {}
+            now = status or {}
+            if (was.get("_") == "userStatusOnline" and was.get("expires", 0) > self.server_time()
+                    and now.get("_") != "userStatusOnline"):
+                status = old.get("status")
         info = {"name": name, "kind": kind, "hash": u.get("access_hash", 0),
                 "phone": u.get("phone") or "", "contact": u.get("contact", 0),
                 "username": u.get("username") or "", "photo": photo,
@@ -719,7 +862,10 @@ class Client:
         return self.peer(key)["kind"] in ("group", "supergroup")
 
     def status_text(self, key):
-        """Header subtitle: online / last seen / members / bot."""
+        """Header subtitle: typing / online / last seen / members / bot."""
+        t = self.typing_text(key)
+        if t is not None:
+            return t
         p = self.peer(key)
         kind = p["kind"]
         if kind == "self":
@@ -771,8 +917,8 @@ class Client:
         d = {"id": m.get("id", 0), "key": key, "out": m.get("out", 0),
              "date": m.get("date", 0), "text": "", "media": "", "reply_to": 0,
              "edited": 0, "fwd": "", "service": 0, "from": "", "from_key": None,
-             "photo": None, "sticker": None, "audio": None, "poll": None,
-             "buttons": None}
+             "photo": None, "photo_file": None, "sticker": None, "audio": None,
+             "file": None, "poll": None, "buttons": None, "reactions": []}
         if n == "messageEmpty":
             d["text"] = "Deleted message"
             d["service"] = 1
@@ -788,6 +934,7 @@ class Client:
             d["from"] = "You"
         else:
             d["from"] = self.peer_name(sender)
+        d["reactions"] = reactions_of(m.get("reactions"))
         rt = m.get("reply_to")
         if type(rt) is type({}) and rt.get("reply_to_msg_id"):
             d["reply_to"] = rt["reply_to_msg_id"]
@@ -818,11 +965,13 @@ class Client:
                     try:
                         d["photo"] = doc_preview(doc, label)
                         d["audio"] = audio_info(doc)
+                        d["file"] = doc_file(doc)
                     except:
                         pass     # unusual document: just show the label
             elif mn == "messageMediaPhoto":
                 try:
                     d["photo"] = photo_preview(media.get("photo"))
+                    d["photo_file"] = photo_full(media.get("photo"))
                 except:
                     pass
             elif mn == "messageMediaPoll":
@@ -1026,11 +1175,13 @@ class Client:
             f["reply_to"] = {"_": "inputReplyToMessage", "reply_to_msg_id": reply_to}
         self.call(f, ok, on_err)
 
-    def send_file(self, key, path, caption, reply_to, progress, on_ok, on_err):
+    def send_file(self, key, path, caption, reply_to, progress, on_ok, on_err, note=None):
         """Uploads the file at path and sends it to chat key. Returns an Upload
         (call cancel() to stop). progress(done_bytes, total_bytes) follows every
-        acknowledged part, on_ok(None) when sent, on_err(RpcError) on failure."""
-        u = Upload(self, key, path, caption, reply_to, progress, on_ok, on_err)
+        acknowledged part, on_ok(None) when sent, on_err(RpcError) on failure.
+        note: None for a normal file, "voice" or "video" to send a voice note
+        or a round video note instead."""
+        u = Upload(self, key, path, caption, reply_to, progress, on_ok, on_err, note)
         u.start()
         return u
 
@@ -1487,6 +1638,65 @@ class Client:
             f = {"_": "messages.readHistory", "peer": self.input_peer(key), "max_id": max_id}
         self.call(f, lambda r: None, lambda e: None)
 
+    def set_typing(self, key, cancel=0):
+        """Tell the other side we are typing (or stopped)."""
+        action = {"_" : "sendMessageTypingAction"}
+        if cancel:
+            action = {"_" : "sendMessageCancelAction"}
+        self.call({"_" : "messages.setTyping", "peer": self.input_peer(key),
+                   "action": action}, lambda r: None, lambda e: None)
+
+    def someone_typing(self, key, from_key, action):
+        """updateUserTyping / updateChatUserTyping / updateChannelUserTyping."""
+        n = (action or {}).get("_", "")
+        if n == "sendMessageCancelAction" or not n:
+            if self.typing.has_key(key):
+                del self.typing[key]
+                self.log("typing: %s stopped" % key)
+                self.ui.typing_changed(key)
+            return
+        label = TYPING_ACTIONS.get(n, "typing...")
+        name = ""
+        if from_key is not None and from_key != key:
+            name = self.peer_name(from_key)
+        self.typing[key] = (time.time() + 6, name, label)
+        self.log("typing: %s %s from %s -> %s" % (key, n, from_key, label))
+        self.ui.typing_changed(key)
+
+    def typing_text(self, key):
+        """Typing text for the header and the chat list, or None when it expired."""
+        e = self.typing.get(key)
+        if e is None:
+            return None
+        if e[0] < time.time():
+            del self.typing[key]
+            return None
+        label = "typing..."
+        if len(e) > 2 and e[2]:
+            label = e[2]
+        if e[1]:
+            if label == "typing...":
+                return e[1] + " is typing..."
+            return e[1] + " is " + label
+        return label
+
+    def send_reaction(self, key, mid, emoji, on_ok, on_err):
+        """React to a message; an empty emoji removes our reaction."""
+        f = {"_" : "messages.sendReaction", "peer": self.input_peer(key), "msg_id": mid,
+             "reaction": []}
+        if emoji:
+            f["reaction"] = [{"_" : "reactionEmoji", "emoticon": emoji}]
+        self.log("react: sendReaction %s %d %s" % (key, mid, emoji or "(remove)"))
+
+        def ok(res, self=self, key=key, mid=mid, on_ok=on_ok):
+            # Telegram answers with the new reaction list in the RPC result and
+            # does not push updateMessageReactions again to this session: without
+            # handling it the bubble only changes after a reload
+            self.log("react: sendReaction ok %s %d (%s)" % (key, mid, res.get("_", "?")))
+            self.handle_updates(res)
+            on_ok(res)
+        self.call(f, ok, on_err)
+
     def resolve_username(self, name, on_ok, on_err):
         def ok(res, self=self, on_ok=on_ok):
             on_ok(peer_key(res.get("peer")))
@@ -1547,6 +1757,16 @@ class Client:
 
     def one_update(self, x):
         n = x["_"]
+        # updates can arrive wrapped in a container or an updateShort even when
+        # they come inside another container: unwrap so typing and reactions
+        # are never lost
+        if n == "updateShort" and x.get("update") is not None:
+            self.one_update(x["update"])
+            return
+        if n == "updates" or n == "updatesCombined":
+            for y in x.get("updates", []):
+                self.one_update(y)
+            return
         if n == "updateNewMessage" or n == "updateNewChannelMessage":
             m = self.norm_message(x["message"])
             if m["key"] is not None:
@@ -1568,8 +1788,13 @@ class Client:
         elif n == "updateUserStatus":
             key = "u%d" % x["user_id"]
             p = self.peers.get(key)
-            if p is not None:
+            st = (x.get("status") or {}).get("_", "?")
+            if p is None:
+                self.log("presence: %s %s (chat not loaded yet)" % (key, st))
+            else:
                 p["status"] = x["status"]
+                self.log("presence: %s -> %s, header says %s" % (
+                    key, st, self.status_text(key)))
                 self.ui.peer_changed(key)
         elif n == "updateDeleteMessages":
             self.ui.messages_deleted(None, x.get("messages", []))
@@ -1588,8 +1813,17 @@ class Client:
             self.call_update(x.get("phone_call") or {})
         elif n == "updateMessagePoll":
             self.ui.poll_changed(x.get("poll_id", 0), x.get("results") or {})
-        elif n == "updateUserTyping" or n == "updateChatUserTyping":
-            pass
+        elif n == "updateUserTyping":
+            self.someone_typing("u%d" % x["user_id"], None, x.get("action"))
+        elif n == "updateChatUserTyping":
+            self.someone_typing("c%d" % x.get("chat_id", 0),
+                                peer_key(x.get("from_id")), x.get("action"))
+        elif n == "updateChannelUserTyping":
+            self.someone_typing("h%d" % x.get("channel_id", 0),
+                                peer_key(x.get("from_id")), x.get("action"))
+        elif n == "updateMessageReactions":
+            self.ui.reactions_changed(peer_key(x.get("peer")), x.get("msg_id", 0),
+                                      reactions_of(x.get("reactions")))
         elif n == "updateChannelTooLong":
             self.ui.refresh_needed()
 
@@ -1628,10 +1862,12 @@ class Upload:
     """One file upload: parts go one at a time (each acknowledged before the
     next is read, so only one part is ever in memory), then messages.sendMedia."""
 
-    def __init__(self, client, key, path, caption, reply_to, progress, on_ok, on_err):
+    def __init__(self, client, key, path, caption, reply_to, progress, on_ok, on_err,
+                 note=None):
         self.c = client
         self.key = key
         self.path = path
+        self.note = note
         self.caption = caption or ""
         if type(self.caption) is type(u""):
             self.caption = self.caption.encode("utf-8")
@@ -1771,6 +2007,19 @@ class Upload:
              "mime_type": fileinfo.mime_for(self.name)}
         if fileinfo.is_image(self.name):
             m["force_file"] = 1
+        elif self.note == "voice":
+            # a voice note: audio with the voice flag, no file name in the bubble
+            info = fileinfo.media_info(self.name, self.path)
+            attrs.append({"_": "documentAttributeAudio", "voice": 1,
+                          "duration": info["duration"]})
+        elif self.note == "video":
+            # a round video note: a square, self-destructing-looking bubble
+            info = fileinfo.media_info(self.name, self.path)
+            w = info["w"] or 240
+            h = info["h"] or 240
+            attrs.append({"_": "documentAttributeVideo",
+                          "duration": float(info["duration"]),
+                          "w": w, "h": h, "round_message": 1})
         elif fileinfo.is_audio(self.name) or fileinfo.is_video(self.name):
             info = fileinfo.media_info(self.name, self.path)
             if fileinfo.is_audio(self.name):
@@ -1784,7 +2033,8 @@ class Upload:
                 attrs.append({"_": "documentAttributeVideo",
                               "duration": float(info["duration"]),
                               "w": info["w"], "h": info["h"]})
-        attrs.append({"_": "documentAttributeFilename", "file_name": self.name})
+        if self.note is None:
+            attrs.append({"_": "documentAttributeFilename", "file_name": self.name})
         m["attributes"] = attrs
         return m
 

@@ -10,6 +10,7 @@ python3 tools/check_ints.py *.py
 "$PY2" tests/test_crypto.py
 "$PY2" tests/test_tl.py
 "$PY2" tests/test_flow.py
+"$PY2" tests/test_matrix.py
 "$PY2" tests/test_videomirror.py
 "$PY2" tests/test_callvideo.py
 if [ "$LIVE" = 1 ]; then
